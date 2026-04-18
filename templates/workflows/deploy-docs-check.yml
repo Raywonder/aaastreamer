@@ -1,0 +1,13 @@
+name: Deployment and Docs Sanity
+on:
+  workflow_call:
+  pull_request:
+jobs:
+  sanity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          for d in .github docs modules installatron scripts; do
+            if [ -d "$d" ]; then echo "found $d"; fi
+          done

@@ -1,0 +1,12 @@
+name: Build Checks
+on:
+  workflow_call:
+  push:
+    branches: [ main, master ]
+  pull_request:
+jobs:
+  docs-and-structure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: find . -maxdepth 3 | sort

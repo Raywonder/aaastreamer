@@ -1,0 +1,8 @@
+# Local machine-specific files (not shared)
+.DS_Store
+voicelink-windows-builder/.local/*
+!voicelink-windows-builder/.local/.gitkeep
+raywonder-repo-bootstrap/.local/*
+!raywonder-repo-bootstrap/.local/.gitkeep
+scripts/.local/*
+!scripts/.local/.gitkeep

@@ -1,0 +1,38 @@
+# agents.locator
+# Purpose: help tools (OpenClaw/Codex/OpenCode) quickly locate canonical governance files.
+# This file contains NO secrets.
+
+# Discovery policy: try in order; load all that exist; apply most-restrictive merge.
+
+# 1) Repo-local (closest)
+1) ./agents.md
+2) ./.claude/agents.md
+3) ./docs/agents.md
+4) apps/**/agents.md
+
+# 2) Workspace root (local dev), if present
+5) ~/dev/agents.md
+6) ~/dev/SYSTEMRULES.md
+7) ~/dev/NETWORK.md
+8) ~/dev/PORTS.md
+
+# 3) User-level global (local OS / WSL)
+9) ~/.config/devinecreations/agents/agents.md
+10) ~/.agents/agents.md
+
+# 4) Server multi-user shared (preferred server pattern)
+11) /home/<current_user>/shared/agents/agents.md
+12) /home/<current_user>/shared/agents/SYSTEMRULES.md
+13) /home/<current_user>/shared/agents/NETWORK.md
+14) /home/<current_user>/shared/agents/PORTS.md
+
+# 5) Server shared canonical (optional)
+15) /opt/devinecreations/agents/agents.md
+
+# Optional companion identity layer (try alongside agents.md when present)
+- agents.identity.md
+- codex.guardrails.md
+
+# Windows equivalents (informational)
+- %USERPROFILE%\.devinecreations\agents\agents.md
+- %APPDATA%\DevineCreations\agents\agents.md

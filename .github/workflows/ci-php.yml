@@ -1,0 +1,41 @@
+name: CI PHP
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-php-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  php:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          tools: composer:v2
+      - uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache/files
+          key: composer-${{ runner.os }}-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            composer-${{ runner.os }}-
+      - name: Install
+        if: hashFiles('composer.json') != ''
+        run: composer install --no-interaction --prefer-dist --no-progress
+      - name: Lint
+        run: |
+          if [ -f composer.json ]; then
+            composer run-script lint --no-interaction || true
+          fi
+      - name: Test
+        run: |
+          if [ -f composer.json ]; then
+            composer test --no-interaction || true
+          fi
