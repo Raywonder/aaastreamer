@@ -1,57 +1,70 @@
-# Raywonder `.GITHUB` Workflow Catalog
+# AAAStreamer
 
-This repository provides reusable GitHub Actions workflows for Raywonder/Devine Creations projects.
+AAAStreamer is a self-hosted live streaming backend designed to serve as the
+primary streaming service for VoiceLink live streaming, RTMP ingest, and
+restreaming workflows.
 
-## Governance alignment
-- Native-first build policy
-- Minimal token usage
-- Least-privilege permissions
-- Concurrency with cancel-in-progress
-- Caching for language toolchains
-- Release trigger on tags: `v*.*.*`
+The target deployment model is server-first:
 
-## Reusable workflow refs
-Use these from project repos:
+- RTMP ingest and HLS output on the hosting server
+- VoiceLink webhook callbacks for publish, end, and validation events
+- Restream fan-out to external platforms
+- Accessible web management APIs for stream status and automation
+- Primary/secondary upstream support so VoiceLink can fail over cleanly
 
-- `raywonder/.GITHUB/.github/workflows/ci.yml@main`
-- `raywonder/.GITHUB/.github/workflows/security.yml@main`
-- `raywonder/.GITHUB/.github/workflows/release.yml@main`
-- `raywonder/.GITHUB/.github/workflows/docs.yml@main`
-- `raywonder/.GITHUB/.github/workflows/ci-node.yml@main`
-- `raywonder/.GITHUB/.github/workflows/ci-php.yml@main`
-- `raywonder/.GITHUB/.github/workflows/ci-python.yml@main`
-- `raywonder/.GITHUB/.github/workflows/docker-build.yml@main`
+Default hosted domain families:
 
-## Standard secrets
-- `SERVER_HOST`
-- `SERVER_USER`
-- `SERVER_PATH`
-- `SERVER_SSH_KEY`
-- `WINDOWS_CODESIGN_PFX`
-- `WINDOWS_CODESIGN_PASSWORD`
-- `APPLE_CERT_P12`
-- `APPLE_CERT_PASSWORD`
-- `APPLE_TEAM_ID`
+- `*.voicelinkapp.app`
+- `*.voicelinkapp.dev`
+- `*.tappedin.fm`
 
-## Documentation Release Gate
+Additional custom domains can be attached later through dashboard or API
+management.
 
-Before builds or public installer replacement:
-1. update docs
-2. review docs against the actual feature set
-3. confirm docs before replacing live copies or publishing builds
+## Current scope
 
-Use first-party docs and in-app docs as the primary user-facing documentation target.
+- NGINX RTMP + HLS service configuration
+- Node control API for VoiceLink hooks
+- stream inventory and target management
+- server-ready Docker deployment
+- VoiceLink integration points for live streaming modules
 
-## VoiceLink iOS Standard Build/Upload Command
+## VoiceLink integration
 
-Use this command for repeat iOS archive + export + TestFlight upload:
+VoiceLink should treat AAAStreamer as the primary live streaming backend.
+Secondary stream targets remain optional and are configured separately.
 
-```bash
-cd /Users/admin/dev/apps/voicelink-local/swift-native/VoiceLinkiOS
-APPLE_ID_EMAIL="<apple-id>" APP_SPECIFIC_PASSWORD="<app-specific-password>" AUTO_UPLOAD=1 ./scripts/archive_ios_testflight.sh
-```
+VoiceLink-facing endpoints:
 
-Rules:
-- keep automatic signing enabled
-- keep credentials in environment variables only
-- if transporter is run manually, include `-itc_provider G5232LU4Z7`
+- `POST /api/voicelink/on_publish`
+- `POST /api/voicelink/on_done`
+- `POST /api/voicelink/validate_user`
+- `GET /api/streams`
+- `POST /api/streams/:streamId/restream/start`
+- `POST /api/streams/:streamId/restream/stop`
+
+## Project layout
+
+- [docs/AAAStreamer.md](/Users/admin/git/Raywonder/aaastreamer/docs/AAAStreamer.md)
+  Product and deployment notes moved from the original root markdown file.
+- [docker-compose.yml](/Users/admin/git/Raywonder/aaastreamer/docker-compose.yml)
+  Server deployment entrypoint.
+- [nginx/nginx.conf](/Users/admin/git/Raywonder/aaastreamer/nginx/nginx.conf)
+  RTMP ingest and HLS output.
+- [api/package.json](/Users/admin/git/Raywonder/aaastreamer/api/package.json)
+  VoiceLink control API service.
+- [api/src/server.js](/Users/admin/git/Raywonder/aaastreamer/api/src/server.js)
+  Webhook and stream-management routes.
+
+## Server deployment
+
+1. Copy `.env.example` to `.env`
+2. Set VoiceLink API and shared secret values
+3. Run `docker compose up -d --build`
+4. Point VoiceLink live stream modules at the API base URL for this service
+
+## Notes
+
+- This repository intentionally does not expose the reusable workflow catalog
+  template that was present in the seed repo.
+- The repo is trimmed down to AAAStreamer-specific files only.

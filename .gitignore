@@ -1,8 +1,12 @@
-# Local machine-specific files (not shared)
+node_modules/
+.env
+.env.local
 .DS_Store
-voicelink-windows-builder/.local/*
-!voicelink-windows-builder/.local/.gitkeep
-raywonder-repo-bootstrap/.local/*
-!raywonder-repo-bootstrap/.local/.gitkeep
-scripts/.local/*
-!scripts/.local/.gitkeep
+**/.DS_Store
+dist/
+coverage/
+*.log
+tmp/
+data/
+hls/
+recordings/

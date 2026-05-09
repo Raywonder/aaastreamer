@@ -1,0 +1,26 @@
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: ./api
+    env_file:
+      - .env
+    ports:
+      - "8095:8095"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  rtmp:
+    build:
+      context: ./nginx
+    env_file:
+      - .env
+    ports:
+      - "1935:1935"
+      - "8080:8080"
+    volumes:
+      - ./hls:/tmp/hls
+      - ./recordings:/tmp/recordings
+    restart: unless-stopped
