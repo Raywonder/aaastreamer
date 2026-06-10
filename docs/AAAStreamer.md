@@ -12,7 +12,7 @@ accessibility, automation, and scalability.
 - VoiceLink webhook integration
 - Multi-platform restream support
 - visitor watch pages
-- user dashboard with OBS server URL and stream key
+- user dashboard with streaming server URL, stream key, watch/HLS links, copy/share buttons, and stream-key rotation controls
 - admin dashboard for users, streams, and recent events
 - live visitor comments
 - accessible management APIs
@@ -24,7 +24,7 @@ accessibility, automation, and scalability.
 - `/` lists public streams for visitors.
 - `/s/:slug` opens a public watch page with HLS playback and live comments.
 - `/login` signs users and admins in.
-- `/dashboard` shows streamers their OBS settings and stream profile editor.
+- `/dashboard` shows streamers their user streaming details, copy/share controls, stream-key management, and stream profile editor.
 - `/admin` lets admins create accounts, view streams, and inspect events.
 
 ## OBS ingest
@@ -38,6 +38,8 @@ rtmp://HOSTNAME:1935/live
 ```
 
 By default, unknown stream keys are rejected. Set `AAASTREAMER_ALLOW_AD_HOC_STREAMS=true` only for open testing environments.
+
+Users can copy the server URL, stream key, watch page, and HLS playback URL from the dashboard. The dashboard can also open the platform share sheet for the public watch page when the browser supports it. Regenerating or revoking a stream key immediately replaces the stored key for that user and stream; the old key will no longer be accepted for future publishes.
 
 ## VoiceLink API Integration
 

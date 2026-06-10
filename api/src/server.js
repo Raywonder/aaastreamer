@@ -205,6 +205,10 @@ function rtmpUrlFor(streamKey) {
   return `rtmp://${rtmpHost}:1935/${rtmpAppName}`;
 }
 
+function watchUrlFor(stream) {
+  return `${publicUrl || ''}/s/${stream.slug}`;
+}
+
 function ensureStreamForUser(store, user, body = {}) {
   const existing = store.streams.find((stream) => stream.ownerId === user.id);
   if (existing) return existing;
@@ -251,6 +255,7 @@ button.secondary,.button.secondary{background:#3d4651} button.danger{background:
 table{width:100%;border-collapse:collapse;margin-top:.75rem} th,td{border-bottom:1px solid #303944;text-align:left;padding:.6rem;vertical-align:top}
 video{width:100%;max-height:65vh;background:black}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem}.muted{color:#b8c1ca}.status-live{color:#7dff9b}.status-offline,.status-ended{color:#ffbd7d}
 .comments{max-height:22rem;overflow:auto;border:1px solid #303944;padding:.75rem;background:#0c0f12}.comment{border-bottom:1px solid #28303a;padding:.45rem 0}
+.field-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.5rem;align-items:end;margin:.75rem 0}.field-row label{margin:0}.inline-form{display:inline}.notice{margin:.75rem 0;color:#d7ecff}
 </style>
 </head>
 <body><header><strong>AAAStreamer</strong><nav>${nav}<a href="/">Visitor page</a></nav></header><main>${body}</main></body></html>`;
@@ -362,9 +367,33 @@ app.get('/dashboard', (req, res) => {
   const store = readStore();
   const stream = ensureStreamForUser(store, user);
   writeStore(store);
+  const serverUrl = rtmpUrlFor(stream.streamKey);
+  const watchUrl = watchUrlFor(stream);
+  const hlsUrl = stream.hlsUrl || hlsUrlFor(stream.streamKey);
   const body = `<h1>User panel</h1>
-<section><h2>Your OBS settings</h2><p>Server URL:</p><input readonly value="${escapeHtml(rtmpUrlFor(stream.streamKey))}"><p>Stream key:</p><input readonly value="${escapeHtml(stream.streamKey)}"><p>Watch page:</p><input readonly value="${escapeHtml((publicUrl || '') + '/s/' + stream.slug)}"></section>
-<section><h2>Stream details</h2><form method="post" action="/dashboard/stream"><label>Title<input name="title" value="${escapeHtml(stream.title)}"></label><label>Description<textarea name="description" rows="4">${escapeHtml(stream.description || '')}</textarea></label><label>Visibility<select name="visibility"><option ${stream.visibility === 'public' ? 'selected' : ''}>public</option><option ${stream.visibility === 'unlisted' ? 'selected' : ''}>unlisted</option></select></label><label><input type="checkbox" name="allowComments" value="true" ${stream.allowComments ? 'checked' : ''}> Allow visitor comments</label><button type="submit">Save stream details</button></form></section>`;
+<section><h2>User streaming details</h2>
+<div class="field-row"><label>Server URL<input id="rtmpUrl" readonly value="${escapeHtml(serverUrl)}"></label><button type="button" data-copy-target="rtmpUrl">Copy URL</button></div>
+<div class="field-row"><label>Stream key<input id="streamKey" readonly value="${escapeHtml(stream.streamKey)}"></label><button type="button" data-copy-target="streamKey">Copy key</button></div>
+<div class="field-row"><label>Watch page<input id="watchUrl" readonly value="${escapeHtml(watchUrl)}"></label><button type="button" data-copy-target="watchUrl">Copy watch link</button></div>
+<div class="field-row"><label>HLS playback URL<input id="hlsUrl" readonly value="${escapeHtml(hlsUrl)}"></label><button type="button" data-copy-target="hlsUrl">Copy HLS link</button></div>
+<p><button type="button" id="shareStream">Share stream link</button></p>
+<p id="copyStatus" class="notice" role="status" aria-live="polite"></p>
+<form class="inline-form" method="post" action="/dashboard/stream/key"><input type="hidden" name="action" value="regenerate"><button type="submit">Regenerate stream key</button></form>
+<form class="inline-form" method="post" action="/dashboard/stream/key"><input type="hidden" name="action" value="revoke"><button type="submit" class="danger">Revoke current stream key</button></form>
+<p class="muted">Changing the key immediately prevents future publishes with the old key. Update OBS or any other streaming app after regenerating or revoking a key.</p>
+</section>
+<section><h2>Stream details</h2><form method="post" action="/dashboard/stream"><label>Title<input name="title" value="${escapeHtml(stream.title)}"></label><label>Description<textarea name="description" rows="4">${escapeHtml(stream.description || '')}</textarea></label><label>Visibility<select name="visibility"><option ${stream.visibility === 'public' ? 'selected' : ''}>public</option><option ${stream.visibility === 'unlisted' ? 'selected' : ''}>unlisted</option></select></label><label><input type="checkbox" name="allowComments" value="true" ${stream.allowComments ? 'checked' : ''}> Allow visitor comments</label><button type="submit">Save stream details</button></form></section>
+<script>
+const copyStatus=document.getElementById('copyStatus');
+function setCopyStatus(message){copyStatus.textContent=message;}
+async function copyText(value,label){
+  if(navigator.clipboard && window.isSecureContext){await navigator.clipboard.writeText(value);}
+  else{const area=document.createElement('textarea');area.value=value;area.setAttribute('readonly','');area.style.position='fixed';area.style.left='-9999px';document.body.appendChild(area);area.select();document.execCommand('copy');area.remove();}
+  setCopyStatus(label+' copied.');
+}
+document.querySelectorAll('[data-copy-target]').forEach((button)=>button.addEventListener('click',async()=>{const field=document.getElementById(button.dataset.copyTarget);try{await copyText(field.value,button.textContent.replace(/^Copy /,''));}catch{setCopyStatus('Copy failed. Select the field and copy it manually.');}}));
+document.getElementById('shareStream').addEventListener('click',async()=>{const url=document.getElementById('watchUrl').value;const title=${JSON.stringify(stream.title)};try{if(navigator.share){await navigator.share({title,url});setCopyStatus('Share sheet opened.');}else{await copyText(url,'Stream link');}}catch(error){if(error && error.name==='AbortError')return;try{await copyText(url,'Stream link');}catch{setCopyStatus('Sharing failed. Select the watch page field and copy it manually.');}}});
+</script>`;
   res.send(page('Dashboard', body, user));
 });
 
@@ -378,6 +407,45 @@ app.post('/dashboard/stream', requireUser, (req, res) => {
   stream.visibility = req.body.visibility === 'unlisted' ? 'unlisted' : 'public';
   stream.allowComments = req.body.allowComments === 'true';
   stream.updatedAt = nowIso();
+  writeStore(store);
+  res.redirect('/dashboard');
+});
+
+app.post('/dashboard/stream/key', requireUser, (req, res) => {
+  const action = String(req.body.action || '').toLowerCase();
+  if (!['regenerate', 'revoke'].includes(action)) {
+    res.status(400).send(page('Invalid stream key action', '<h1>Invalid stream key action</h1><p>The requested key action is not supported.</p><a class="button" href="/dashboard">Back to dashboard</a>', req.user));
+    return;
+  }
+  const store = readStore();
+  const user = store.users.find((item) => item.id === req.user.id);
+  if (!user) {
+    res.status(404).send(page('User not found', '<h1>User not found</h1>', req.user));
+    return;
+  }
+  const stream = ensureStreamForUser(store, user);
+  const previousKey = stream.streamKey;
+  const newKey = id('sk');
+  user.streamKey = newKey;
+  user.updatedAt = nowIso();
+  stream.streamKey = newKey;
+  stream.rtmpUrl = rtmpUrlFor(newKey);
+  stream.hlsUrl = null;
+  if (action === 'revoke') {
+    stream.status = 'ended';
+  }
+  stream.updatedAt = nowIso();
+  store.events.push({
+    id: id('evt'),
+    type: action === 'revoke' ? 'stream_key_revoked' : 'stream_key_regenerated',
+    payload: {
+      streamId: stream.id,
+      username: user.username,
+      previousKeySuffix: String(previousKey || '').slice(-6),
+      newKeySuffix: newKey.slice(-6)
+    },
+    createdAt: nowIso()
+  });
   writeStore(store);
   res.redirect('/dashboard');
 });
