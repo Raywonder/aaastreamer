@@ -25,9 +25,24 @@ management.
 
 - NGINX RTMP + HLS service configuration
 - Node control API for VoiceLink hooks
-- stream inventory and target management
+- built-in visitor watch pages with HLS playback
+- built-in login, user dashboard, and admin dashboard
+- account, stream key, stream inventory, and comment management
+- OBS-compatible RTMP ingest using per-user stream keys
+- live visitor comments with server-sent event updates
 - server-ready Docker deployment
 - VoiceLink integration points for live streaming modules
+
+## What users can do now
+
+Admins can log in, create users, review streams, and inspect recent publish, done, comment, and moderation events. Users can log in, copy their OBS RTMP server URL and stream key, edit their stream title and description, and open the public watch page for their stream. Visitors can open a stream page, watch HLS playback, and post live comments when comments are enabled for that stream.
+
+OBS settings for a user-created stream:
+
+```text
+Server: rtmp://your-domain.example:1935/live
+Stream key: shown in the user dashboard
+```
 
 ## VoiceLink integration
 
@@ -59,9 +74,12 @@ VoiceLink-facing endpoints:
 ## Server deployment
 
 1. Copy `.env.example` to `.env`
-2. Set VoiceLink API and shared secret values
-3. Run `docker compose up -d --build`
-4. Point VoiceLink live stream modules at the API base URL for this service
+2. Set `AAASTREAMER_ADMIN_USER` and `AAASTREAMER_ADMIN_PASSWORD` before the first run
+3. Set the public URL, RTMP host, VoiceLink API, and shared secret values
+4. Run `docker compose up -d --build`
+5. Log in at `/login`, create user accounts, and give each streamer their OBS settings from `/dashboard`
+
+The server intentionally has no hidden default admin password. If no admin env values are provided on first run, the app starts without a login account until one is created through a controlled deployment path.
 
 ## Notes
 

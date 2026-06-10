@@ -11,9 +11,33 @@ accessibility, automation, and scalability.
 - HLS output
 - VoiceLink webhook integration
 - Multi-platform restream support
+- visitor watch pages
+- user dashboard with OBS server URL and stream key
+- admin dashboard for users, streams, and recent events
+- live visitor comments
 - accessible management APIs
 - moderation-aware validation hooks
 - analytics-ready event payloads
+
+## Built-in panels
+
+- `/` lists public streams for visitors.
+- `/s/:slug` opens a public watch page with HLS playback and live comments.
+- `/login` signs users and admins in.
+- `/dashboard` shows streamers their OBS settings and stream profile editor.
+- `/admin` lets admins create accounts, view streams, and inspect events.
+
+## OBS ingest
+
+Each account has a stream key. Use the server URL shown in the user dashboard and the account stream key in OBS or another RTMP client.
+
+The default RTMP application is `live`, so the raw server URL is:
+
+```text
+rtmp://HOSTNAME:1935/live
+```
+
+By default, unknown stream keys are rejected. Set `AAASTREAMER_ALLOW_AD_HOC_STREAMS=true` only for open testing environments.
 
 ## VoiceLink API Integration
 
@@ -48,7 +72,7 @@ served. Docker deployment is included for predictable server setup.
 
 ## Future work
 
-- persistent stream inventory and analytics storage
+- database-backed analytics beyond the current JSON store
 - per-room and per-server stream policy sync from VoiceLink
 - chat relay integration
 - transcription pipeline hooks
