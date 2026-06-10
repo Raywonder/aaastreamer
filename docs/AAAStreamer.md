@@ -76,3 +76,13 @@ served. Docker deployment is included for predictable server setup.
 - per-room and per-server stream policy sync from VoiceLink
 - chat relay integration
 - transcription pipeline hooks
+
+## Deployment Domain And Update Requirements
+
+AAAStreamer installs must default to domains owned by the hosting account that runs the service. A self-hosted install should discover account-owned domains, allow the owner to choose the primary domain, and allow optional additional domains or direct IP listeners such as the assigned `64.20.x.x` address.
+
+The admin UI should expose domain/listener configuration instead of requiring manual file edits. The UI should show the API URL, visitor URL, HLS URL, and OBS RTMP ingest URL for each enabled domain/listener.
+
+Future builds must include an update checker that can watch for new versions from the configured source. The default source should be the main/cloud download location, but installs must also support a configured folder or manifest file such as a `.yaml` release manifest. The updater should download, install, relaunch the service, refresh the web UI, and show progress updates during the process.
+
+Until domain selection is implemented in the admin UI, test deployments may use explicit port-based URLs on the account's assigned server IP. Production deployments should use an account-owned domain and reverse proxy once the owner chooses the domain.
