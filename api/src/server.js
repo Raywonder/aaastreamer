@@ -196,7 +196,7 @@ function streamByKey(store, key) {
 }
 
 function hlsUrlFor(streamId) {
-  const local = `/hls/${encodeURIComponent(streamId)}.m3u8`;
+  const local = `/hls/live/${encodeURIComponent(streamId)}/index.m3u8`;
   if (!hlsBaseUrl) return local;
   return `${hlsBaseUrl}${local}`;
 }

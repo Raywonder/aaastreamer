@@ -10,3 +10,6 @@ tmp/
 data/
 hls/
 recordings/
+.env.bak-*
+auto.crt
+auto.key
