@@ -1,0 +1,34 @@
+logLevel: info
+logDestinations: [stdout]
+
+api: false
+
+playback: false
+metrics: false
+pprof: false
+
+
+rtsp: false
+rtmp: true
+rtmpAddress: :1935
+hls: true
+hlsAddress: :8096
+hlsAllowOrigins: ['*']
+hlsAlwaysRemux: true
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+hlsSegmentMaxSize: 50M
+hlsMuxerCloseAfter: 60s
+
+webrtc: false
+srt: false
+moq: false
+
+paths:
+  all:
+    source: publisher
+    runOnReady: /opt/aaastreamer/hooks/on-ready.sh
+    runOnReadyRestart: false
+    runOnNotReady: /opt/aaastreamer/hooks/on-not-ready.sh

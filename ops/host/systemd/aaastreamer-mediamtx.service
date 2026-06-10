@@ -1,0 +1,17 @@
+[Unit]
+Description=AAAStreamer MediaMTX RTMP and HLS service
+After=network-online.target aaastreamer-api-pm2.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=devinecr
+Group=devinecr
+ExecStart=/opt/aaastreamer/mediamtx /etc/aaastreamer/mediamtx.yml
+Restart=always
+RestartSec=3
+WorkingDirectory=/home/devinecr/apps/aaastreamer-worktree
+ReadWritePaths=/var/lib/aaastreamer /var/log/aaastreamer /home/devinecr/apps/aaastreamer-worktree
+
+[Install]
+WantedBy=multi-user.target
