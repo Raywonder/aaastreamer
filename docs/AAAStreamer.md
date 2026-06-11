@@ -17,6 +17,7 @@ accessibility, automation, and scalability.
 - optional user signup page controlled from the admin panel
 - multi-encoder keys per account for OBS, Ecamm Live, Audio Hijack workflows, Streamlabs, Larix, vMix, and other RTMP tools
 - stereo audio bitrate presets from 96k through 320k
+- stream latency and player buffer controls for low-latency, balanced, or stable playback
 - optional stream background images, external links, and iframe embed codes
 - live visitor comments
 - accessible management APIs
@@ -33,7 +34,7 @@ accessibility, automation, and scalability.
 - `/admin/streams` lets admins view streams and recent events.
 - `/admin/accounts` lets admins create and review users.
 - `/admin/signups` controls whether user signup is enabled and what role new accounts receive.
-- `/admin/encoders` controls default encoder and audio settings.
+- `/admin/encoders` controls default encoder, audio, latency, buffer, and HLS timing settings.
 - `/admin/updater` controls update source, maintenance mode, and the direct-host updater.
 
 ## OBS ingest
@@ -76,6 +77,13 @@ Recommended defaults:
 - 160k audio bitrate for general use
 - 192k to 320k audio bitrate for music-heavy streams
 - 2 second keyframe interval
+- low-latency mode with 2 second target latency and 4 second player buffer
+- low-latency HLS with 1 second segments, 200 ms parts, and 7 retained segments
+
+Each stream can override latency mode, target live latency, player buffer, and
+reconnect buffer from the user dashboard. Lower latency is best for interactive
+events and live chat. Higher buffer values are better for mobile visitors or
+busy networks where avoiding stalls matters more than shaving off seconds.
 
 External destination records can be stored for YouTube Live, Twitch, Facebook
 Live, LinkedIn Live, Kick, Restream.io, and custom RTMP or RTMPS services. These

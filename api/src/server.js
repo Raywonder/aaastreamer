@@ -110,7 +110,13 @@ function defaultEncoderSettings() {
     audioBitrate: '160k',
     audioChannels: 'stereo',
     sampleRate: '48000',
-    keyframeIntervalSeconds: 2
+    keyframeIntervalSeconds: 2,
+    latencyMode: 'low',
+    targetLatencySeconds: 2,
+    playerBufferSeconds: 4,
+    hlsSegmentDurationMs: 1000,
+    hlsPartDurationMs: 200,
+    hlsSegmentCount: 7
   };
 }
 
@@ -138,8 +144,24 @@ function normalizeStream(stream) {
   stream.links ||= [];
   stream.backgroundImage ||= '';
   stream.encoderSettings = { ...defaultEncoderSettings(), ...(stream.encoderSettings || {}) };
+  stream.latencySettings = { ...defaultLatencySettings(), ...(stream.latencySettings || {}) };
   stream.activeEncoders ||= {};
   return stream;
+}
+
+function defaultLatencySettings() {
+  return {
+    mode: 'low',
+    targetLatencySeconds: 2,
+    playerBufferSeconds: 4,
+    reconnectBufferSeconds: 8
+  };
+}
+
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, number));
 }
 
 function bootstrapAdmin() {
@@ -289,6 +311,7 @@ function ensureStreamForUser(store, user, body = {}) {
   if (existing) return normalizeStream(existing);
   const createdAt = nowIso();
   const title = body.title || `${user.displayName || user.username}'s Stream`;
+  const encoderDefaults = store.settings?.encoderDefaults || defaultEncoderSettings();
   const stream = {
     id: id('str'),
     ownerId: user.id,
@@ -301,11 +324,17 @@ function ensureStreamForUser(store, user, body = {}) {
     allowComments: true,
     hlsUrl: null,
     rtmpUrl: rtmpUrlFor(user.streamKey),
-    encoderSettings: defaultEncoderSettings(),
+    encoderSettings: { ...defaultEncoderSettings(), ...encoderDefaults },
     encoderKeys: [],
     destinations: [],
     links: [],
     backgroundImage: '',
+    latencySettings: {
+      ...defaultLatencySettings(),
+      mode: encoderDefaults.latencyMode || 'low',
+      targetLatencySeconds: encoderDefaults.targetLatencySeconds || 2,
+      playerBufferSeconds: encoderDefaults.playerBufferSeconds || 4
+    },
     activeEncoders: {},
     createdAt,
     updatedAt: createdAt
@@ -452,7 +481,7 @@ app.get('/s/:slug', (req, res) => {
   const heroStyle = stream.backgroundImage ? ` style="background-image:linear-gradient(rgba(16,19,22,.78),rgba(16,19,22,.78)),url('${escapeHtml(stream.backgroundImage)}')"` : '';
   const body = `<div class="public-hero"${heroStyle}><h1>${escapeHtml(stream.title)}</h1>
 <p>Status: <strong class="status-${escapeHtml(stream.status)}">${escapeHtml(stream.status)}</strong></p>
-<video controls playsinline src="${escapeHtml(stream.hlsUrl || hlsUrlFor(stream.streamKey))}"></video></div>
+<video controls playsinline preload="metadata" data-target-latency="${escapeHtml(stream.latencySettings?.targetLatencySeconds || 2)}" data-player-buffer="${escapeHtml(stream.latencySettings?.playerBufferSeconds || 4)}" src="${escapeHtml(stream.hlsUrl || hlsUrlFor(stream.streamKey))}"></video></div>
 <section><h2>About this stream</h2><p>${escapeHtml(stream.description || 'No description yet.')}</p><h3>Links</h3>${renderLinks(stream.links)}</section>
 <section><h2>Live comments</h2><div id="comments" class="comments">${comments.map(renderComment).join('')}</div>
 ${stream.allowComments ? `<form id="commentForm"><label>Name<input name="authorName" required></label><label>Comment<textarea name="message" required rows="3"></textarea></label><button type="submit">Post comment</button></form>` : '<p>Comments are disabled for this stream.</p>'}</section>
@@ -474,7 +503,7 @@ app.get('/embed/:slug', (req, res) => {
     res.status(404).send('Stream not found');
     return;
   }
-  res.send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(stream.title)}</title><style>html,body{margin:0;height:100%;background:#000}video{width:100%;height:100%;object-fit:contain;background:#000}</style></head><body><video controls playsinline autoplay src="${escapeHtml(stream.hlsUrl || hlsUrlFor(stream.streamKey))}"></video></body></html>`);
+  res.send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(stream.title)}</title><style>html,body{margin:0;height:100%;background:#000}video{width:100%;height:100%;object-fit:contain;background:#000}</style></head><body><video controls playsinline autoplay preload="metadata" data-target-latency="${escapeHtml(stream.latencySettings?.targetLatencySeconds || 2)}" data-player-buffer="${escapeHtml(stream.latencySettings?.playerBufferSeconds || 4)}" src="${escapeHtml(stream.hlsUrl || hlsUrlFor(stream.streamKey))}"></video></body></html>`);
 });
 
 function renderComment(comment) {
@@ -602,6 +631,7 @@ app.get('/dashboard', (req, res) => {
 <table><tr><th>Name</th><th>Platform</th><th>Status</th><th>RTMP URL</th><th>Action</th></tr>${destinationRows || '<tr><td colspan="5">No destinations configured yet.</td></tr>'}</table>
 <form method="post" action="/dashboard/destinations"><label>Platform<select id="platformPreset" name="platform">${presetOptions}</select></label><label>Name<input name="name" placeholder="Main YouTube channel"></label><label>RTMP or RTMPS URL<input id="destinationRtmpUrl" name="rtmpUrl"></label><label>Stream key<input name="streamKey"></label><label><input type="checkbox" name="enabled" value="true" checked> Enable destination</label><button type="submit">Add destination</button></form>
 <p class="muted">Popular destination dashboards: ${platformPresets.filter((preset) => preset.url).map((preset) => `<a href="${escapeHtml(preset.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(preset.name)}</a>`).join(', ')}.</p></section>
+<section><h2>Latency and buffer</h2><form method="post" action="/dashboard/latency"><label>Stream latency mode<select name="mode"><option value="low" ${stream.latencySettings.mode === 'low' ? 'selected' : ''}>Low latency</option><option value="balanced" ${stream.latencySettings.mode === 'balanced' ? 'selected' : ''}>Balanced</option><option value="stable" ${stream.latencySettings.mode === 'stable' ? 'selected' : ''}>Most stable</option></select></label><label>Target live latency, seconds<input name="targetLatencySeconds" type="number" min="1" max="30" step="0.5" value="${escapeHtml(stream.latencySettings.targetLatencySeconds)}"></label><label>Player buffer, seconds<input name="playerBufferSeconds" type="number" min="1" max="60" step="0.5" value="${escapeHtml(stream.latencySettings.playerBufferSeconds)}"></label><label>Reconnect buffer, seconds<input name="reconnectBufferSeconds" type="number" min="2" max="120" step="1" value="${escapeHtml(stream.latencySettings.reconnectBufferSeconds)}"></label><button type="submit">Save latency settings</button></form><p class="muted">Lower latency reacts faster but needs a stable network. Higher buffer values reduce stalls for mobile or busy networks.</p></section>
 <section><h2>Stream profile</h2><form method="post" action="/dashboard/stream"><label>Title<input name="title" value="${escapeHtml(stream.title)}"></label><label>Description<textarea name="description" rows="4">${escapeHtml(stream.description || '')}</textarea></label><label>Links, one per line. Use Label|https://example.com<textarea name="links" rows="4">${escapeHtml(linksText(stream.links))}</textarea></label><label>Optional photo background<input id="backgroundUpload" type="file" accept="image/png,image/jpeg,image/webp"></label><input type="hidden" id="backgroundImageData" name="backgroundImageData"><label><input type="checkbox" name="removeBackground" value="true"> Remove current background</label><label>Visibility<select name="visibility"><option ${stream.visibility === 'public' ? 'selected' : ''}>public</option><option ${stream.visibility === 'unlisted' ? 'selected' : ''}>unlisted</option></select></label><label><input type="checkbox" name="allowComments" value="true" ${stream.allowComments ? 'checked' : ''}> Allow visitor comments</label><button type="submit">Save stream profile</button></form></section>
 <script>
 const copyStatus=document.getElementById('copyStatus');
@@ -701,6 +731,23 @@ app.post('/dashboard/destinations/:destinationId/delete', requireUser, (req, res
   res.redirect('/dashboard');
 });
 
+app.post('/dashboard/latency', requireUser, (req, res) => {
+  const store = readStore();
+  const user = store.users.find((item) => item.id === req.user.id);
+  const stream = ensureStreamForUser(store, user);
+  const mode = ['low', 'balanced', 'stable'].includes(req.body.mode) ? req.body.mode : 'low';
+  stream.latencySettings = {
+    mode,
+    targetLatencySeconds: clampNumber(req.body.targetLatencySeconds, 1, 30, mode === 'stable' ? 8 : 2),
+    playerBufferSeconds: clampNumber(req.body.playerBufferSeconds, 1, 60, mode === 'stable' ? 12 : 4),
+    reconnectBufferSeconds: clampNumber(req.body.reconnectBufferSeconds, 2, 120, 8)
+  };
+  stream.updatedAt = nowIso();
+  store.events.push({ id: id('evt'), type: 'stream_latency_updated', payload: { streamId: stream.id, latencySettings: stream.latencySettings }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/dashboard');
+});
+
 app.post('/dashboard/stream/key', requireUser, (req, res) => {
   const action = String(req.body.action || '').toLowerCase();
   if (!['regenerate', 'revoke'].includes(action)) {
@@ -786,7 +833,7 @@ app.get('/admin/encoders', requireAdmin, (req, res) => {
   const store = readStore();
   const settings = store.settings.encoderDefaults;
   const body = `<h1>Admin panel</h1>${adminTabs('encoders')}
-<section><h2>Default encoder settings</h2><form method="post" action="/admin/encoders"><label>Video bitrate<input name="videoBitrate" value="${escapeHtml(settings.videoBitrate)}"></label><label>Audio bitrate<select name="audioBitrate">${audioBitrates.map((rate) => `<option ${rate === settings.audioBitrate ? 'selected' : ''}>${rate}</option>`).join('')}</select></label><label>Audio channels<select name="audioChannels"><option value="stereo" selected>stereo</option></select></label><label>Sample rate<select name="sampleRate"><option ${settings.sampleRate === '44100' ? 'selected' : ''}>44100</option><option ${settings.sampleRate !== '44100' ? 'selected' : ''}>48000</option></select></label><label>Keyframe interval seconds<input name="keyframeIntervalSeconds" type="number" min="1" max="10" value="${escapeHtml(settings.keyframeIntervalSeconds)}"></label><button type="submit">Save encoder defaults</button></form></section>
+<section><h2>Default encoder settings</h2><form method="post" action="/admin/encoders"><label>Video bitrate<input name="videoBitrate" value="${escapeHtml(settings.videoBitrate)}"></label><label>Audio bitrate<select name="audioBitrate">${audioBitrates.map((rate) => `<option ${rate === settings.audioBitrate ? 'selected' : ''}>${rate}</option>`).join('')}</select></label><label>Audio channels<select name="audioChannels"><option value="stereo" selected>stereo</option></select></label><label>Sample rate<select name="sampleRate"><option ${settings.sampleRate === '44100' ? 'selected' : ''}>44100</option><option ${settings.sampleRate !== '44100' ? 'selected' : ''}>48000</option></select></label><label>Keyframe interval seconds<input name="keyframeIntervalSeconds" type="number" min="1" max="10" value="${escapeHtml(settings.keyframeIntervalSeconds)}"></label><label>Default latency mode<select name="latencyMode"><option value="low" ${settings.latencyMode === 'low' ? 'selected' : ''}>Low latency</option><option value="balanced" ${settings.latencyMode === 'balanced' ? 'selected' : ''}>Balanced</option><option value="stable" ${settings.latencyMode === 'stable' ? 'selected' : ''}>Most stable</option></select></label><label>Target live latency, seconds<input name="targetLatencySeconds" type="number" min="1" max="30" step="0.5" value="${escapeHtml(settings.targetLatencySeconds)}"></label><label>Player buffer, seconds<input name="playerBufferSeconds" type="number" min="1" max="60" step="0.5" value="${escapeHtml(settings.playerBufferSeconds)}"></label><label>HLS segment duration, ms<input name="hlsSegmentDurationMs" type="number" min="500" max="6000" step="100" value="${escapeHtml(settings.hlsSegmentDurationMs)}"></label><label>HLS part duration, ms<input name="hlsPartDurationMs" type="number" min="100" max="1000" step="50" value="${escapeHtml(settings.hlsPartDurationMs)}"></label><label>HLS segment count<input name="hlsSegmentCount" type="number" min="3" max="20" step="1" value="${escapeHtml(settings.hlsSegmentCount)}"></label><button type="submit">Save encoder defaults</button></form></section>
 <section><h2>Recommended software</h2><ul><li>OBS Studio: Custom streaming server, RTMP URL, stream key.</li><li>Ecamm Live: RTMP destination with the same server URL and stream key.</li><li>Audio Hijack: pair with a supported broadcaster or virtual camera/RTMP workflow for audio-only or mixed sessions.</li><li>Larix Broadcaster and Streamlabs: custom RTMP destination using the same details.</li></ul></section>`;
   res.send(page('Admin encoder settings', body, req.user));
 });
@@ -798,7 +845,13 @@ app.post('/admin/encoders', requireAdmin, (req, res) => {
     audioBitrate: audioBitrates.includes(req.body.audioBitrate) ? req.body.audioBitrate : '160k',
     audioChannels: 'stereo',
     sampleRate: req.body.sampleRate === '44100' ? '44100' : '48000',
-    keyframeIntervalSeconds: Math.max(1, Math.min(10, Number(req.body.keyframeIntervalSeconds || 2)))
+    keyframeIntervalSeconds: clampNumber(req.body.keyframeIntervalSeconds, 1, 10, 2),
+    latencyMode: ['low', 'balanced', 'stable'].includes(req.body.latencyMode) ? req.body.latencyMode : 'low',
+    targetLatencySeconds: clampNumber(req.body.targetLatencySeconds, 1, 30, 2),
+    playerBufferSeconds: clampNumber(req.body.playerBufferSeconds, 1, 60, 4),
+    hlsSegmentDurationMs: clampNumber(req.body.hlsSegmentDurationMs, 500, 6000, 1000),
+    hlsPartDurationMs: clampNumber(req.body.hlsPartDurationMs, 100, 1000, 200),
+    hlsSegmentCount: clampNumber(req.body.hlsSegmentCount, 3, 20, 7)
   };
   store.events.push({ id: id('evt'), type: 'encoder_defaults_updated', payload: store.settings.encoderDefaults, createdAt: nowIso() });
   writeStore(store);
@@ -989,6 +1042,12 @@ app.post('/api/voicelink/on_publish', (req, res) => {
   stream.activeEncoders[key] = {
     encoderName: encoder?.name || 'Ad hoc encoder',
     hlsUrl: hlsUrlFor(key),
+    latencySettings: stream.latencySettings,
+    encoderSettings: {
+      audioBitrate: encoder?.audioBitrate || stream.encoderSettings?.audioBitrate,
+      audioChannels: encoder?.audioChannels || 'stereo',
+      sampleRate: encoder?.sampleRate || stream.encoderSettings?.sampleRate
+    },
     startedAt: nowIso(),
     status: 'live'
   };
