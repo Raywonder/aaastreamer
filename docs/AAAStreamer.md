@@ -13,7 +13,11 @@ accessibility, automation, and scalability.
 - Multi-platform restream support
 - visitor watch pages
 - user dashboard with streaming server URL, stream key, watch/HLS links, copy/share buttons, and stream-key rotation controls
-- admin dashboard for users, streams, and recent events
+- separate admin pages for streams, accounts, signup settings, encoder defaults, and updates
+- optional user signup page controlled from the admin panel
+- multi-encoder keys per account for OBS, Ecamm Live, Audio Hijack workflows, Streamlabs, Larix, vMix, and other RTMP tools
+- stereo audio bitrate presets from 96k through 320k
+- optional stream background images, external links, and iframe embed codes
 - live visitor comments
 - accessible management APIs
 - moderation-aware validation hooks
@@ -24,12 +28,19 @@ accessibility, automation, and scalability.
 - `/` lists public streams for visitors.
 - `/s/:slug` opens a public watch page with HLS playback and live comments.
 - `/login` signs users and admins in.
-- `/dashboard` shows streamers their user streaming details, copy/share controls, stream-key management, and stream profile editor.
-- `/admin` lets admins create accounts, view streams, and inspect events.
+- `/dashboard` shows streamers their connection details, copy/share controls, stream-key management, encoder keys, destination records, embed code, and stream profile editor.
+- `/signup` allows new users to create accounts when signups are enabled.
+- `/admin/streams` lets admins view streams and recent events.
+- `/admin/accounts` lets admins create and review users.
+- `/admin/signups` controls whether user signup is enabled and what role new accounts receive.
+- `/admin/encoders` controls default encoder and audio settings.
+- `/admin/updater` controls update source, maintenance mode, and the direct-host updater.
 
 ## OBS ingest
 
-Each account has a stream key. Use the server URL shown in the user dashboard and the account stream key in OBS or another RTMP client.
+Each account has a primary stream key and can create additional encoder keys.
+Use the server URL shown in the user dashboard and the selected stream key in
+OBS or another RTMP client.
 
 The default RTMP application is `live`, so the raw server URL is:
 
@@ -40,6 +51,36 @@ rtmp://HOSTNAME:1935/live
 By default, unknown stream keys are rejected. Set `AAASTREAMER_ALLOW_AD_HOC_STREAMS=true` only for open testing environments.
 
 Users can copy the server URL, stream key, watch page, and HLS playback URL from the dashboard. The dashboard can also open the platform share sheet for the public watch page when the browser supports it. Regenerating or revoking a stream key immediately replaces the stored key for that user and stream; the old key will no longer be accepted for future publishes.
+
+The dashboard also provides an iframe embed code for the public stream page and
+lets streamers add an optional background image and useful links for the watch
+page. Background images are stored as small data images in the local JSON store,
+so use compressed web images rather than large originals.
+
+## Encoder and destination setup
+
+AAAStreamer accepts RTMP publishes from common tools including:
+
+- OBS Studio
+- Ecamm Live
+- Audio Hijack paired with an RTMP-capable broadcaster
+- Streamlabs
+- Larix Broadcaster
+- vMix
+- any custom RTMP or RTMPS encoder
+
+Recommended defaults:
+
+- Stereo audio
+- 48 kHz sample rate
+- 160k audio bitrate for general use
+- 192k to 320k audio bitrate for music-heavy streams
+- 2 second keyframe interval
+
+External destination records can be stored for YouTube Live, Twitch, Facebook
+Live, LinkedIn Live, Kick, Restream.io, and custom RTMP or RTMPS services. These
+records keep platform connection details organized with the account. Streamers
+can still publish directly from OBS, Ecamm, or other software to those platforms.
 
 ## VoiceLink API Integration
 
@@ -64,8 +105,14 @@ Restream targets can include:
 - YouTube Live
 - Twitch
 - Facebook Live
-- Substack Live
+- LinkedIn Live
+- Kick
+- Restream.io
 - custom RTMP endpoints
+
+The account dashboard stores external destination connection records now. Future
+fan-out workers can consume the same records to push one AAAStreamer input to
+multiple destinations.
 
 ## Hosting model
 
@@ -85,6 +132,13 @@ AAAStreamer installs must default to domains owned by the hosting account that r
 
 The admin UI should expose domain/listener configuration instead of requiring manual file edits. The UI should show the API URL, visitor URL, HLS URL, and OBS RTMP ingest URL for each enabled domain/listener.
 
-Future builds must include an update checker that can watch for new versions from the configured source. The default source should be the main/cloud download location, but installs must also support a configured folder or manifest file such as a `.yaml` release manifest. The updater should download, install, relaunch the service, refresh the web UI, and show progress updates during the process.
+The admin updater page allows admins to set the update manifest URL, enable or
+disable maintenance mode, and start the direct-host update process. The included
+`scripts/update-aaastreamer.sh` script enables maintenance mode, pulls the latest
+repository changes, installs API dependencies, checks server syntax, restarts the
+PM2 service, and disables maintenance mode again.
 
-Until domain selection is implemented in the admin UI, test deployments may use explicit port-based URLs on the account's assigned server IP. Production deployments should use an account-owned domain and reverse proxy once the owner chooses the domain.
+Until domain selection is implemented in the admin UI, test deployments may use
+explicit port-based URLs on the account's assigned server IP. Production
+deployments should use an account-owned domain and reverse proxy once the owner
+chooses the domain.

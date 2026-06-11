@@ -28,6 +28,11 @@ management.
 - built-in visitor watch pages with HLS playback
 - built-in login, user dashboard, and admin dashboard
 - account, stream key, stream inventory, and comment management
+- admin-controlled user signups
+- multi-encoder keys and stereo audio bitrate presets
+- external destination records for YouTube Live, Twitch, Facebook Live, LinkedIn Live, Kick, Restream.io, and custom RTMP services
+- optional stream background images, stream links, and iframe embed codes
+- direct-host updater with temporary maintenance mode
 - OBS-compatible RTMP ingest using per-user stream keys
 - live visitor comments with server-sent event updates
 - server-ready Docker deployment
@@ -35,7 +40,7 @@ management.
 
 ## What users can do now
 
-Admins can log in, create users, review streams, and inspect recent publish, done, comment, and moderation events. Users can log in, copy their OBS RTMP server URL and stream key, edit their stream title and description, and open the public watch page for their stream. Visitors can open a stream page, watch HLS playback, and post live comments when comments are enabled for that stream.
+Admins can log in, create users, enable or disable public signups, review streams, set encoder defaults, and inspect recent publish, done, comment, and moderation events. Users can log in, copy their RTMP server URL and stream key, add extra encoder keys, save external destination details, edit the stream profile, add a background image and links, copy embed code, and open the public watch page for their stream. Visitors can open a stream page, watch HLS playback, and post live comments when comments are enabled for that stream.
 
 OBS settings for a user-created stream:
 
