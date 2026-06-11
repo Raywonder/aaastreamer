@@ -29,6 +29,9 @@ management.
 - built-in login, user dashboard, and admin dashboard
 - account, stream key, stream inventory, and comment management
 - admin-controlled user signups
+- admin-controlled platform naming, sub-heading, slogan, tagline, and description
+- enhanced guest and logged-in user stream messaging with reactions
+- optional donation or payment support boxes configured by admins or stream owners, hidden from visitors by default
 - multi-encoder keys and stereo audio bitrate presets
 - stream latency, player buffer, and HLS timing controls
 - external destination records for YouTube Live, Twitch, Facebook Live, LinkedIn Live, Kick, Restream.io, and custom RTMP services
@@ -41,7 +44,7 @@ management.
 
 ## What users can do now
 
-Admins can log in, create users, enable or disable public signups, review streams, set encoder defaults, tune latency and buffer defaults, and inspect recent publish, done, comment, and moderation events. Users can log in, copy their RTMP server URL and stream key, add extra encoder keys, save external destination details, tune stream latency and playback buffer, edit the stream profile, add a background image and links, copy embed code, and open the public watch page for their stream. Visitors can open a stream page, watch HLS playback, and post live comments when comments are enabled for that stream.
+Admins can log in, create users, enable or disable public signups, set platform branding, configure guest and logged-in messaging, set support/payment-box defaults, review streams, set encoder defaults, tune latency and buffer defaults, and inspect recent publish, done, comment, and moderation events. Users can log in, copy their RTMP server URL and stream key, add extra encoder keys, save external destination details, tune stream latency and playback buffer, edit the stream profile, add a background image and links, configure an optional support/payment box, copy embed code, and open the public watch page for their stream. Visitors can open a stream page, watch HLS playback, post live comments when messaging is enabled, and react to visible messages when reactions are enabled.
 
 OBS settings for a user-created stream:
 

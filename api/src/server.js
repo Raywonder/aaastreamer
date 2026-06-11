@@ -82,7 +82,10 @@ function ensureDataStore() {
       sessions: [],
       settings: {
         siteName: process.env.AAASTREAMER_SITE_NAME || 'AAAStreamer',
+        platformBranding: defaultPlatformBranding(),
         visitorCommentsEnabled: true,
+        messaging: defaultMessagingSettings(),
+        supportDefaults: defaultSupportSettings(),
         registrationsEnabled: process.env.AAASTREAMER_REGISTRATION_ENABLED === 'true',
         registrationDefaultRole: 'user',
         encoderDefaults: defaultEncoderSettings(),
@@ -120,6 +123,38 @@ function defaultEncoderSettings() {
   };
 }
 
+function defaultPlatformBranding() {
+  const platformName = process.env.AAASTREAMER_SITE_NAME || 'AAAStreamer';
+  return {
+    platformName,
+    subheading: 'Accessible live streaming for creators, communities, and events.',
+    slogan: '',
+    tagline: '',
+    description: 'Watch live streams, join the conversation, and support creators from one accessible streaming page.'
+  };
+}
+
+function defaultMessagingSettings() {
+  return {
+    visitorMessagesEnabled: true,
+    loggedInUserMessagesEnabled: true,
+    reactionsEnabled: true,
+    requireNameForGuests: true,
+    maxMessageLength: 1000
+  };
+}
+
+function defaultSupportSettings() {
+  return {
+    enabled: false,
+    showOnWatchPage: false,
+    placement: 'after',
+    title: 'Support this stream',
+    description: '',
+    embedHtml: ''
+  };
+}
+
 function normalizeStore(store) {
   store.users ||= [];
   store.streams ||= [];
@@ -128,7 +163,15 @@ function normalizeStore(store) {
   store.sessions ||= [];
   store.settings ||= {};
   store.settings.siteName ||= process.env.AAASTREAMER_SITE_NAME || 'AAAStreamer';
+  if (!store.settings.platformBranding) {
+    store.settings.platformBranding = { ...defaultPlatformBranding(), platformName: store.settings.siteName };
+  } else {
+    store.settings.platformBranding = { ...defaultPlatformBranding(), ...store.settings.platformBranding };
+  }
+  store.settings.siteName = store.settings.platformBranding.platformName || store.settings.siteName;
   store.settings.visitorCommentsEnabled ??= true;
+  store.settings.messaging = { ...defaultMessagingSettings(), ...(store.settings.messaging || {}) };
+  store.settings.supportDefaults = { ...defaultSupportSettings(), ...(store.settings.supportDefaults || {}) };
   store.settings.registrationsEnabled ??= process.env.AAASTREAMER_REGISTRATION_ENABLED === 'true';
   store.settings.registrationDefaultRole ||= 'user';
   store.settings.encoderDefaults = { ...defaultEncoderSettings(), ...(store.settings.encoderDefaults || {}) };
@@ -145,6 +188,7 @@ function normalizeStream(stream) {
   stream.backgroundImage ||= '';
   stream.encoderSettings = { ...defaultEncoderSettings(), ...(stream.encoderSettings || {}) };
   stream.latencySettings = { ...defaultLatencySettings(), ...(stream.latencySettings || {}) };
+  stream.support = { ...defaultSupportSettings(), ...(stream.support || {}) };
   stream.activeEncoders ||= {};
   return stream;
 }
@@ -329,6 +373,7 @@ function ensureStreamForUser(store, user, body = {}) {
     destinations: [],
     links: [],
     backgroundImage: '',
+    support: { ...store.settings?.supportDefaults },
     latencySettings: {
       ...defaultLatencySettings(),
       mode: encoderDefaults.latencyMode || 'low',
@@ -346,6 +391,7 @@ function ensureStreamForUser(store, user, body = {}) {
 
 function page(title, body, user = null) {
   const settings = readStore().settings;
+  const branding = settings.platformBranding || defaultPlatformBranding();
   const nav = user
     ? `<a href="/dashboard">Dashboard</a><a href="/admin">Admin</a><form method="post" action="/logout"><button type="submit">Log out</button></form>`
     : `<a href="/login">Log in</a>${settings.registrationsEnabled ? '<a href="/signup">Sign up</a>' : ''}`;
@@ -367,10 +413,11 @@ button.secondary,.button.secondary{background:#3d4651} button.danger{background:
 table{width:100%;border-collapse:collapse;margin-top:.75rem} th,td{border-bottom:1px solid #303944;text-align:left;padding:.6rem;vertical-align:top}
 video{width:100%;max-height:65vh;background:black}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem}.muted{color:#b8c1ca}.status-live{color:#7dff9b}.status-offline,.status-ended{color:#ffbd7d}
 .comments{max-height:22rem;overflow:auto;border:1px solid #303944;padding:.75rem;background:#0c0f12}.comment{border-bottom:1px solid #28303a;padding:.45rem 0}
+.reaction-list{display:flex;gap:.4rem;flex-wrap:wrap;margin:.35rem 0}.reaction-list button{padding:.3rem .45rem;background:#26313d}.message-meta{font-size:.92rem;color:#b8c1ca}.support-box iframe{max-width:100%;border:0}.support-box form{margin:.5rem 0}
 .field-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.5rem;align-items:end;margin:.75rem 0}.field-row label{margin:0}.inline-form{display:inline}.notice{margin:.75rem 0;color:#d7ecff}.link-list{padding-left:1.25rem}.public-hero{background-size:cover;background-position:center;border-radius:6px;padding:1rem;border:1px solid #303944}
 </style>
 </head>
-<body><header><strong>AAAStreamer</strong><nav>${nav}<a href="/">Visitor page</a></nav></header><main>${body}</main></body></html>`;
+<body><header><div><strong>${escapeHtml(branding.platformName || settings.siteName || 'AAAStreamer')}</strong>${branding.tagline ? `<div class="muted">${escapeHtml(branding.tagline)}</div>` : ''}</div><nav>${nav}<a href="/">Visitor page</a></nav></header><main>${body}</main></body></html>`;
 }
 
 function escapeHtml(value) {
@@ -404,10 +451,27 @@ function adminTabs(active) {
     ['streams', 'Streams'],
     ['accounts', 'Accounts'],
     ['signups', 'Signups'],
+    ['branding', 'Branding'],
+    ['messaging', 'Messaging'],
     ['encoders', 'Encoder settings'],
     ['updater', 'Updater']
   ];
   return `<nav class="tabs" aria-label="Admin sections">${tabs.map(([idValue, label]) => `<a href="/admin/${idValue}" ${active === idValue ? 'aria-current="page"' : ''}>${label}</a>`).join('')}</nav>`;
+}
+
+function sanitizeSupportEmbed(raw) {
+  return String(raw || '')
+    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '')
+    .replace(/\son[a-z]+\s*=\s*(['"]).*?\1/gi, '')
+    .slice(0, 12000);
+}
+
+function renderSupportBox(stream, context = 'watch') {
+  const support = { ...defaultSupportSettings(), ...(stream.support || {}) };
+  if (!support.enabled) return '';
+  if (context === 'watch' && !support.showOnWatchPage) return '';
+  const embed = sanitizeSupportEmbed(support.embedHtml);
+  return `<section class="support-box"><h2>${escapeHtml(support.title || 'Support this stream')}</h2>${support.description ? `<p>${escapeHtml(support.description)}</p>` : ''}${embed ? `<div>${embed}</div>` : '<p class="muted">Support details are not configured yet.</p>'}</section>`;
 }
 
 function embedCodeFor(stream) {
@@ -463,9 +527,12 @@ app.use((req, res, next) => {
 
 app.get('/', (req, res) => {
   const store = readStore();
+  const branding = store.settings.platformBranding || defaultPlatformBranding();
   const streams = store.streams.filter((stream) => stream.visibility === 'public');
-  const body = `<h1>${escapeHtml(store.settings.siteName)}</h1>
-<p class="muted">Live streams and upcoming channels.</p>
+  const body = `<h1>${escapeHtml(branding.platformName || store.settings.siteName)}</h1>
+${branding.subheading ? `<p class="muted">${escapeHtml(branding.subheading)}</p>` : ''}
+${branding.slogan ? `<p><strong>${escapeHtml(branding.slogan)}</strong></p>` : ''}
+${branding.description ? `<section><p>${escapeHtml(branding.description)}</p></section>` : ''}
 <div class="grid">${streams.map((stream) => `<section><h2>${escapeHtml(stream.title)}</h2><p>Status: <strong class="status-${escapeHtml(stream.status)}">${escapeHtml(stream.status)}</strong></p><p>${escapeHtml(stream.description || '')}</p><a class="button" href="/s/${escapeHtml(stream.slug)}">Watch stream</a></section>`).join('') || '<section>No public streams yet.</section>'}</div>`;
   res.send(page(store.settings.siteName, body, currentUser(req)));
 });
@@ -478,22 +545,33 @@ app.get('/s/:slug', (req, res) => {
     return;
   }
   const comments = store.comments.filter((comment) => comment.streamId === stream.id).slice(-100);
+  const messaging = store.settings.messaging || defaultMessagingSettings();
+  const user = currentUser(req);
+  const canComment = stream.allowComments && (
+    user ? messaging.loggedInUserMessagesEnabled : messaging.visitorMessagesEnabled
+  );
   const heroStyle = stream.backgroundImage ? ` style="background-image:linear-gradient(rgba(16,19,22,.78),rgba(16,19,22,.78)),url('${escapeHtml(stream.backgroundImage)}')"` : '';
+  const supportBefore = stream.support?.placement === 'before' ? renderSupportBox(stream, 'watch') : '';
+  const supportDuring = stream.support?.placement === 'during' ? renderSupportBox(stream, 'watch') : '';
+  const supportAfter = !['before', 'during'].includes(stream.support?.placement) ? renderSupportBox(stream, 'watch') : '';
   const body = `<div class="public-hero"${heroStyle}><h1>${escapeHtml(stream.title)}</h1>
 <p>Status: <strong class="status-${escapeHtml(stream.status)}">${escapeHtml(stream.status)}</strong></p>
-<video controls playsinline preload="metadata" data-target-latency="${escapeHtml(stream.latencySettings?.targetLatencySeconds || 2)}" data-player-buffer="${escapeHtml(stream.latencySettings?.playerBufferSeconds || 4)}" src="${escapeHtml(stream.hlsUrl || hlsUrlFor(stream.streamKey))}"></video></div>
+${supportBefore}
+<video controls playsinline preload="metadata" data-target-latency="${escapeHtml(stream.latencySettings?.targetLatencySeconds || 2)}" data-player-buffer="${escapeHtml(stream.latencySettings?.playerBufferSeconds || 4)}" src="${escapeHtml(stream.hlsUrl || hlsUrlFor(stream.streamKey))}"></video>${supportDuring}</div>
 <section><h2>About this stream</h2><p>${escapeHtml(stream.description || 'No description yet.')}</p><h3>Links</h3>${renderLinks(stream.links)}</section>
-<section><h2>Live comments</h2><div id="comments" class="comments">${comments.map(renderComment).join('')}</div>
-${stream.allowComments ? `<form id="commentForm"><label>Name<input name="authorName" required></label><label>Comment<textarea name="message" required rows="3"></textarea></label><button type="submit">Post comment</button></form>` : '<p>Comments are disabled for this stream.</p>'}</section>
+<section><h2>Live comments</h2><div id="comments" class="comments">${comments.map((comment) => renderComment(comment, messaging.reactionsEnabled)).join('')}</div>
+${canComment ? `<form id="commentForm"><label>Name<input name="authorName" ${user ? `value="${escapeHtml(user.displayName || user.username)}" readonly` : 'required'}></label><label>Message type<select name="messageType"><option value="comment">Comment</option><option value="question">Question</option><option value="support">Support message</option></select></label><label>Comment<textarea name="message" required rows="3" maxlength="${escapeHtml(messaging.maxMessageLength || 1000)}"></textarea></label><button type="submit">Post comment</button></form>` : '<p>Comments are disabled for this stream or account type.</p>'}</section>
+${supportAfter}
 <script>
 const streamId=${JSON.stringify(stream.id)};
 const comments=document.getElementById('comments');
 const events=new EventSource('/events');
-events.onmessage=(event)=>{try{const msg=JSON.parse(event.data); if(msg.type==='comment' && msg.payload.streamId===streamId){comments.insertAdjacentHTML('beforeend', msg.payload.html); comments.scrollTop=comments.scrollHeight;}}catch{}};
+events.onmessage=(event)=>{try{const msg=JSON.parse(event.data); if(msg.type==='comment' && msg.payload.streamId===streamId){comments.insertAdjacentHTML('beforeend', msg.payload.html); comments.scrollTop=comments.scrollHeight;} if(msg.type==='reaction' && msg.payload.streamId===streamId){const target=document.getElementById('reactions-'+msg.payload.commentId); if(target) target.innerHTML=msg.payload.html;}}catch{}};
 const form=document.getElementById('commentForm');
 if(form){form.addEventListener('submit', async (e)=>{e.preventDefault(); const data=Object.fromEntries(new FormData(form)); const res=await fetch('/api/streams/'+streamId+'/comments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}); if(res.ok) form.reset();});}
+document.addEventListener('click', async (event)=>{const button=event.target.closest('[data-reaction]'); if(!button)return; const commentId=button.dataset.commentId; const reaction=button.dataset.reaction; const res=await fetch('/api/comments/'+commentId+'/reactions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({streamId,reaction})}); if(res.ok){const data=await res.json(); const target=document.getElementById('reactions-'+commentId); if(target) target.innerHTML=data.html;}});
 </script>`;
-  res.send(page(stream.title, body, currentUser(req)));
+  res.send(page(stream.title, body, user));
 });
 
 app.get('/embed/:slug', (req, res) => {
@@ -506,8 +584,13 @@ app.get('/embed/:slug', (req, res) => {
   res.send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(stream.title)}</title><style>html,body{margin:0;height:100%;background:#000}video{width:100%;height:100%;object-fit:contain;background:#000}</style></head><body><video controls playsinline autoplay preload="metadata" data-target-latency="${escapeHtml(stream.latencySettings?.targetLatencySeconds || 2)}" data-player-buffer="${escapeHtml(stream.latencySettings?.playerBufferSeconds || 4)}" src="${escapeHtml(stream.hlsUrl || hlsUrlFor(stream.streamKey))}"></video></body></html>`);
 });
 
-function renderComment(comment) {
-  return `<div class="comment"><strong>${escapeHtml(comment.authorName)}</strong> <span class="muted">${escapeHtml(comment.createdAt)}</span><p>${escapeHtml(comment.message)}</p></div>`;
+function renderComment(comment, reactionsEnabled = true) {
+  const reactions = comment.reactions || {};
+  const reactionButtons = ['like', 'love', 'applause', 'thanks'].map((reaction) => {
+    const count = Number(reactions[reaction] || 0);
+    return `<button type="button" data-comment-id="${escapeHtml(comment.id)}" data-reaction="${reaction}">${escapeHtml(reaction)}${count ? ` ${count}` : ''}</button>`;
+  }).join('');
+  return `<div class="comment" id="comment-${escapeHtml(comment.id)}"><strong>${escapeHtml(comment.authorName)}</strong> <span class="message-meta">${escapeHtml(comment.authorType || 'guest')} ${escapeHtml(comment.messageType || 'comment')} ${escapeHtml(comment.createdAt)}</span><p>${escapeHtml(comment.message)}</p>${reactionsEnabled ? `<div id="reactions-${escapeHtml(comment.id)}" class="reaction-list">${reactionButtons}</div>` : ''}</div>`;
 }
 
 app.get('/login', (req, res) => {
@@ -633,6 +716,7 @@ app.get('/dashboard', (req, res) => {
 <p class="muted">Popular destination dashboards: ${platformPresets.filter((preset) => preset.url).map((preset) => `<a href="${escapeHtml(preset.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(preset.name)}</a>`).join(', ')}.</p></section>
 <section><h2>Latency and buffer</h2><form method="post" action="/dashboard/latency"><label>Stream latency mode<select name="mode"><option value="low" ${stream.latencySettings.mode === 'low' ? 'selected' : ''}>Low latency</option><option value="balanced" ${stream.latencySettings.mode === 'balanced' ? 'selected' : ''}>Balanced</option><option value="stable" ${stream.latencySettings.mode === 'stable' ? 'selected' : ''}>Most stable</option></select></label><label>Target live latency, seconds<input name="targetLatencySeconds" type="number" min="1" max="30" step="0.5" value="${escapeHtml(stream.latencySettings.targetLatencySeconds)}"></label><label>Player buffer, seconds<input name="playerBufferSeconds" type="number" min="1" max="60" step="0.5" value="${escapeHtml(stream.latencySettings.playerBufferSeconds)}"></label><label>Reconnect buffer, seconds<input name="reconnectBufferSeconds" type="number" min="2" max="120" step="1" value="${escapeHtml(stream.latencySettings.reconnectBufferSeconds)}"></label><button type="submit">Save latency settings</button></form><p class="muted">Lower latency reacts faster but needs a stable network. Higher buffer values reduce stalls for mobile or busy networks.</p></section>
 <section><h2>Stream profile</h2><form method="post" action="/dashboard/stream"><label>Title<input name="title" value="${escapeHtml(stream.title)}"></label><label>Description<textarea name="description" rows="4">${escapeHtml(stream.description || '')}</textarea></label><label>Links, one per line. Use Label|https://example.com<textarea name="links" rows="4">${escapeHtml(linksText(stream.links))}</textarea></label><label>Optional photo background<input id="backgroundUpload" type="file" accept="image/png,image/jpeg,image/webp"></label><input type="hidden" id="backgroundImageData" name="backgroundImageData"><label><input type="checkbox" name="removeBackground" value="true"> Remove current background</label><label>Visibility<select name="visibility"><option ${stream.visibility === 'public' ? 'selected' : ''}>public</option><option ${stream.visibility === 'unlisted' ? 'selected' : ''}>unlisted</option></select></label><label><input type="checkbox" name="allowComments" value="true" ${stream.allowComments ? 'checked' : ''}> Allow visitor comments</label><button type="submit">Save stream profile</button></form></section>
+<section><h2>Support and payment box</h2><p class="muted">Add trusted donation or payment embed HTML for this stream. It is not shown to visitors unless both enabled and shown on the watch page are checked.</p><form method="post" action="/dashboard/support"><label><input type="checkbox" name="enabled" value="true" ${stream.support?.enabled ? 'checked' : ''}> Enable support box for this stream</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${stream.support?.showOnWatchPage ? 'checked' : ''}> Show support box on the visitor watch page</label><label>Placement<select name="placement"><option value="before" ${stream.support?.placement === 'before' ? 'selected' : ''}>Before stream player</option><option value="during" ${stream.support?.placement === 'during' ? 'selected' : ''}>Beside stream player area</option><option value="after" ${!['before', 'during'].includes(stream.support?.placement) ? 'selected' : ''}>After comments and stream details</option></select></label><label>Heading<input name="title" value="${escapeHtml(stream.support?.title || 'Support this stream')}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(stream.support?.description || '')}</textarea></label><label>Payment or donation embed HTML<textarea name="embedHtml" rows="6">${escapeHtml(stream.support?.embedHtml || '')}</textarea></label><button type="submit">Save support settings</button></form>${renderSupportBox(stream, 'dashboard')}</section>
 <script>
 const copyStatus=document.getElementById('copyStatus');
 function setCopyStatus(message){copyStatus.textContent=message;}
@@ -748,6 +832,24 @@ app.post('/dashboard/latency', requireUser, (req, res) => {
   res.redirect('/dashboard');
 });
 
+app.post('/dashboard/support', requireUser, (req, res) => {
+  const store = readStore();
+  const user = store.users.find((item) => item.id === req.user.id);
+  const stream = ensureStreamForUser(store, user);
+  stream.support = {
+    enabled: req.body.enabled === 'true',
+    showOnWatchPage: req.body.showOnWatchPage === 'true',
+    placement: ['before', 'during', 'after'].includes(req.body.placement) ? req.body.placement : 'after',
+    title: String(req.body.title || 'Support this stream').trim().slice(0, 120) || 'Support this stream',
+    description: String(req.body.description || '').trim().slice(0, 1000),
+    embedHtml: sanitizeSupportEmbed(req.body.embedHtml)
+  };
+  stream.updatedAt = nowIso();
+  store.events.push({ id: id('evt'), type: 'stream_support_updated', payload: { streamId: stream.id, enabled: stream.support.enabled, showOnWatchPage: stream.support.showOnWatchPage }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/dashboard');
+});
+
 app.post('/dashboard/stream/key', requireUser, (req, res) => {
   const action = String(req.body.action || '').toLowerCase();
   if (!['regenerate', 'revoke'].includes(action)) {
@@ -827,6 +929,69 @@ app.post('/admin/signups', requireAdmin, (req, res) => {
   store.events.push({ id: id('evt'), type: 'signup_settings_updated', payload: { enabled: store.settings.registrationsEnabled, defaultRole: store.settings.registrationDefaultRole }, createdAt: nowIso() });
   writeStore(store);
   res.redirect('/admin/signups');
+});
+
+app.get('/admin/branding', requireAdmin, (req, res) => {
+  const store = readStore();
+  const branding = store.settings.platformBranding || defaultPlatformBranding();
+  const body = `<h1>Admin panel</h1>${adminTabs('branding')}
+<section><h2>Platform naming</h2><p class="muted">These fields control the default install name, front page heading, header name, sub-heading, slogan, tagline, and platform description. They can be changed at any time.</p><form method="post" action="/admin/branding"><label>Platform name<input name="platformName" value="${escapeHtml(branding.platformName)}" required></label><label>Sub-heading<input name="subheading" value="${escapeHtml(branding.subheading)}"></label><label>Slogan<input name="slogan" value="${escapeHtml(branding.slogan)}"></label><label>Tagline<input name="tagline" value="${escapeHtml(branding.tagline)}"></label><label>Description<textarea name="description" rows="5">${escapeHtml(branding.description)}</textarea></label><button type="submit">Save platform branding</button></form></section>`;
+  res.send(page('Admin branding', body, req.user));
+});
+
+app.post('/admin/branding', requireAdmin, (req, res) => {
+  const store = readStore();
+  const platformName = String(req.body.platformName || 'AAAStreamer').trim().slice(0, 120) || 'AAAStreamer';
+  store.settings.platformBranding = {
+    platformName,
+    subheading: String(req.body.subheading || '').trim().slice(0, 180),
+    slogan: String(req.body.slogan || '').trim().slice(0, 180),
+    tagline: String(req.body.tagline || '').trim().slice(0, 180),
+    description: String(req.body.description || '').trim().slice(0, 1500)
+  };
+  store.settings.siteName = platformName;
+  store.events.push({ id: id('evt'), type: 'platform_branding_updated', payload: { platformName }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/admin/branding');
+});
+
+app.get('/admin/messaging', requireAdmin, (req, res) => {
+  const store = readStore();
+  const messaging = store.settings.messaging || defaultMessagingSettings();
+  const support = store.settings.supportDefaults || defaultSupportSettings();
+  const body = `<h1>Admin panel</h1>${adminTabs('messaging')}
+<section><h2>Messaging features</h2><form method="post" action="/admin/messaging"><label><input type="checkbox" name="visitorMessagesEnabled" value="true" ${messaging.visitorMessagesEnabled ? 'checked' : ''}> Guests can post stream messages when comments are enabled on the stream</label><label><input type="checkbox" name="loggedInUserMessagesEnabled" value="true" ${messaging.loggedInUserMessagesEnabled ? 'checked' : ''}> Logged-in users can post stream messages</label><label><input type="checkbox" name="reactionsEnabled" value="true" ${messaging.reactionsEnabled ? 'checked' : ''}> Enable reactions on messages</label><label><input type="checkbox" name="requireNameForGuests" value="true" ${messaging.requireNameForGuests ? 'checked' : ''}> Require guests to enter a display name</label><label>Maximum message length<input type="number" min="100" max="5000" step="50" name="maxMessageLength" value="${escapeHtml(messaging.maxMessageLength)}"></label><button type="submit">Save messaging settings</button></form></section>
+<section><h2>Default support and payment box</h2><p class="muted">These defaults are copied into new streams. Existing stream owners can change their own support box from the user dashboard. Visitor pages do not show support boxes unless the stream owner or admin enables visitor display.</p><form method="post" action="/admin/support-defaults"><label><input type="checkbox" name="enabled" value="true" ${support.enabled ? 'checked' : ''}> Enable support box by default for new streams</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${support.showOnWatchPage ? 'checked' : ''}> Show support boxes to visitors by default</label><label>Default placement<select name="placement"><option value="before" ${support.placement === 'before' ? 'selected' : ''}>Before stream player</option><option value="during" ${support.placement === 'during' ? 'selected' : ''}>Beside stream player area</option><option value="after" ${!['before', 'during'].includes(support.placement) ? 'selected' : ''}>After comments and stream details</option></select></label><label>Heading<input name="title" value="${escapeHtml(support.title)}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(support.description)}</textarea></label><label>Payment or donation embed HTML<textarea name="embedHtml" rows="6">${escapeHtml(support.embedHtml)}</textarea></label><button type="submit">Save support defaults</button></form></section>`;
+  res.send(page('Admin messaging', body, req.user));
+});
+
+app.post('/admin/messaging', requireAdmin, (req, res) => {
+  const store = readStore();
+  store.settings.messaging = {
+    visitorMessagesEnabled: req.body.visitorMessagesEnabled === 'true',
+    loggedInUserMessagesEnabled: req.body.loggedInUserMessagesEnabled === 'true',
+    reactionsEnabled: req.body.reactionsEnabled === 'true',
+    requireNameForGuests: req.body.requireNameForGuests === 'true',
+    maxMessageLength: clampNumber(req.body.maxMessageLength, 100, 5000, 1000)
+  };
+  store.events.push({ id: id('evt'), type: 'messaging_settings_updated', payload: store.settings.messaging, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/admin/messaging');
+});
+
+app.post('/admin/support-defaults', requireAdmin, (req, res) => {
+  const store = readStore();
+  store.settings.supportDefaults = {
+    enabled: req.body.enabled === 'true',
+    showOnWatchPage: req.body.showOnWatchPage === 'true',
+    placement: ['before', 'during', 'after'].includes(req.body.placement) ? req.body.placement : 'after',
+    title: String(req.body.title || 'Support this stream').trim().slice(0, 120) || 'Support this stream',
+    description: String(req.body.description || '').trim().slice(0, 1000),
+    embedHtml: sanitizeSupportEmbed(req.body.embedHtml)
+  };
+  store.events.push({ id: id('evt'), type: 'support_defaults_updated', payload: { enabled: store.settings.supportDefaults.enabled, showOnWatchPage: store.settings.supportDefaults.showOnWatchPage }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/admin/messaging');
 });
 
 app.get('/admin/encoders', requireAdmin, (req, res) => {
@@ -970,18 +1135,76 @@ app.post('/api/streams/:streamId/comments', (req, res) => {
     res.status(403).json({ success: false, error: 'Comments are disabled' });
     return;
   }
-  const message = String(req.body.message || '').trim().slice(0, 1000);
-  const authorName = String(req.body.authorName || 'Visitor').trim().slice(0, 80);
+  const user = currentUser(req);
+  const messaging = store.settings.messaging || defaultMessagingSettings();
+  if (user && !messaging.loggedInUserMessagesEnabled) {
+    res.status(403).json({ success: false, error: 'Messages are disabled for logged-in users' });
+    return;
+  }
+  if (!user && !messaging.visitorMessagesEnabled) {
+    res.status(403).json({ success: false, error: 'Guest messages are disabled' });
+    return;
+  }
+  const maxLength = clampNumber(messaging.maxMessageLength, 100, 5000, 1000);
+  const message = String(req.body.message || '').trim().slice(0, maxLength);
+  const authorName = user
+    ? String(user.displayName || user.username).trim().slice(0, 80)
+    : String(req.body.authorName || (messaging.requireNameForGuests ? '' : 'Visitor')).trim().slice(0, 80);
+  const messageType = ['comment', 'question', 'support'].includes(req.body.messageType) ? req.body.messageType : 'comment';
+  if (!user && messaging.requireNameForGuests && !authorName) {
+    res.status(400).json({ success: false, error: 'Name is required' });
+    return;
+  }
   if (!message) {
     res.status(400).json({ success: false, error: 'Comment is required' });
     return;
   }
-  const comment = { id: id('cmt'), streamId: stream.id, authorName, message, status: 'visible', createdAt: nowIso() };
+  const comment = {
+    id: id('cmt'),
+    streamId: stream.id,
+    authorName: authorName || 'Visitor',
+    authorType: user ? 'logged-in user' : 'guest',
+    authorUserId: user?.id || null,
+    messageType,
+    message,
+    reactions: {},
+    status: 'visible',
+    createdAt: nowIso()
+  };
   store.comments.push(comment);
   store.comments = store.comments.slice(-5000);
   writeStore(store);
-  broadcast({ type: 'comment', payload: { ...comment, html: renderComment(comment) } });
+  broadcast({ type: 'comment', payload: { ...comment, html: renderComment(comment, messaging.reactionsEnabled) } });
   res.json({ success: true, comment });
+});
+
+app.post('/api/comments/:commentId/reactions', (req, res) => {
+  const store = readStore();
+  const messaging = store.settings.messaging || defaultMessagingSettings();
+  if (!messaging.reactionsEnabled) {
+    res.status(403).json({ success: false, error: 'Reactions are disabled' });
+    return;
+  }
+  const streamId = String(req.body.streamId || '').trim();
+  const reaction = String(req.body.reaction || '').trim().toLowerCase();
+  if (!['like', 'love', 'applause', 'thanks'].includes(reaction)) {
+    res.status(400).json({ success: false, error: 'Unsupported reaction' });
+    return;
+  }
+  const comment = store.comments.find((item) => item.id === req.params.commentId && (!streamId || item.streamId === streamId));
+  if (!comment) {
+    res.status(404).json({ success: false, error: 'Comment not found' });
+    return;
+  }
+  comment.reactions ||= {};
+  comment.reactions[reaction] = Number(comment.reactions[reaction] || 0) + 1;
+  writeStore(store);
+  const html = ['like', 'love', 'applause', 'thanks'].map((name) => {
+    const count = Number(comment.reactions[name] || 0);
+    return `<button type="button" data-comment-id="${escapeHtml(comment.id)}" data-reaction="${name}">${escapeHtml(name)}${count ? ` ${count}` : ''}</button>`;
+  }).join('');
+  broadcast({ type: 'reaction', payload: { streamId: comment.streamId, commentId: comment.id, html, reactions: comment.reactions } });
+  res.json({ success: true, commentId: comment.id, reactions: comment.reactions, html });
 });
 
 app.post('/api/voicelink/validate_user', (req, res) => {

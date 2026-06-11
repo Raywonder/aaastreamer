@@ -13,8 +13,11 @@ accessibility, automation, and scalability.
 - Multi-platform restream support
 - visitor watch pages
 - user dashboard with streaming server URL, stream key, watch/HLS links, copy/share buttons, and stream-key rotation controls
-- separate admin pages for streams, accounts, signup settings, encoder defaults, and updates
+- separate admin pages for streams, accounts, signup settings, branding, messaging, encoder defaults, and updates
 - optional user signup page controlled from the admin panel
+- platform branding controls for the public name, sub-heading, slogan, tagline, and description shown on default installs
+- enhanced guest and logged-in user stream messaging with message types and reactions
+- optional support/payment embed boxes configured by admins or stream owners, hidden from visitors by default
 - multi-encoder keys per account for OBS, Ecamm Live, Audio Hijack workflows, Streamlabs, Larix, vMix, and other RTMP tools
 - stereo audio bitrate presets from 96k through 320k
 - stream latency and player buffer controls for low-latency, balanced, or stable playback
@@ -34,6 +37,8 @@ accessibility, automation, and scalability.
 - `/admin/streams` lets admins view streams and recent events.
 - `/admin/accounts` lets admins create and review users.
 - `/admin/signups` controls whether user signup is enabled and what role new accounts receive.
+- `/admin/branding` controls the platform name, sub-heading, slogan, tagline, and public description.
+- `/admin/messaging` controls guest messages, logged-in user messages, reactions, guest-name requirements, message length, and default support/payment-box settings.
 - `/admin/encoders` controls default encoder, audio, latency, buffer, and HLS timing settings.
 - `/admin/updater` controls update source, maintenance mode, and the direct-host updater.
 
@@ -54,9 +59,25 @@ By default, unknown stream keys are rejected. Set `AAASTREAMER_ALLOW_AD_HOC_STRE
 Users can copy the server URL, stream key, watch page, and HLS playback URL from the dashboard. The dashboard can also open the platform share sheet for the public watch page when the browser supports it. Regenerating or revoking a stream key immediately replaces the stored key for that user and stream; the old key will no longer be accepted for future publishes.
 
 The dashboard also provides an iframe embed code for the public stream page and
-lets streamers add an optional background image and useful links for the watch
-page. Background images are stored as small data images in the local JSON store,
-so use compressed web images rather than large originals.
+lets streamers add an optional background image, useful links, and a support or
+payment box for the watch page. Support boxes are hidden from visitors by
+default until the stream owner explicitly enables visitor display. Background
+images are stored as small data images in the local JSON store, so use
+compressed web images rather than large originals.
+
+## Messaging and support
+
+Admins can enable or disable stream messages separately for guests and logged-in
+users. Guest messages can require a display name, and message length is capped by
+the admin setting. Stream messages support comment, question, and support-message
+types. When reactions are enabled, viewers can react with like, love, applause,
+or thanks, and live viewers receive updates through the existing event stream.
+
+Admins can configure default support-box text and embed HTML from
+`/admin/messaging`. Each streamer can override those values from `/dashboard`.
+The box can be placed before the stream player, near the stream player, or after
+comments and stream details. The box is not shown to visitors unless visitor
+display is enabled for that stream.
 
 ## Encoder and destination setup
 
@@ -131,7 +152,7 @@ served. Docker deployment is included for predictable server setup.
 
 - database-backed analytics beyond the current JSON store
 - per-room and per-server stream policy sync from VoiceLink
-- chat relay integration
+- chat relay integration with external systems
 - transcription pipeline hooks
 
 ## Deployment Domain And Update Requirements
