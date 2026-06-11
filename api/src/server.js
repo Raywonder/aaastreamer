@@ -9,6 +9,7 @@ app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: false, limit: '2mb' }));
 
 const port = Number(process.env.AAASTREAMER_PORT || 8095);
+const repoRoot = fs.existsSync(path.resolve(process.cwd(), 'api/src/server.js')) ? process.cwd() : path.resolve(process.cwd(), '..');
 const dataDir = path.resolve(process.cwd(), 'data');
 const dataFile = path.join(dataDir, 'aaastreamer.json');
 const hlsPath = process.env.HLS_PATH || '/tmp/hls';
@@ -387,7 +388,7 @@ function embedCodeFor(stream) {
 
 function getGitRevision() {
   try {
-    return childProcess.execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: path.resolve(process.cwd(), '..'), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    return childProcess.execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   } catch {
     return null;
   }
@@ -866,7 +867,7 @@ app.post('/admin/updater/maintenance', requireAdmin, (req, res) => {
 });
 
 app.post('/admin/updater/install', requireAdmin, (req, res) => {
-  const script = path.resolve(process.cwd(), '..', 'scripts', 'update-aaastreamer.sh');
+  const script = path.resolve(repoRoot, 'scripts', 'update-aaastreamer.sh');
   if (!fs.existsSync(script)) {
     res.status(500).send(page('Updater unavailable', '<h1>Updater unavailable</h1><p>The update script is missing from this install.</p><a class="button" href="/admin/updater">Back to updater</a>', req.user));
     return;
@@ -876,13 +877,13 @@ app.post('/admin/updater/install', requireAdmin, (req, res) => {
   store.events.push({ id: id('evt'), type: 'update_install_requested', payload: { requestedBy: req.user.username }, createdAt: nowIso() });
   writeStore(store);
   const child = childProcess.spawn('bash', [script], {
-    cwd: path.resolve(process.cwd(), '..'),
+    cwd: repoRoot,
     detached: true,
     stdio: 'ignore',
     env: {
       ...process.env,
       AAASTREAMER_STORE: dataFile,
-      AAASTREAMER_ROOT: path.resolve(process.cwd(), '..'),
+      AAASTREAMER_ROOT: repoRoot,
       AAASTREAMER_PM2_NAME: process.env.AAASTREAMER_PM2_NAME || 'aaastreamer-api'
     }
   });
