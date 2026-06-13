@@ -1134,6 +1134,8 @@ app.get('/healthz', (_req, res) => {
   res.json({
     ok: true,
     service: 'aaastreamer',
+    version: appVersion,
+    gitRevision: getGitRevision(),
     publicUrl: publicUrl || null,
     hlsBaseUrl: hlsBaseUrl || null,
     rtmpUrl: `rtmp://${rtmpHost}:1935/${rtmpAppName}`,
