@@ -18,6 +18,8 @@ accessibility, automation, and scalability.
 - platform branding controls for the public name, sub-heading, slogan, tagline, and description shown on default installs
 - enhanced guest and logged-in user stream messaging with message types and reactions
 - optional support/payment embed boxes configured by admins or stream owners, hidden from visitors by default
+- offline-safe public listings that hide stream links unless the creator is live or on-demand content is available
+- server media folders, streamer uploads, and URL relay sources for on-demand playback or looped source broadcasts
 - multi-encoder keys per account for OBS, Ecamm Live, Audio Hijack workflows, Streamlabs, Larix, vMix, and other RTMP tools
 - stereo audio bitrate presets from 96k through 320k
 - stream latency and player buffer controls for low-latency, balanced, or stable playback
@@ -39,6 +41,7 @@ accessibility, automation, and scalability.
 - `/admin/signups` controls whether user signup is enabled and what role new accounts receive.
 - `/admin/branding` controls the platform name, sub-heading, slogan, tagline, and public description.
 - `/admin/messaging` controls guest messages, logged-in user messages, reactions, guest-name requirements, message length, and default support/payment-box settings.
+- `/admin/media` controls server media folders, uploaded media location, URL relay permissions, scan depth, and whether folders are visible to normal users.
 - `/admin/encoders` controls default encoder, audio, latency, buffer, and HLS timing settings.
 - `/admin/updater` controls update source, maintenance mode, and the direct-host updater.
 
@@ -78,6 +81,36 @@ Admins can configure default support-box text and embed HTML from
 The box can be placed before the stream player, near the stream player, or after
 comments and stream details. The box is not shown to visitors unless visitor
 display is enabled for that stream.
+
+## Media library, uploads, and URL relay
+
+AAAStreamer hides stream playback links from visitors when a creator is offline
+unless the stream owner has enabled on-demand playback and selected a valid
+media source. This prevents stale HLS links, stream keys, or inactive watch
+links from being exposed as playable content.
+
+Admins can configure approved media folders from `/admin/media`. Folder records
+use `label|path|enabled|visible|audio|video`; use `hidden` for admin-only
+folders, `disabled` to turn a folder off, `no-audio` or `no-video` to limit file
+types. The default configuration looks for common server media folders including
+`/mnt/backup/media`, `/mnt/backup/audio-description`, `/mnt/backup/music`, and
+`/mnt/backup`. The uploaded-media folder is also exposed as a managed media
+folder.
+
+Streamers can:
+
+- select approved server media as their stream source
+- upload supported audio or video files into the configured upload folder
+- add HTTP or HTTPS URL relay sources
+- enable on-demand playback so an offline stream can still be watched
+- start or stop a looped source relay that publishes selected media through the
+  local RTMP ingest path with `ffmpeg`
+
+URL relays support remote media URLs and live HTTP audio/video streams. Local
+media and URL relays can be used for 24/7 channels, music streams,
+audio-description streams, training material, or replay content. Admins decide
+which server folders are visible to users and which remain hidden for
+admin-curated streams.
 
 ## Encoder and destination setup
 

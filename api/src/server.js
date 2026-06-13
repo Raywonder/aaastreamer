@@ -5,8 +5,9 @@ import fs from 'fs';
 import path from 'path';
 
 const app = express();
-app.use(express.json({ limit: '2mb' }));
-app.use(express.urlencoded({ extended: false, limit: '2mb' }));
+const uploadLimit = process.env.AAASTREAMER_UPLOAD_LIMIT || '75mb';
+app.use(express.json({ limit: uploadLimit }));
+app.use(express.urlencoded({ extended: false, limit: uploadLimit }));
 
 const port = Number(process.env.AAASTREAMER_PORT || 8095);
 const repoRoot = fs.existsSync(path.resolve(process.cwd(), 'api/src/server.js')) ? process.cwd() : path.resolve(process.cwd(), '..');
@@ -26,6 +27,12 @@ const sseClients = new Set();
 const appVersion = process.env.AAASTREAMER_VERSION || '0.1.1';
 const updateManifestUrl = process.env.AAASTREAMER_UPDATE_MANIFEST_URL || 'https://raw.githubusercontent.com/Raywonder/aaastreamer/main/api/package.json';
 const audioBitrates = ['96k', '128k', '160k', '192k', '256k', '320k'];
+const sourceProcesses = new Map();
+const mediaExtensions = new Map([
+  ['.aac', 'audio'], ['.aif', 'audio'], ['.aiff', 'audio'], ['.alac', 'audio'], ['.flac', 'audio'],
+  ['.m4a', 'audio'], ['.mp3', 'audio'], ['.ogg', 'audio'], ['.opus', 'audio'], ['.wav', 'audio'],
+  ['.m4v', 'video'], ['.mkv', 'video'], ['.mov', 'video'], ['.mp4', 'video'], ['.webm', 'video']
+]);
 const platformPresets = [
   { id: 'youtube', name: 'YouTube Live', url: 'https://www.youtube.com/live_dashboard', ingest: 'rtmp://a.rtmp.youtube.com/live2' },
   { id: 'twitch', name: 'Twitch', url: 'https://dashboard.twitch.tv/u/stream-manager', ingest: 'rtmp://live.twitch.tv/app' },
@@ -155,6 +162,37 @@ function defaultSupportSettings() {
   };
 }
 
+function defaultMediaSettings() {
+  const envFolders = String(process.env.AAASTREAMER_MEDIA_FOLDERS || '')
+    .split(path.delimiter)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const folders = (envFolders.length ? envFolders : [
+    '/mnt/backup/media',
+    '/mnt/backup/audio-description',
+    '/mnt/backup/music',
+    '/mnt/backup'
+  ]).map((folderPath, index) => ({
+    id: slugify(`${index + 1}-${folderPath}`),
+    label: path.basename(folderPath) || folderPath,
+    path: folderPath,
+    enabled: true,
+    visibleToUsers: index < 3,
+    allowAudio: true,
+    allowVideo: true
+  }));
+  return {
+    enabled: true,
+    maxScanDepth: 4,
+    uploadFolder: path.join(dataDir, 'uploads'),
+    uploadsVisibleToUsers: true,
+    folders,
+    urlRelayEnabled: true,
+    allowUsersToSelectServerMedia: true,
+    allowUsersToAddRelayUrls: true
+  };
+}
+
 function normalizeStore(store) {
   store.users ||= [];
   store.streams ||= [];
@@ -172,6 +210,7 @@ function normalizeStore(store) {
   store.settings.visitorCommentsEnabled ??= true;
   store.settings.messaging = { ...defaultMessagingSettings(), ...(store.settings.messaging || {}) };
   store.settings.supportDefaults = { ...defaultSupportSettings(), ...(store.settings.supportDefaults || {}) };
+  store.settings.mediaLibrary = normalizeMediaSettings(store.settings.mediaLibrary);
   store.settings.registrationsEnabled ??= process.env.AAASTREAMER_REGISTRATION_ENABLED === 'true';
   store.settings.registrationDefaultRole ||= 'user';
   store.settings.encoderDefaults = { ...defaultEncoderSettings(), ...(store.settings.encoderDefaults || {}) };
@@ -189,8 +228,67 @@ function normalizeStream(stream) {
   stream.encoderSettings = { ...defaultEncoderSettings(), ...(stream.encoderSettings || {}) };
   stream.latencySettings = { ...defaultLatencySettings(), ...(stream.latencySettings || {}) };
   stream.support = { ...defaultSupportSettings(), ...(stream.support || {}) };
+  stream.onDemand = {
+    enabled: false,
+    showWhenOffline: false,
+    title: '',
+    ...(stream.onDemand || {})
+  };
+  stream.sourceMode ||= 'rtmp';
+  stream.currentSource = normalizeStreamSource(stream.currentSource);
+  stream.relaySources = (stream.relaySources || []).map(normalizeStreamSource).filter(Boolean);
   stream.activeEncoders ||= {};
   return stream;
+}
+
+function normalizeMediaSettings(settings = {}) {
+  const defaults = defaultMediaSettings();
+  const folders = Array.isArray(settings.folders) && settings.folders.length ? settings.folders : defaults.folders;
+  const uploadFolder = String(settings.uploadFolder || defaults.uploadFolder).trim();
+  const normalizedFolders = folders.map((folder, index) => ({
+    id: slugify(folder.id || `${index + 1}-${folder.path || folder.label || 'media'}`),
+    label: String(folder.label || path.basename(folder.path || '') || `Media folder ${index + 1}`).trim().slice(0, 120),
+    path: String(folder.path || '').trim(),
+    enabled: folder.enabled !== false,
+    visibleToUsers: folder.visibleToUsers !== false,
+    allowAudio: folder.allowAudio !== false,
+    allowVideo: folder.allowVideo !== false
+  })).filter((folder) => folder.path);
+  if (uploadFolder && !normalizedFolders.some((folder) => path.resolve(folder.path) === path.resolve(uploadFolder))) {
+    normalizedFolders.unshift({
+      id: 'uploads',
+      label: 'Uploaded media',
+      path: uploadFolder,
+      enabled: true,
+      visibleToUsers: settings.uploadsVisibleToUsers !== false,
+      allowAudio: true,
+      allowVideo: true
+    });
+  }
+  return {
+    ...defaults,
+    ...settings,
+    uploadFolder,
+    uploadsVisibleToUsers: settings.uploadsVisibleToUsers !== false,
+    folders: normalizedFolders
+  };
+}
+
+function normalizeStreamSource(source) {
+  if (!source || typeof source !== 'object') return null;
+  const type = ['localMedia', 'urlRelay'].includes(source.type) ? source.type : null;
+  if (!type) return null;
+  return {
+    id: source.id || id('src'),
+    type,
+    label: String(source.label || source.title || source.url || source.relativePath || 'Media source').trim().slice(0, 160),
+    mediaType: ['audio', 'video'].includes(source.mediaType) ? source.mediaType : 'video',
+    folderId: source.folderId || '',
+    relativePath: source.relativePath || '',
+    url: source.url || '',
+    enabled: source.enabled !== false,
+    createdAt: source.createdAt || nowIso()
+  };
 }
 
 function defaultLatencySettings() {
@@ -350,6 +448,164 @@ function watchUrlFor(stream) {
   return `${publicUrl || ''}/s/${stream.slug}`;
 }
 
+function isLive(stream) {
+  return stream?.status === 'live' && Object.values(stream.activeEncoders || {}).some((encoder) => encoder.status === 'live');
+}
+
+function streamHasOnDemand(stream, store) {
+  if (!stream?.onDemand?.enabled && !stream?.onDemand?.showWhenOffline) return false;
+  const source = stream.currentSource || stream.relaySources?.find((item) => item.enabled);
+  return Boolean(source && playableSourceUrl(source, store));
+}
+
+function streamIsPubliclyListable(stream, store) {
+  return stream.visibility === 'public' && (isLive(stream) || streamHasOnDemand(stream, store));
+}
+
+function streamPlaybackUrl(stream, store) {
+  if (isLive(stream)) return stream.hlsUrl || hlsUrlFor(stream.activeEncoderKey || stream.streamKey);
+  if (streamHasOnDemand(stream, store)) return playableSourceUrl(stream.currentSource || stream.relaySources?.find((item) => item.enabled), store);
+  return '';
+}
+
+function publicStreamSummary(stream, store, includePrivate = false) {
+  const playbackUrl = streamPlaybackUrl(stream, store);
+  const safe = {
+    id: stream.id,
+    ownerId: stream.ownerId,
+    title: stream.title,
+    slug: stream.slug,
+    description: stream.description,
+    status: stream.status,
+    visibility: stream.visibility,
+    allowComments: stream.allowComments,
+    sourceMode: stream.sourceMode,
+    onDemand: stream.onDemand,
+    hasLivePlayback: isLive(stream),
+    hasOnDemandPlayback: streamHasOnDemand(stream, store),
+    watchUrl: watchUrlFor(stream),
+    playbackUrl: playbackUrl || null,
+    hlsUrl: isLive(stream) ? (stream.hlsUrl || hlsUrlFor(stream.activeEncoderKey || stream.streamKey)) : null,
+    updatedAt: stream.updatedAt,
+    createdAt: stream.createdAt
+  };
+  if (includePrivate) {
+    safe.streamKey = stream.streamKey;
+    safe.rtmpUrl = stream.rtmpUrl;
+    safe.encoderKeys = stream.encoderKeys;
+    safe.destinations = stream.destinations;
+    safe.currentSource = stream.currentSource;
+    safe.relaySources = stream.relaySources;
+  }
+  return safe;
+}
+
+function mediaTypeFor(filePath) {
+  return mediaExtensions.get(path.extname(filePath).toLowerCase()) || null;
+}
+
+function resolveMediaFolder(store, folderId) {
+  const settings = store.settings.mediaLibrary || defaultMediaSettings();
+  return settings.folders.find((folder) => folder.id === folderId && folder.enabled);
+}
+
+function safeMediaPath(folder, relativePath) {
+  if (!folder || !relativePath) return null;
+  const root = path.resolve(folder.path);
+  const target = path.resolve(root, relativePath);
+  const relative = path.relative(root, target);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) return null;
+  return target;
+}
+
+function localMediaUrlFor(source) {
+  if (!source?.folderId || !source?.relativePath) return '';
+  return `/media/${encodeURIComponent(source.folderId)}/${source.relativePath.split(/[\\/]+/).map(encodeURIComponent).join('/')}`;
+}
+
+function playableSourceUrl(source, store) {
+  if (!source?.enabled) return '';
+  if (source.type === 'urlRelay') return /^https?:\/\//i.test(source.url) ? source.url : '';
+  if (source.type === 'localMedia') {
+    const settings = store.settings.mediaLibrary || defaultMediaSettings();
+    if (!settings.enabled) return '';
+    const folder = resolveMediaFolder(store, source.folderId);
+    const target = safeMediaPath(folder, source.relativePath);
+    if (!target || !fs.existsSync(target) || !mediaTypeFor(target)) return '';
+    return localMediaUrlFor(source);
+  }
+  return '';
+}
+
+function mediaCatalog(store, user = null) {
+  const settings = store.settings.mediaLibrary || defaultMediaSettings();
+  if (!settings.enabled) return [];
+  const isAdmin = user?.role === 'admin';
+  const maxDepth = clampNumber(settings.maxScanDepth, 1, 8, 4);
+  return settings.folders
+    .filter((folder) => folder.enabled && (isAdmin || (settings.allowUsersToSelectServerMedia && folder.visibleToUsers)))
+    .map((folder) => ({
+      ...folder,
+      path: isAdmin ? folder.path : undefined,
+      files: scanMediaFolder(folder, maxDepth)
+    }));
+}
+
+function canServeMediaFile(store, folderId, relativePath, user = null) {
+  if (user?.role === 'admin') return true;
+  return store.streams.some((stream) => {
+    if (!streamIsPubliclyListable(stream, store)) return false;
+    const sources = [stream.currentSource, ...(stream.relaySources || [])].filter(Boolean);
+    return sources.some((source) => (
+      source.enabled
+      && source.type === 'localMedia'
+      && source.folderId === folderId
+      && source.relativePath === relativePath
+      && playableSourceUrl(source, store)
+    ));
+  });
+}
+
+function scanMediaFolder(folder, maxDepth) {
+  const root = path.resolve(folder.path);
+  if (!fs.existsSync(root)) return [];
+  const files = [];
+  const walk = (dir, depth) => {
+    if (files.length >= 500 || depth > maxDepth) return;
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(fullPath, depth + 1);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const mediaType = mediaTypeFor(fullPath);
+      if (!mediaType) continue;
+      if (mediaType === 'audio' && !folder.allowAudio) continue;
+      if (mediaType === 'video' && !folder.allowVideo) continue;
+      const relativePath = path.relative(root, fullPath).split(path.sep).join('/');
+      const stat = fs.statSync(fullPath);
+      files.push({
+        folderId: folder.id,
+        relativePath,
+        label: relativePath.replace(/\.[^.]+$/, '').replace(/[\\/_.-]+/g, ' '),
+        mediaType,
+        size: stat.size,
+        modifiedAt: stat.mtime.toISOString()
+      });
+    }
+  };
+  walk(root, 0);
+  return files.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+}
+
 function ensureStreamForUser(store, user, body = {}) {
   const existing = store.streams.find((stream) => stream.ownerId === user.id);
   if (existing) return normalizeStream(existing);
@@ -374,6 +630,10 @@ function ensureStreamForUser(store, user, body = {}) {
     links: [],
     backgroundImage: '',
     support: { ...store.settings?.supportDefaults },
+    onDemand: { enabled: false, showWhenOffline: false, title: '' },
+    sourceMode: 'rtmp',
+    currentSource: null,
+    relaySources: [],
     latencySettings: {
       ...defaultLatencySettings(),
       mode: encoderDefaults.latencyMode || 'low',
@@ -453,6 +713,7 @@ function adminTabs(active) {
     ['signups', 'Signups'],
     ['branding', 'Branding'],
     ['messaging', 'Messaging'],
+    ['media', 'Media sources'],
     ['encoders', 'Encoder settings'],
     ['updater', 'Updater']
   ];
@@ -477,6 +738,193 @@ function renderSupportBox(stream, context = 'watch') {
 function embedCodeFor(stream) {
   const src = `${publicUrl || ''}/embed/${stream.slug}`;
   return `<iframe title="${escapeHtml(stream.title)}" src="${escapeHtml(src)}" width="800" height="450" allow="autoplay; fullscreen" allowfullscreen></iframe>`;
+}
+
+function isHlsUrl(url) {
+  return /\.m3u8(?:$|[?#])/i.test(String(url || ''));
+}
+
+function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
+  if (!playbackUrl) {
+    return '<section><h2>Stream offline</h2><p>This creator is not live, and no on-demand content is available for this stream right now.</p></section>';
+  }
+  const autoplay = options.autoplay ? ' autoplay' : '';
+  const playerId = options.playerId || 'streamPlayer';
+  const statusId = `${playerId}Status`;
+  const commonAttrs = `id="${escapeHtml(playerId)}" controls playsinline${autoplay} preload="metadata" data-target-latency="${escapeHtml(stream.latencySettings?.targetLatencySeconds || 2)}" data-player-buffer="${escapeHtml(stream.latencySettings?.playerBufferSeconds || 4)}"`;
+  if (!isHlsUrl(playbackUrl)) {
+    return `<video ${commonAttrs} src="${escapeHtml(playbackUrl)}"></video>`;
+  }
+  return `<video ${commonAttrs} data-hls-src="${escapeHtml(playbackUrl)}"></video><p id="${escapeHtml(statusId)}" class="muted" role="status">Loading stream player.</p><script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script><script>
+(() => {
+  const player = document.getElementById(${JSON.stringify(playerId)});
+  const status = document.getElementById(${JSON.stringify(statusId)});
+  const setStatus = (text) => { if (status) status.textContent = text; };
+  if (!player) return;
+  const source = player.dataset.hlsSrc;
+  if (player.canPlayType('application/vnd.apple.mpegurl')) {
+    player.src = source;
+    setStatus('Stream player ready.');
+  } else if (window.Hls && Hls.isSupported()) {
+    const hls = new Hls({ lowLatencyMode: false, liveSyncDurationCount: 3, maxLiveSyncPlaybackRate: 1.1, backBufferLength: 30 });
+    hls.on(Hls.Events.ERROR, (_, data) => {
+      if (!data?.fatal) return;
+      setStatus('Playback lost. Trying to recover stream.');
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
+      else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+    });
+    hls.loadSource(source);
+    hls.attachMedia(player);
+    setStatus('Stream player ready.');
+  } else {
+    setStatus('This browser cannot play HLS directly. Try Safari, VLC, or a current Chrome, Edge, or Firefox build with JavaScript enabled.');
+  }
+})();
+</script>`;
+}
+
+function mediaSourceOptions(store, user, selectedSource = null) {
+  const catalog = mediaCatalog(store, user);
+  const selectedKey = selectedSource?.type === 'localMedia' ? `${selectedSource.folderId}|${selectedSource.relativePath}` : '';
+  const options = ['<option value="">No server media selected</option>'];
+  for (const folder of catalog) {
+    for (const file of folder.files) {
+      const value = `${file.folderId}|${file.relativePath}`;
+      const label = `${folder.label}: ${file.label} (${file.mediaType})`;
+      options.push(`<option value="${escapeHtml(value)}" ${value === selectedKey ? 'selected' : ''}>${escapeHtml(label)}</option>`);
+    }
+  }
+  return options.join('');
+}
+
+function sourceSummary(source) {
+  if (!source) return 'No source selected';
+  if (source.type === 'localMedia') return `${source.label} from server media`;
+  if (source.type === 'urlRelay') return `${source.label} from URL relay`;
+  return source.label || 'Media source';
+}
+
+function sourceFromRequest(req, store, user) {
+  const type = String(req.body.sourceType || '').trim();
+  if (type === 'localMedia') {
+    const [folderId, ...parts] = String(req.body.localMedia || '').split('|');
+    const relativePath = parts.join('|');
+    const folder = resolveMediaFolder(store, folderId);
+    const settings = store.settings.mediaLibrary || defaultMediaSettings();
+    if (!settings.enabled) return null;
+    if (!folder || (!settings.allowUsersToSelectServerMedia && user?.role !== 'admin')) return null;
+    if (user?.role !== 'admin' && !folder.visibleToUsers) return null;
+    const target = safeMediaPath(folder, relativePath);
+    const mediaType = target ? mediaTypeFor(target) : null;
+    if (!target || !fs.existsSync(target) || !mediaType) return null;
+    return normalizeStreamSource({
+      type: 'localMedia',
+      folderId,
+      relativePath,
+      label: path.basename(relativePath),
+      mediaType,
+      enabled: true
+    });
+  }
+  if (type === 'urlRelay') {
+    const settings = store.settings.mediaLibrary || defaultMediaSettings();
+    if (!settings.urlRelayEnabled || (!settings.allowUsersToAddRelayUrls && user?.role !== 'admin')) return null;
+    const url = String(req.body.relayUrl || '').trim();
+    if (!/^https?:\/\//i.test(url)) return null;
+    return normalizeStreamSource({
+      type: 'urlRelay',
+      url: url.slice(0, 1200),
+      label: String(req.body.relayLabel || url).trim().slice(0, 160),
+      mediaType: req.body.relayMediaType === 'audio' ? 'audio' : 'video',
+      enabled: true
+    });
+  }
+  return null;
+}
+
+function saveUploadedMedia(store, user, stream, body) {
+  const media = store.settings.mediaLibrary || defaultMediaSettings();
+  if (!media.enabled) throw new Error('The media library is disabled.');
+  const raw = String(body.uploadData || '');
+  const match = raw.match(/^data:([^;,]+);base64,([A-Za-z0-9+/=\s]+)$/);
+  if (!match) throw new Error('Upload data was not received.');
+  const mime = match[1].toLowerCase();
+  const extensionByMime = new Map([
+    ['audio/aac', '.aac'], ['audio/flac', '.flac'], ['audio/mpeg', '.mp3'], ['audio/mp3', '.mp3'],
+    ['audio/ogg', '.ogg'], ['audio/opus', '.opus'], ['audio/wav', '.wav'], ['audio/x-wav', '.wav'],
+    ['video/mp4', '.mp4'], ['video/quicktime', '.mov'], ['video/webm', '.webm'], ['video/x-matroska', '.mkv']
+  ]);
+  const ext = extensionByMime.get(mime) || path.extname(String(body.uploadName || '')).toLowerCase();
+  if (!mediaExtensions.has(ext)) throw new Error('Upload must be a supported audio or video file.');
+  const buffer = Buffer.from(match[2].replace(/\s+/g, ''), 'base64');
+  const maxBytes = Number(process.env.AAASTREAMER_MAX_UPLOAD_BYTES || 75 * 1024 * 1024);
+  if (!buffer.length || buffer.length > maxBytes) throw new Error(`Upload must be smaller than ${Math.round(maxBytes / 1024 / 1024)} MB.`);
+  const uploadRoot = path.resolve(media.uploadFolder || path.join(dataDir, 'uploads'));
+  const userFolder = path.join(uploadRoot, slugify(user.username || user.id));
+  fs.mkdirSync(userFolder, { recursive: true });
+  const baseName = slugify(path.basename(String(body.uploadName || body.uploadLabel || 'uploaded-media'), ext)) || 'uploaded-media';
+  const fileName = `${Date.now()}-${baseName}${ext}`;
+  const target = path.join(userFolder, fileName);
+  fs.writeFileSync(target, buffer, { flag: 'wx' });
+  const relativePath = path.relative(uploadRoot, target).split(path.sep).join('/');
+  return normalizeStreamSource({
+    type: 'localMedia',
+    folderId: 'uploads',
+    relativePath,
+    label: String(body.uploadLabel || body.uploadName || baseName).trim().slice(0, 160),
+    mediaType: mediaTypeFor(target),
+    enabled: true
+  });
+}
+
+function ffmpegPath() {
+  return process.env.FFMPEG_PATH || 'ffmpeg';
+}
+
+function stopSourceProcess(streamId) {
+  const child = sourceProcesses.get(streamId);
+  if (!child) return false;
+  child.kill('SIGTERM');
+  sourceProcesses.delete(streamId);
+  return true;
+}
+
+function startSourceProcess(stream, source, store) {
+  const input = source?.type === 'localMedia'
+    ? safeMediaPath(resolveMediaFolder(store, source.folderId), source.relativePath)
+    : source?.url;
+  if (!input) throw new Error('No source input selected');
+  const outputKey = stream.streamKey;
+  const output = `rtmp://127.0.0.1:1935/${rtmpAppName}/${outputKey}`;
+  stopSourceProcess(stream.id);
+  const args = [
+    '-hide_banner',
+    '-loglevel', 'warning',
+    '-re',
+    '-stream_loop', '-1',
+    '-i', input,
+    '-map', '0:v?',
+    '-map', '0:a?',
+    '-c:v', 'libx264',
+    '-preset', 'veryfast',
+    '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac',
+    '-b:a', stream.encoderSettings?.audioBitrate || '160k',
+    '-ar', stream.encoderSettings?.sampleRate || '48000',
+    '-ac', '2',
+    '-f', 'flv',
+    output
+  ];
+  const child = childProcess.spawn(ffmpegPath(), args, { stdio: ['ignore', 'ignore', 'pipe'] });
+  sourceProcesses.set(stream.id, child);
+  child.stderr.on('data', (data) => {
+    appendEvent('source_relay_log', { streamId: stream.id, message: String(data).slice(0, 500) });
+  });
+  child.on('exit', (code, signal) => {
+    sourceProcesses.delete(stream.id);
+    appendEvent('source_relay_exit', { streamId: stream.id, code, signal });
+  });
+  return child;
 }
 
 function getGitRevision() {
@@ -509,6 +957,23 @@ app.get('/events', (req, res) => {
   req.on('close', () => sseClients.delete(res));
 });
 
+app.get('/media/:folderId/*', (req, res) => {
+  const store = readStore();
+  const relativePath = req.params[0] || '';
+  const user = currentUser(req);
+  if (!canServeMediaFile(store, req.params.folderId, relativePath, user)) {
+    res.status(404).send('Media not found');
+    return;
+  }
+  const folder = resolveMediaFolder(store, req.params.folderId);
+  const target = safeMediaPath(folder, relativePath);
+  if (!target || !fs.existsSync(target) || !mediaTypeFor(target)) {
+    res.status(404).send('Media not found');
+    return;
+  }
+  res.sendFile(target);
+});
+
 app.use((req, res, next) => {
   const store = readStore();
   const maintenance = store.settings.maintenanceMode || {};
@@ -528,12 +993,12 @@ app.use((req, res, next) => {
 app.get('/', (req, res) => {
   const store = readStore();
   const branding = store.settings.platformBranding || defaultPlatformBranding();
-  const streams = store.streams.filter((stream) => stream.visibility === 'public');
+  const streams = store.streams.filter((stream) => streamIsPubliclyListable(stream, store));
   const body = `<h1>${escapeHtml(branding.platformName || store.settings.siteName)}</h1>
 ${branding.subheading ? `<p class="muted">${escapeHtml(branding.subheading)}</p>` : ''}
 ${branding.slogan ? `<p><strong>${escapeHtml(branding.slogan)}</strong></p>` : ''}
 ${branding.description ? `<section><p>${escapeHtml(branding.description)}</p></section>` : ''}
-<div class="grid">${streams.map((stream) => `<section><h2>${escapeHtml(stream.title)}</h2><p>Status: <strong class="status-${escapeHtml(stream.status)}">${escapeHtml(stream.status)}</strong></p><p>${escapeHtml(stream.description || '')}</p><a class="button" href="/s/${escapeHtml(stream.slug)}">Watch stream</a></section>`).join('') || '<section>No public streams yet.</section>'}</div>`;
+<div class="grid">${streams.map((stream) => `<section><h2>${escapeHtml(stream.title)}</h2><p>Status: <strong class="status-${escapeHtml(isLive(stream) ? 'live' : 'on demand')}">${escapeHtml(isLive(stream) ? 'live' : 'on demand')}</strong></p><p>${escapeHtml(stream.description || '')}</p><a class="button" href="/s/${escapeHtml(stream.slug)}">${isLive(stream) ? 'Watch live stream' : 'Play on-demand content'}</a></section>`).join('') || '<section>No streams are live and no on-demand streams are available right now.</section>'}</div>`;
   res.send(page(store.settings.siteName, body, currentUser(req)));
 });
 
@@ -544,6 +1009,8 @@ app.get('/s/:slug', (req, res) => {
     res.status(404).send(page('Stream not found', '<h1>Stream not found</h1>', currentUser(req)));
     return;
   }
+  const playbackUrl = streamPlaybackUrl(stream, store);
+  const playableStatus = isLive(stream) ? 'live' : (streamHasOnDemand(stream, store) ? 'on demand' : 'offline');
   const comments = store.comments.filter((comment) => comment.streamId === stream.id).slice(-100);
   const messaging = store.settings.messaging || defaultMessagingSettings();
   const user = currentUser(req);
@@ -555,9 +1022,9 @@ app.get('/s/:slug', (req, res) => {
   const supportDuring = stream.support?.placement === 'during' ? renderSupportBox(stream, 'watch') : '';
   const supportAfter = !['before', 'during'].includes(stream.support?.placement) ? renderSupportBox(stream, 'watch') : '';
   const body = `<div class="public-hero"${heroStyle}><h1>${escapeHtml(stream.title)}</h1>
-<p>Status: <strong class="status-${escapeHtml(stream.status)}">${escapeHtml(stream.status)}</strong></p>
+<p>Status: <strong class="status-${escapeHtml(stream.status)}">${escapeHtml(playableStatus)}</strong></p>
 ${supportBefore}
-<video controls playsinline preload="metadata" data-target-latency="${escapeHtml(stream.latencySettings?.targetLatencySeconds || 2)}" data-player-buffer="${escapeHtml(stream.latencySettings?.playerBufferSeconds || 4)}" src="${escapeHtml(stream.hlsUrl || hlsUrlFor(stream.streamKey))}"></video>${supportDuring}</div>
+${renderPlaybackPlayer(playbackUrl, stream)}${supportDuring}</div>
 <section><h2>About this stream</h2><p>${escapeHtml(stream.description || 'No description yet.')}</p><h3>Links</h3>${renderLinks(stream.links)}</section>
 <section><h2>Live comments</h2><div id="comments" class="comments">${comments.map((comment) => renderComment(comment, messaging.reactionsEnabled)).join('')}</div>
 ${canComment ? `<form id="commentForm"><label>Name<input name="authorName" ${user ? `value="${escapeHtml(user.displayName || user.username)}" readonly` : 'required'}></label><label>Message type<select name="messageType"><option value="comment">Comment</option><option value="question">Question</option><option value="support">Support message</option></select></label><label>Comment<textarea name="message" required rows="3" maxlength="${escapeHtml(messaging.maxMessageLength || 1000)}"></textarea></label><button type="submit">Post comment</button></form>` : '<p>Comments are disabled for this stream or account type.</p>'}</section>
@@ -581,7 +1048,12 @@ app.get('/embed/:slug', (req, res) => {
     res.status(404).send('Stream not found');
     return;
   }
-  res.send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(stream.title)}</title><style>html,body{margin:0;height:100%;background:#000}video{width:100%;height:100%;object-fit:contain;background:#000}</style></head><body><video controls playsinline autoplay preload="metadata" data-target-latency="${escapeHtml(stream.latencySettings?.targetLatencySeconds || 2)}" data-player-buffer="${escapeHtml(stream.latencySettings?.playerBufferSeconds || 4)}" src="${escapeHtml(stream.hlsUrl || hlsUrlFor(stream.streamKey))}"></video></body></html>`);
+  const playbackUrl = streamPlaybackUrl(stream, store);
+  if (!playbackUrl) {
+    res.status(404).send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${escapeHtml(stream.title)}</title><style>html,body{margin:0;height:100%;background:#000;color:#fff;font-family:Arial,sans-serif;display:grid;place-items:center;text-align:center}</style></head><body><p>This stream is offline.</p></body></html>`);
+    return;
+  }
+  res.send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(stream.title)}</title><style>html,body{margin:0;height:100%;background:#000}video{width:100%;height:100%;object-fit:contain;background:#000}.muted{color:#fff;font-family:Arial,sans-serif;padding:1rem}</style></head><body>${renderPlaybackPlayer(playbackUrl, stream, { autoplay: true, playerId: 'embedPlayer' })}</body></html>`);
 });
 
 function renderComment(comment, reactionsEnabled = true) {
@@ -693,6 +1165,10 @@ app.get('/dashboard', (req, res) => {
   const encoderRows = encoders.map((encoder) => `<tr><td>${escapeHtml(encoder.name)}</td><td><code>${escapeHtml(encoder.key)}</code></td><td>${escapeHtml(encoder.audioBitrate || stream.encoderSettings.audioBitrate)}</td><td>${encoder.active === false ? 'disabled' : 'enabled'}</td><td><input readonly value="${escapeHtml(hlsUrlFor(encoder.key))}"></td></tr>`).join('');
   const destinationRows = (stream.destinations || []).map((destination) => `<tr><td>${escapeHtml(destination.name)}</td><td>${escapeHtml(destination.platform)}</td><td>${destination.enabled ? 'enabled' : 'disabled'}</td><td><code>${escapeHtml(destination.rtmpUrl)}</code></td><td><form method="post" action="/dashboard/destinations/${escapeHtml(destination.id)}/delete"><button type="submit" class="danger">Remove</button></form></td></tr>`).join('');
   const presetOptions = platformPresets.map((preset) => `<option value="${escapeHtml(preset.id)}" data-ingest="${escapeHtml(preset.ingest)}">${escapeHtml(preset.name)}</option>`).join('');
+  const selectedSource = stream.currentSource || null;
+  const mediaOptions = mediaSourceOptions(store, user, selectedSource);
+  const relayRows = (stream.relaySources || []).map((source) => `<tr><td>${escapeHtml(source.label)}</td><td>${escapeHtml(source.mediaType)}</td><td><a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">Open URL</a></td><td><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/select" class="inline-form"><button type="submit">Use</button></form><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/delete" class="inline-form"><button type="submit" class="danger">Remove</button></form></td></tr>`).join('');
+  const activeSourceRunning = sourceProcesses.has(stream.id);
   const body = `<h1>User panel</h1>
 <section><h2>User streaming details</h2>
 <p class="muted">Use these connection details in OBS, Ecamm Live, Audio Hijack, Streamlabs, vMix, Larix Broadcaster, or any app that can publish RTMP. The server URL stays the same; the stream key identifies your account or encoder.</p>
@@ -714,6 +1190,16 @@ app.get('/dashboard', (req, res) => {
 <table><tr><th>Name</th><th>Platform</th><th>Status</th><th>RTMP URL</th><th>Action</th></tr>${destinationRows || '<tr><td colspan="5">No destinations configured yet.</td></tr>'}</table>
 <form method="post" action="/dashboard/destinations"><label>Platform<select id="platformPreset" name="platform">${presetOptions}</select></label><label>Name<input name="name" placeholder="Main YouTube channel"></label><label>RTMP or RTMPS URL<input id="destinationRtmpUrl" name="rtmpUrl"></label><label>Stream key<input name="streamKey"></label><label><input type="checkbox" name="enabled" value="true" checked> Enable destination</label><button type="submit">Add destination</button></form>
 <p class="muted">Popular destination dashboards: ${platformPresets.filter((preset) => preset.url).map((preset) => `<a href="${escapeHtml(preset.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(preset.name)}</a>`).join(', ')}.</p></section>
+<section><h2>Server media and URL relay</h2><p class="muted">Choose existing server media or a remote URL to use as on-demand content or as a looped broadcast source. Stream links stay hidden from visitors while you are offline unless on-demand playback is enabled and a valid source is selected.</p>
+<p>Current source: <strong>${escapeHtml(sourceSummary(selectedSource))}</strong>. Relay process: <strong>${activeSourceRunning ? 'running' : 'stopped'}</strong>.</p>
+<form method="post" action="/dashboard/sources/select"><label>Server media<select name="localMedia">${mediaOptions}</select></label><input type="hidden" name="sourceType" value="localMedia"><button type="submit">Use selected server media</button></form>
+<form method="post" action="/dashboard/sources/upload"><label>Upload audio or video<input id="mediaUpload" type="file" accept="audio/*,video/*"></label><input type="hidden" id="mediaUploadData" name="uploadData"><label>Upload title<input name="uploadLabel" placeholder="Intro music, event replay, audio described movie"></label><button type="submit">Upload and use media</button></form>
+<form method="post" action="/dashboard/sources/url"><input type="hidden" name="sourceType" value="urlRelay"><label>Relay label<input name="relayLabel" placeholder="Radio relay, remote event, training video"></label><label>Media type<select name="relayMediaType"><option value="video">video</option><option value="audio">audio</option></select></label><label>HTTP or HTTPS media URL<input name="relayUrl" placeholder="https://example.com/stream.mp3"></label><button type="submit">Add URL relay source</button></form>
+<table><tr><th>Name</th><th>Type</th><th>URL</th><th>Actions</th></tr>${relayRows || '<tr><td colspan="4">No URL relay sources configured.</td></tr>'}</table>
+<form method="post" action="/dashboard/sources/ondemand"><label><input type="checkbox" name="enabled" value="true" ${stream.onDemand?.enabled ? 'checked' : ''}> Enable on-demand playback for this stream</label><label><input type="checkbox" name="showWhenOffline" value="true" ${stream.onDemand?.showWhenOffline ? 'checked' : ''}> Show this stream to visitors when I am offline and selected media is available</label><label>On-demand title<input name="title" value="${escapeHtml(stream.onDemand?.title || '')}"></label><button type="submit">Save on-demand settings</button></form>
+<form method="post" action="/dashboard/sources/start" class="inline-form"><button type="submit">Start looping selected source as live stream</button></form>
+<form method="post" action="/dashboard/sources/stop" class="inline-form"><button type="submit" class="danger">Stop source relay</button></form>
+</section>
 <section><h2>Latency and buffer</h2><form method="post" action="/dashboard/latency"><label>Stream latency mode<select name="mode"><option value="low" ${stream.latencySettings.mode === 'low' ? 'selected' : ''}>Low latency</option><option value="balanced" ${stream.latencySettings.mode === 'balanced' ? 'selected' : ''}>Balanced</option><option value="stable" ${stream.latencySettings.mode === 'stable' ? 'selected' : ''}>Most stable</option></select></label><label>Target live latency, seconds<input name="targetLatencySeconds" type="number" min="1" max="30" step="0.5" value="${escapeHtml(stream.latencySettings.targetLatencySeconds)}"></label><label>Player buffer, seconds<input name="playerBufferSeconds" type="number" min="1" max="60" step="0.5" value="${escapeHtml(stream.latencySettings.playerBufferSeconds)}"></label><label>Reconnect buffer, seconds<input name="reconnectBufferSeconds" type="number" min="2" max="120" step="1" value="${escapeHtml(stream.latencySettings.reconnectBufferSeconds)}"></label><button type="submit">Save latency settings</button></form><p class="muted">Lower latency reacts faster but needs a stable network. Higher buffer values reduce stalls for mobile or busy networks.</p></section>
 <section><h2>Stream profile</h2><form method="post" action="/dashboard/stream"><label>Title<input name="title" value="${escapeHtml(stream.title)}"></label><label>Description<textarea name="description" rows="4">${escapeHtml(stream.description || '')}</textarea></label><label>Links, one per line. Use Label|https://example.com<textarea name="links" rows="4">${escapeHtml(linksText(stream.links))}</textarea></label><label>Optional photo background<input id="backgroundUpload" type="file" accept="image/png,image/jpeg,image/webp"></label><input type="hidden" id="backgroundImageData" name="backgroundImageData"><label><input type="checkbox" name="removeBackground" value="true"> Remove current background</label><label>Visibility<select name="visibility"><option ${stream.visibility === 'public' ? 'selected' : ''}>public</option><option ${stream.visibility === 'unlisted' ? 'selected' : ''}>unlisted</option></select></label><label><input type="checkbox" name="allowComments" value="true" ${stream.allowComments ? 'checked' : ''}> Allow visitor comments</label><button type="submit">Save stream profile</button></form></section>
 <section><h2>Support and payment box</h2><p class="muted">Add trusted donation or payment embed HTML for this stream. It is not shown to visitors unless both enabled and shown on the watch page are checked.</p><form method="post" action="/dashboard/support"><label><input type="checkbox" name="enabled" value="true" ${stream.support?.enabled ? 'checked' : ''}> Enable support box for this stream</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${stream.support?.showOnWatchPage ? 'checked' : ''}> Show support box on the visitor watch page</label><label>Placement<select name="placement"><option value="before" ${stream.support?.placement === 'before' ? 'selected' : ''}>Before stream player</option><option value="during" ${stream.support?.placement === 'during' ? 'selected' : ''}>Beside stream player area</option><option value="after" ${!['before', 'during'].includes(stream.support?.placement) ? 'selected' : ''}>After comments and stream details</option></select></label><label>Heading<input name="title" value="${escapeHtml(stream.support?.title || 'Support this stream')}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(stream.support?.description || '')}</textarea></label><label>Payment or donation embed HTML<textarea name="embedHtml" rows="6">${escapeHtml(stream.support?.embedHtml || '')}</textarea></label><button type="submit">Save support settings</button></form>${renderSupportBox(stream, 'dashboard')}</section>
@@ -733,6 +1219,9 @@ if(platformPreset){platformPreset.addEventListener('change',()=>{const option=pl
 const backgroundUpload=document.getElementById('backgroundUpload');
 const backgroundImageData=document.getElementById('backgroundImageData');
 if(backgroundUpload){backgroundUpload.addEventListener('change',()=>{const file=backgroundUpload.files&&backgroundUpload.files[0];if(!file)return;if(file.size>700000){setCopyStatus('Background image is too large. Use an image under 700 KB.');backgroundUpload.value='';return;}const reader=new FileReader();reader.onload=()=>{backgroundImageData.value=String(reader.result||'');setCopyStatus('Background image ready to save.');};reader.readAsDataURL(file);});}
+const mediaUpload=document.getElementById('mediaUpload');
+const mediaUploadData=document.getElementById('mediaUploadData');
+if(mediaUpload){mediaUpload.addEventListener('change',()=>{const file=mediaUpload.files&&mediaUpload.files[0];if(!file)return;if(file.size>${JSON.stringify(Number(process.env.AAASTREAMER_MAX_UPLOAD_BYTES || 75 * 1024 * 1024))}){setCopyStatus('Media file is too large for this server upload limit.');mediaUpload.value='';return;}const reader=new FileReader();reader.onload=()=>{mediaUploadData.value=String(reader.result||'');setCopyStatus('Media upload ready to submit.');};reader.readAsDataURL(file);});}
 </script>`;
   res.send(page('Dashboard', body, user));
 });
@@ -810,6 +1299,133 @@ app.post('/dashboard/destinations/:destinationId/delete', requireUser, (req, res
     stream.destinations = (stream.destinations || []).filter((destination) => destination.id !== req.params.destinationId);
     stream.updatedAt = nowIso();
     store.events.push({ id: id('evt'), type: 'destination_removed', payload: { streamId: stream.id, destinationId: req.params.destinationId }, createdAt: nowIso() });
+    writeStore(store);
+  }
+  res.redirect('/dashboard');
+});
+
+app.post('/dashboard/sources/select', requireUser, (req, res) => {
+  const store = readStore();
+  const user = store.users.find((item) => item.id === req.user.id);
+  const stream = ensureStreamForUser(store, user);
+  const source = sourceFromRequest({ ...req, body: { ...req.body, sourceType: 'localMedia' } }, store, req.user);
+  if (!source) {
+    res.status(400).send(page('Source not saved', '<h1>Source not saved</h1><p>Select a valid media file from an enabled folder.</p><a class="button" href="/dashboard">Back to dashboard</a>', req.user));
+    return;
+  }
+  stream.sourceMode = 'media';
+  stream.currentSource = source;
+  stream.updatedAt = nowIso();
+  store.events.push({ id: id('evt'), type: 'stream_source_selected', payload: { streamId: stream.id, sourceType: source.type, label: source.label }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/dashboard');
+});
+
+app.post('/dashboard/sources/url', requireUser, (req, res) => {
+  const store = readStore();
+  const user = store.users.find((item) => item.id === req.user.id);
+  const stream = ensureStreamForUser(store, user);
+  const source = sourceFromRequest({ ...req, body: { ...req.body, sourceType: 'urlRelay' } }, store, req.user);
+  if (!source) {
+    res.status(400).send(page('Relay source not saved', '<h1>Relay source not saved</h1><p>Use a valid HTTP or HTTPS media URL. URL relay must also be enabled by an admin.</p><a class="button" href="/dashboard">Back to dashboard</a>', req.user));
+    return;
+  }
+  stream.sourceMode = 'url';
+  stream.currentSource = source;
+  stream.relaySources = [source, ...(stream.relaySources || []).filter((item) => item.url !== source.url)].slice(0, 20);
+  stream.updatedAt = nowIso();
+  store.events.push({ id: id('evt'), type: 'url_relay_source_added', payload: { streamId: stream.id, label: source.label }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/dashboard');
+});
+
+app.post('/dashboard/sources/upload', requireUser, (req, res) => {
+  const store = readStore();
+  const user = store.users.find((item) => item.id === req.user.id);
+  const stream = ensureStreamForUser(store, user);
+  try {
+    const source = saveUploadedMedia(store, user, stream, req.body);
+    stream.sourceMode = 'media';
+    stream.currentSource = source;
+    stream.onDemand = { ...stream.onDemand, enabled: true, showWhenOffline: true };
+    stream.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'media_uploaded', payload: { streamId: stream.id, label: source.label, mediaType: source.mediaType }, createdAt: nowIso() });
+    writeStore(store);
+  } catch (error) {
+    res.status(400).send(page('Media upload failed', `<h1>Media upload failed</h1><p>${escapeHtml(error.message)}</p><a class="button" href="/dashboard">Back to dashboard</a>`, req.user));
+    return;
+  }
+  res.redirect('/dashboard');
+});
+
+app.post('/dashboard/sources/:sourceId/select', requireUser, (req, res) => {
+  const store = readStore();
+  const stream = store.streams.find((item) => item.ownerId === req.user.id);
+  const source = stream?.relaySources?.find((item) => item.id === req.params.sourceId);
+  if (stream && source) {
+    stream.sourceMode = 'url';
+    stream.currentSource = source;
+    stream.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'url_relay_source_selected', payload: { streamId: stream.id, sourceId: source.id }, createdAt: nowIso() });
+    writeStore(store);
+  }
+  res.redirect('/dashboard');
+});
+
+app.post('/dashboard/sources/:sourceId/delete', requireUser, (req, res) => {
+  const store = readStore();
+  const stream = store.streams.find((item) => item.ownerId === req.user.id);
+  if (stream) {
+    stream.relaySources = (stream.relaySources || []).filter((item) => item.id !== req.params.sourceId);
+    if (stream.currentSource?.id === req.params.sourceId) stream.currentSource = null;
+    stream.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'url_relay_source_removed', payload: { streamId: stream.id, sourceId: req.params.sourceId }, createdAt: nowIso() });
+    writeStore(store);
+  }
+  res.redirect('/dashboard');
+});
+
+app.post('/dashboard/sources/ondemand', requireUser, (req, res) => {
+  const store = readStore();
+  const user = store.users.find((item) => item.id === req.user.id);
+  const stream = ensureStreamForUser(store, user);
+  stream.onDemand = {
+    enabled: req.body.enabled === 'true',
+    showWhenOffline: req.body.showWhenOffline === 'true',
+    title: String(req.body.title || '').trim().slice(0, 160)
+  };
+  stream.updatedAt = nowIso();
+  store.events.push({ id: id('evt'), type: 'ondemand_settings_updated', payload: { streamId: stream.id, onDemand: stream.onDemand }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/dashboard');
+});
+
+app.post('/dashboard/sources/start', requireUser, (req, res) => {
+  const store = readStore();
+  const user = store.users.find((item) => item.id === req.user.id);
+  const stream = ensureStreamForUser(store, user);
+  const source = stream.currentSource || stream.relaySources?.find((item) => item.enabled);
+  if (!source || !playableSourceUrl(source, store)) {
+    res.status(400).send(page('Source relay not started', '<h1>Source relay not started</h1><p>Select a valid server media file or URL relay source first.</p><a class="button" href="/dashboard">Back to dashboard</a>', req.user));
+    return;
+  }
+  try {
+    startSourceProcess(stream, source, store);
+  } catch (error) {
+    res.status(500).send(page('Source relay not started', `<h1>Source relay not started</h1><p>${escapeHtml(error.message)}</p><a class="button" href="/dashboard">Back to dashboard</a>`, req.user));
+    return;
+  }
+  store.events.push({ id: id('evt'), type: 'source_relay_started', payload: { streamId: stream.id, sourceType: source.type, label: source.label }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/dashboard');
+});
+
+app.post('/dashboard/sources/stop', requireUser, (req, res) => {
+  const store = readStore();
+  const stream = store.streams.find((item) => item.ownerId === req.user.id);
+  if (stream) {
+    const stopped = stopSourceProcess(stream.id);
+    store.events.push({ id: id('evt'), type: 'source_relay_stopped', payload: { streamId: stream.id, stopped }, createdAt: nowIso() });
     writeStore(store);
   }
   res.redirect('/dashboard');
@@ -994,6 +1610,65 @@ app.post('/admin/support-defaults', requireAdmin, (req, res) => {
   res.redirect('/admin/messaging');
 });
 
+function mediaFoldersText(settings) {
+  return (settings.folders || []).map((folder) => [
+    folder.label,
+    folder.path,
+    folder.enabled ? 'enabled' : 'disabled',
+    folder.visibleToUsers ? 'visible' : 'hidden',
+    folder.allowAudio ? 'audio' : 'no-audio',
+    folder.allowVideo ? 'video' : 'no-video'
+  ].join('|')).join('\n');
+}
+
+function parseMediaFoldersText(raw) {
+  return String(raw || '').split(/\r?\n/).map((line, index) => {
+    const trimmed = line.trim();
+    if (!trimmed) return null;
+    const [label, folderPath, enabled = 'enabled', visible = 'visible', audio = 'audio', video = 'video'] = trimmed.split('|').map((item) => item.trim());
+    if (!folderPath) return null;
+    return {
+      id: slugify(`${index + 1}-${folderPath}`),
+      label: (label || path.basename(folderPath) || `Media folder ${index + 1}`).slice(0, 120),
+      path: folderPath,
+      enabled: enabled !== 'disabled',
+      visibleToUsers: visible !== 'hidden',
+      allowAudio: audio !== 'no-audio',
+      allowVideo: video !== 'no-video'
+    };
+  }).filter(Boolean);
+}
+
+app.get('/admin/media', requireAdmin, (req, res) => {
+  const store = readStore();
+  const media = store.settings.mediaLibrary || defaultMediaSettings();
+  const catalog = mediaCatalog(store, req.user);
+  const folderRows = catalog.map((folder) => `<tr><td>${escapeHtml(folder.label)}</td><td><code>${escapeHtml(folder.path || '')}</code></td><td>${folder.enabled ? 'enabled' : 'disabled'}</td><td>${folder.visibleToUsers ? 'visible to users' : 'admin only'}</td><td>${folder.files.length}</td></tr>`).join('');
+  const body = `<h1>Admin panel</h1>${adminTabs('media')}
+<section><h2>Media library folders</h2><p class="muted">Admins control which server folders are available for streamers. Hidden folders remain available to admins but are not shown to normal users. Use one folder per line in this format: label|path|enabled|visible|audio|video. Use disabled, hidden, no-audio, or no-video when needed.</p>
+<form method="post" action="/admin/media"><label><input type="checkbox" name="enabled" value="true" ${media.enabled ? 'checked' : ''}> Enable server media library</label><label><input type="checkbox" name="allowUsersToSelectServerMedia" value="true" ${media.allowUsersToSelectServerMedia ? 'checked' : ''}> Users can select media from visible folders</label><label><input type="checkbox" name="uploadsVisibleToUsers" value="true" ${media.uploadsVisibleToUsers ? 'checked' : ''}> Uploaded media folder is visible to users</label><label><input type="checkbox" name="urlRelayEnabled" value="true" ${media.urlRelayEnabled ? 'checked' : ''}> Enable URL relay sources</label><label><input type="checkbox" name="allowUsersToAddRelayUrls" value="true" ${media.allowUsersToAddRelayUrls ? 'checked' : ''}> Users can add their own HTTP or HTTPS relay URLs</label><label>Upload folder<input name="uploadFolder" value="${escapeHtml(media.uploadFolder)}"></label><label>Maximum scan depth<input type="number" min="1" max="8" name="maxScanDepth" value="${escapeHtml(media.maxScanDepth)}"></label><label>Folders<textarea name="folders" rows="8">${escapeHtml(mediaFoldersText(media))}</textarea></label><button type="submit">Save media source settings</button></form></section>
+<section><h2>Detected media</h2><table><tr><th>Folder</th><th>Path</th><th>Status</th><th>User access</th><th>Detected files</th></tr>${folderRows || '<tr><td colspan="5">No enabled media folders are configured or reachable.</td></tr>'}</table></section>`;
+  res.send(page('Admin media sources', body, req.user));
+});
+
+app.post('/admin/media', requireAdmin, (req, res) => {
+  const store = readStore();
+  const folders = parseMediaFoldersText(req.body.folders);
+  store.settings.mediaLibrary = normalizeMediaSettings({
+    enabled: req.body.enabled === 'true',
+    allowUsersToSelectServerMedia: req.body.allowUsersToSelectServerMedia === 'true',
+    uploadFolder: String(req.body.uploadFolder || '').trim(),
+    uploadsVisibleToUsers: req.body.uploadsVisibleToUsers === 'true',
+    urlRelayEnabled: req.body.urlRelayEnabled === 'true',
+    allowUsersToAddRelayUrls: req.body.allowUsersToAddRelayUrls === 'true',
+    maxScanDepth: clampNumber(req.body.maxScanDepth, 1, 8, 4),
+    folders
+  });
+  store.events.push({ id: id('evt'), type: 'media_library_settings_updated', payload: { folderCount: store.settings.mediaLibrary.folders.length }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/admin/media');
+});
+
 app.get('/admin/encoders', requireAdmin, (req, res) => {
   const store = readStore();
   const settings = store.settings.encoderDefaults;
@@ -1113,9 +1788,13 @@ app.get('/api/me', (req, res) => {
   res.json({ success: true, user: safeUser(currentUser(req)) });
 });
 
-app.get('/api/streams', (_req, res) => {
+app.get('/api/streams', (req, res) => {
   const store = readStore();
-  res.json({ success: true, streams: store.streams });
+  const user = currentUser(req);
+  const streams = store.streams
+    .filter((stream) => user?.role === 'admin' || stream.ownerId === user?.id || streamIsPubliclyListable(stream, store))
+    .map((stream) => publicStreamSummary(stream, store, user?.role === 'admin' || stream.ownerId === user?.id));
+  res.json({ success: true, streams });
 });
 
 app.get('/api/streams/:streamId', (req, res) => {
@@ -1125,7 +1804,17 @@ app.get('/api/streams/:streamId', (req, res) => {
     res.status(404).json({ success: false, error: 'Stream not found' });
     return;
   }
-  res.json({ success: true, stream });
+  const user = currentUser(req);
+  if (!streamIsPubliclyListable(stream, store) && user?.role !== 'admin' && stream.ownerId !== user?.id) {
+    res.status(404).json({ success: false, error: 'Stream is offline' });
+    return;
+  }
+  res.json({ success: true, stream: publicStreamSummary(stream, store, user?.role === 'admin' || stream.ownerId === user?.id) });
+});
+
+app.get('/api/media/catalog', requireUser, (req, res) => {
+  const store = readStore();
+  res.json({ success: true, folders: mediaCatalog(store, req.user) });
 });
 
 app.post('/api/streams/:streamId/comments', (req, res) => {
