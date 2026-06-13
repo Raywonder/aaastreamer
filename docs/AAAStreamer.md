@@ -102,6 +102,9 @@ Streamers can:
 - select approved server media as their stream source
 - upload supported audio or video files into the configured upload folder
 - add HTTP or HTTPS URL relay sources
+- use quick source setup cards for RTMP encoders, audio stream URLs, video
+  stream or file URLs, HLS playlists, server media, uploads, and custom RTMP
+  sources
 - enable on-demand playback so an offline stream can still be watched
 - start or stop a looped source relay that publishes selected media through the
   local RTMP ingest path with `ffmpeg`
@@ -123,6 +126,12 @@ AAAStreamer accepts RTMP publishes from common tools including:
 - Larix Broadcaster
 - vMix
 - any custom RTMP or RTMPS encoder
+
+The user dashboard shows quick source setup next to the manual custom RTMP
+source path. RTMP users can copy a complete direct publish URL when their
+software supports one URL field, or copy the separate server URL and stream key
+for OBS-style setup. URL relay presets fill the source label, media type, and
+example URL format before the user submits the source.
 
 Recommended defaults:
 

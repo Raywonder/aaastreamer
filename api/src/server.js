@@ -42,6 +42,53 @@ const platformPresets = [
   { id: 'restream', name: 'Restream.io', url: 'https://app.restream.io/channel', ingest: 'rtmp://live.restream.io/live' },
   { id: 'custom', name: 'Custom RTMP or RTMPS', url: '', ingest: '' }
 ];
+const sourcePresets = [
+  {
+    id: 'rtmpEncoder',
+    name: 'Live encoder, RTMP',
+    mediaType: 'video',
+    label: 'OBS, Ecamm, Streamlabs, vMix, Larix, or another RTMP encoder'
+  },
+  {
+    id: 'audioRelay',
+    name: 'Audio stream URL',
+    mediaType: 'audio',
+    label: 'Remote audio stream or radio relay',
+    placeholder: 'https://example.com/live.mp3'
+  },
+  {
+    id: 'videoRelay',
+    name: 'Video stream or file URL',
+    mediaType: 'video',
+    label: 'Remote video stream or hosted video file',
+    placeholder: 'https://example.com/live-or-video.mp4'
+  },
+  {
+    id: 'hlsRelay',
+    name: 'HLS playlist URL',
+    mediaType: 'video',
+    label: 'Remote HLS playlist',
+    placeholder: 'https://example.com/live/index.m3u8'
+  },
+  {
+    id: 'serverMedia',
+    name: 'Server media library',
+    mediaType: 'video',
+    label: 'Use approved media already on this server'
+  },
+  {
+    id: 'upload',
+    name: 'Upload audio or video',
+    mediaType: 'video',
+    label: 'Upload a local file and use it as the selected source'
+  },
+  {
+    id: 'customRtmp',
+    name: 'Custom RTMP source',
+    mediaType: 'video',
+    label: 'Manual RTMP-capable software setup'
+  }
+];
 
 app.use('/hls', express.static(hlsPath, {
   setHeaders(res) {
@@ -444,6 +491,10 @@ function rtmpUrlFor(streamKey) {
   return `rtmp://${rtmpHost}:1935/${rtmpAppName}`;
 }
 
+function rtmpPublishUrlFor(streamKey) {
+  return `${rtmpUrlFor(streamKey)}/${encodeURIComponent(streamKey)}`;
+}
+
 function watchUrlFor(stream) {
   return `${publicUrl || ''}/s/${stream.slug}`;
 }
@@ -675,6 +726,7 @@ video{width:100%;max-height:65vh;background:black}.grid{display:grid;grid-templa
 .comments{max-height:22rem;overflow:auto;border:1px solid #303944;padding:.75rem;background:#0c0f12}.comment{border-bottom:1px solid #28303a;padding:.45rem 0}
 .reaction-list{display:flex;gap:.4rem;flex-wrap:wrap;margin:.35rem 0}.reaction-list button{padding:.3rem .45rem;background:#26313d}.message-meta{font-size:.92rem;color:#b8c1ca}.support-box iframe{max-width:100%;border:0}.support-box form{margin:.5rem 0}
 .field-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.5rem;align-items:end;margin:.75rem 0}.field-row label{margin:0}.inline-form{display:inline}.notice{margin:.75rem 0;color:#d7ecff}.link-list{padding-left:1.25rem}.public-hero{background-size:cover;background-position:center;border-radius:6px;padding:1rem;border:1px solid #303944}
+.subsection{background:#121820}.preset-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:.75rem}.preset-card{border:1px solid #3a4654;border-radius:6px;padding:.85rem;background:#0c0f12}.preset-card h3{margin-top:0}
 </style>
 </head>
 <body><header><div><strong>${escapeHtml(branding.platformName || settings.siteName || 'AAAStreamer')}</strong>${branding.tagline ? `<div class="muted">${escapeHtml(branding.tagline)}</div>` : ''}</div><nav>${nav}<a href="/">Visitor page</a></nav></header><main>${body}</main></body></html>`;
@@ -802,6 +854,23 @@ function sourceSummary(source) {
   if (source.type === 'localMedia') return `${source.label} from server media`;
   if (source.type === 'urlRelay') return `${source.label} from URL relay`;
   return source.label || 'Media source';
+}
+
+function sourcePresetCards(stream, serverUrl) {
+  const publishUrl = rtmpPublishUrlFor(stream.streamKey);
+  return sourcePresets.map((preset) => {
+    if (preset.id === 'rtmpEncoder' || preset.id === 'customRtmp') {
+      const fieldId = `${preset.id}PublishUrl`;
+      return `<article class="preset-card"><h3>${escapeHtml(preset.name)}</h3><p>${escapeHtml(preset.label)}</p><div class="field-row"><label>Direct publish URL<input id="${escapeHtml(fieldId)}" readonly value="${escapeHtml(publishUrl)}"></label><button type="button" data-copy-target="${escapeHtml(fieldId)}">Copy direct URL</button></div><p class="muted">For OBS-style setup, use server <code>${escapeHtml(serverUrl)}</code> and stream key <code>${escapeHtml(stream.streamKey)}</code>.</p></article>`;
+    }
+    if (preset.id === 'serverMedia') {
+      return `<article class="preset-card"><h3>${escapeHtml(preset.name)}</h3><p>${escapeHtml(preset.label)}</p><p><a class="button" href="#serverMediaSource">Choose server media</a></p></article>`;
+    }
+    if (preset.id === 'upload') {
+      return `<article class="preset-card"><h3>${escapeHtml(preset.name)}</h3><p>${escapeHtml(preset.label)}</p><p><a class="button" href="#mediaUpload">Choose upload file</a></p></article>`;
+    }
+    return `<article class="preset-card"><h3>${escapeHtml(preset.name)}</h3><p>${escapeHtml(preset.label)}</p><button type="button" data-source-preset="${escapeHtml(preset.id)}" data-source-label="${escapeHtml(preset.label)}" data-source-media-type="${escapeHtml(preset.mediaType)}" data-source-placeholder="${escapeHtml(preset.placeholder || '')}">Use this source type</button></article>`;
+  }).join('');
 }
 
 function sourceFromRequest(req, store, user) {
@@ -1169,6 +1238,7 @@ app.get('/dashboard', (req, res) => {
   const mediaOptions = mediaSourceOptions(store, user, selectedSource);
   const relayRows = (stream.relaySources || []).map((source) => `<tr><td>${escapeHtml(source.label)}</td><td>${escapeHtml(source.mediaType)}</td><td><a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">Open URL</a></td><td><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/select" class="inline-form"><button type="submit">Use</button></form><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/delete" class="inline-form"><button type="submit" class="danger">Remove</button></form></td></tr>`).join('');
   const activeSourceRunning = sourceProcesses.has(stream.id);
+  const quickSourceCards = sourcePresetCards(stream, serverUrl);
   const body = `<h1>User panel</h1>
 <section><h2>User streaming details</h2>
 <p class="muted">Use these connection details in OBS, Ecamm Live, Audio Hijack, Streamlabs, vMix, Larix Broadcaster, or any app that can publish RTMP. The server URL stays the same; the stream key identifies your account or encoder.</p>
@@ -1192,9 +1262,10 @@ app.get('/dashboard', (req, res) => {
 <p class="muted">Popular destination dashboards: ${platformPresets.filter((preset) => preset.url).map((preset) => `<a href="${escapeHtml(preset.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(preset.name)}</a>`).join(', ')}.</p></section>
 <section><h2>Server media and URL relay</h2><p class="muted">Choose existing server media or a remote URL to use as on-demand content or as a looped broadcast source. Stream links stay hidden from visitors while you are offline unless on-demand playback is enabled and a valid source is selected.</p>
 <p>Current source: <strong>${escapeHtml(sourceSummary(selectedSource))}</strong>. Relay process: <strong>${activeSourceRunning ? 'running' : 'stopped'}</strong>.</p>
-<form method="post" action="/dashboard/sources/select"><label>Server media<select name="localMedia">${mediaOptions}</select></label><input type="hidden" name="sourceType" value="localMedia"><button type="submit">Use selected server media</button></form>
+<section class="subsection"><h3>Quick source setup</h3><p class="muted">Pick the source type first. Presets copy the correct connection URL or fill the relay fields so setup is not manual-only.</p><div class="preset-grid">${quickSourceCards}</div></section>
+<form method="post" action="/dashboard/sources/select"><label>Server media<select id="serverMediaSource" name="localMedia">${mediaOptions}</select></label><input type="hidden" name="sourceType" value="localMedia"><button type="submit">Use selected server media</button></form>
 <form method="post" action="/dashboard/sources/upload"><label>Upload audio or video<input id="mediaUpload" type="file" accept="audio/*,video/*"></label><input type="hidden" id="mediaUploadData" name="uploadData"><label>Upload title<input name="uploadLabel" placeholder="Intro music, event replay, audio described movie"></label><button type="submit">Upload and use media</button></form>
-<form method="post" action="/dashboard/sources/url"><input type="hidden" name="sourceType" value="urlRelay"><label>Relay label<input name="relayLabel" placeholder="Radio relay, remote event, training video"></label><label>Media type<select name="relayMediaType"><option value="video">video</option><option value="audio">audio</option></select></label><label>HTTP or HTTPS media URL<input name="relayUrl" placeholder="https://example.com/stream.mp3"></label><button type="submit">Add URL relay source</button></form>
+<form method="post" action="/dashboard/sources/url"><input type="hidden" name="sourceType" value="urlRelay"><label>Relay label<input id="relayLabel" name="relayLabel" placeholder="Radio relay, remote event, training video"></label><label>Media type<select id="relayMediaType" name="relayMediaType"><option value="video">video</option><option value="audio">audio</option></select></label><label>HTTP or HTTPS media URL<input id="relayUrl" name="relayUrl" placeholder="https://example.com/stream.mp3"></label><button type="submit">Add URL relay source</button></form>
 <table><tr><th>Name</th><th>Type</th><th>URL</th><th>Actions</th></tr>${relayRows || '<tr><td colspan="4">No URL relay sources configured.</td></tr>'}</table>
 <form method="post" action="/dashboard/sources/ondemand"><label><input type="checkbox" name="enabled" value="true" ${stream.onDemand?.enabled ? 'checked' : ''}> Enable on-demand playback for this stream</label><label><input type="checkbox" name="showWhenOffline" value="true" ${stream.onDemand?.showWhenOffline ? 'checked' : ''}> Show this stream to visitors when I am offline and selected media is available</label><label>On-demand title<input name="title" value="${escapeHtml(stream.onDemand?.title || '')}"></label><button type="submit">Save on-demand settings</button></form>
 <form method="post" action="/dashboard/sources/start" class="inline-form"><button type="submit">Start looping selected source as live stream</button></form>
@@ -1216,6 +1287,18 @@ document.getElementById('shareStream').addEventListener('click',async()=>{const 
 const platformPreset=document.getElementById('platformPreset');
 const destinationRtmpUrl=document.getElementById('destinationRtmpUrl');
 if(platformPreset){platformPreset.addEventListener('change',()=>{const option=platformPreset.selectedOptions[0];if(option && !destinationRtmpUrl.value){destinationRtmpUrl.value=option.dataset.ingest||'';}});platformPreset.dispatchEvent(new Event('change'));}
+const relayLabel=document.getElementById('relayLabel');
+const relayMediaType=document.getElementById('relayMediaType');
+const relayUrl=document.getElementById('relayUrl');
+document.querySelectorAll('[data-source-preset]').forEach((button)=>button.addEventListener('click',()=>{
+  if(relayLabel) relayLabel.value=button.dataset.sourceLabel||'Remote source';
+  if(relayMediaType) relayMediaType.value=button.dataset.sourceMediaType||'video';
+  if(relayUrl){
+    relayUrl.placeholder=button.dataset.sourcePlaceholder||'https://example.com/stream';
+    relayUrl.focus();
+  }
+  setCopyStatus((button.textContent||'Source preset')+' selected. Enter or paste the media URL, then choose Add URL relay source.');
+}));
 const backgroundUpload=document.getElementById('backgroundUpload');
 const backgroundImageData=document.getElementById('backgroundImageData');
 if(backgroundUpload){backgroundUpload.addEventListener('change',()=>{const file=backgroundUpload.files&&backgroundUpload.files[0];if(!file)return;if(file.size>700000){setCopyStatus('Background image is too large. Use an image under 700 KB.');backgroundUpload.value='';return;}const reader=new FileReader();reader.onload=()=>{backgroundImageData.value=String(reader.result||'');setCopyStatus('Background image ready to save.');};reader.readAsDataURL(file);});}
