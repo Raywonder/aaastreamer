@@ -33,7 +33,7 @@ management.
 - enhanced guest and logged-in user stream messaging with reactions
 - optional donation or payment support boxes configured by admins or stream owners, hidden from visitors by default
 - offline-safe stream pages: public stream links and playback URLs are hidden unless the creator is live or on-demand content is enabled
-- server media library sources, user media uploads, and HTTP/HTTPS URL relay sources for on-demand playback or looped 24/7 streams
+- server media library sources, bulk user media uploads, queued media playback, and HTTP/HTTPS URL relay sources for on-demand playback or looped 24/7 streams
 - multi-encoder keys and stereo audio bitrate presets
 - stream latency, player buffer, and HLS timing controls
 - external destination records for YouTube Live, Twitch, Facebook Live, LinkedIn Live, Kick, Restream.io, and custom RTMP services
@@ -46,7 +46,7 @@ management.
 
 ## What users can do now
 
-Admins can log in, create users, enable or disable public signups, set platform branding, configure guest and logged-in messaging, set support/payment-box defaults, choose which server media folders are available to streamers, review streams, set encoder defaults, tune latency and buffer defaults, and inspect recent publish, done, comment, and moderation events. Users can log in, copy their RTMP server URL and stream key, add extra encoder keys, upload media, select approved server media, add URL relay sources, save external destination details, tune stream latency and playback buffer, edit the stream profile, add a background image and links, configure an optional support/payment box, copy embed code, and open the public watch page for their stream. Visitors can open a stream page only when the creator is live or on-demand playback is enabled, watch HLS or on-demand playback, post live comments when messaging is enabled, and react to visible messages when reactions are enabled.
+Admins can log in, create users, enable or disable public signups, set platform branding, configure guest and logged-in messaging, set support/payment-box defaults, choose which server media folders are available to streamers, review streams, set encoder defaults, tune latency and buffer defaults, and inspect recent publish, done, comment, and moderation events. Users can log in, copy their RTMP server URL and stream key, add extra encoder keys, bulk upload media, select or multi-select approved server media, queue media for continuous playback, add URL relay sources, save external destination details, tune stream latency and playback buffer, edit the stream profile, add a background image and links, configure an optional support/payment box, copy embed code, and open the public watch page for their stream. Visitors can open a stream page only when the creator is live or on-demand playback is enabled, watch HLS or on-demand playback, post live comments when messaging is enabled, and react to visible messages when reactions are enabled.
 
 OBS settings for a user-created stream:
 
@@ -66,13 +66,16 @@ Admins manage server media folders from `/admin/media`. Each folder can be
 enabled, disabled, visible to users, hidden for admin-only use, and limited to
 audio or video. The default folder list includes common server media paths such
 as `/mnt/backup/media`, `/mnt/backup/audio-description`, and `/mnt/backup/music`.
-Streamers can also upload supported audio/video files into the configured upload
-folder and select HTTP or HTTPS media URLs as relay sources when admins allow it.
+Streamers can also upload one or more supported audio/video files into the
+configured upload folder, multi-select approved server media into a playback
+queue, and select HTTP or HTTPS media URLs as relay sources when admins allow it.
 
-The dashboard can start the selected server media file or URL relay as a looped
-RTMP source using `ffmpeg`. This supports 24/7 style streams from music,
-audio-description, video, or remote stream URLs, while keeping normal OBS/Ecamm
-RTMP ingest available.
+The dashboard can start the selected server media file or URL relay as an RTMP
+source using `ffmpeg`. A single selected source loops for 24/7 style streams;
+when a queue is present, AAAStreamer advances through queued media and rotates
+played sources to the back of the queue so the stream continues without manual
+restart. This supports music, audio-description, video, or remote stream URLs,
+while keeping normal OBS/Ecamm RTMP ingest available.
 
 ## VoiceLink integration
 

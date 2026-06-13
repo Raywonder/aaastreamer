@@ -10,6 +10,8 @@ app.use(express.json({ limit: uploadLimit }));
 app.use(express.urlencoded({ extended: false, limit: uploadLimit }));
 
 const port = Number(process.env.AAASTREAMER_PORT || 8095);
+const maxUploadBytes = Number(process.env.AAASTREAMER_MAX_UPLOAD_BYTES || 75 * 1024 * 1024);
+const maxBulkUploads = Math.max(1, Math.min(25, Number(process.env.AAASTREAMER_MAX_BULK_UPLOADS || 12) || 12));
 const repoRoot = fs.existsSync(path.resolve(process.cwd(), 'api/src/server.js')) ? process.cwd() : path.resolve(process.cwd(), '..');
 const dataDir = path.resolve(process.cwd(), 'data');
 const dataFile = path.join(dataDir, 'aaastreamer.json');
@@ -24,7 +26,7 @@ const allowRestream = process.env.ALLOW_RESTREAM !== 'false';
 const allowAdHocStreams = process.env.AAASTREAMER_ALLOW_AD_HOC_STREAMS === 'true';
 const sessionCookieName = 'aaastreamer_session';
 const sseClients = new Set();
-const appVersion = process.env.AAASTREAMER_VERSION || '0.1.1';
+const appVersion = process.env.AAASTREAMER_VERSION || '0.1.3';
 const updateManifestUrl = process.env.AAASTREAMER_UPDATE_MANIFEST_URL || 'https://raw.githubusercontent.com/Raywonder/aaastreamer/main/api/package.json';
 const audioBitrates = ['96k', '128k', '160k', '192k', '256k', '320k'];
 const sourceProcesses = new Map();
@@ -284,6 +286,7 @@ function normalizeStream(stream) {
   stream.sourceMode ||= 'rtmp';
   stream.currentSource = normalizeStreamSource(stream.currentSource);
   stream.relaySources = (stream.relaySources || []).map(normalizeStreamSource).filter(Boolean);
+  stream.sourceQueue = (stream.sourceQueue || []).map(normalizeStreamSource).filter(Boolean);
   stream.activeEncoders ||= {};
   return stream;
 }
@@ -503,10 +506,21 @@ function isLive(stream) {
   return stream?.status === 'live' && Object.values(stream.activeEncoders || {}).some((encoder) => encoder.status === 'live');
 }
 
+function streamSources(stream) {
+  return [
+    stream?.currentSource,
+    ...(stream?.sourceQueue || []),
+    ...(stream?.relaySources || [])
+  ].filter(Boolean);
+}
+
+function firstPlayableSource(stream, store) {
+  return streamSources(stream).find((source) => playableSourceUrl(source, store)) || null;
+}
+
 function streamHasOnDemand(stream, store) {
   if (!stream?.onDemand?.enabled && !stream?.onDemand?.showWhenOffline) return false;
-  const source = stream.currentSource || stream.relaySources?.find((item) => item.enabled);
-  return Boolean(source && playableSourceUrl(source, store));
+  return Boolean(firstPlayableSource(stream, store));
 }
 
 function streamIsPubliclyListable(stream, store) {
@@ -515,7 +529,7 @@ function streamIsPubliclyListable(stream, store) {
 
 function streamPlaybackUrl(stream, store) {
   if (isLive(stream)) return stream.hlsUrl || hlsUrlFor(stream.activeEncoderKey || stream.streamKey);
-  if (streamHasOnDemand(stream, store)) return playableSourceUrl(stream.currentSource || stream.relaySources?.find((item) => item.enabled), store);
+  if (streamHasOnDemand(stream, store)) return playableSourceUrl(firstPlayableSource(stream, store), store);
   return '';
 }
 
@@ -547,7 +561,9 @@ function publicStreamSummary(stream, store, includePrivate = false) {
     safe.destinations = stream.destinations;
     safe.currentSource = stream.currentSource;
     safe.relaySources = stream.relaySources;
+    safe.sourceQueue = stream.sourceQueue;
   }
+  safe.sourceQueueCount = stream.sourceQueue?.length || 0;
   return safe;
 }
 
@@ -606,8 +622,7 @@ function canServeMediaFile(store, folderId, relativePath, user = null) {
   if (user?.role === 'admin') return true;
   return store.streams.some((stream) => {
     if (!streamIsPubliclyListable(stream, store)) return false;
-    const sources = [stream.currentSource, ...(stream.relaySources || [])].filter(Boolean);
-    return sources.some((source) => (
+    return streamSources(stream).some((source) => (
       source.enabled
       && source.type === 'localMedia'
       && source.folderId === folderId
@@ -856,6 +871,49 @@ function sourceSummary(source) {
   return source.label || 'Media source';
 }
 
+function sourceQueueKey(source) {
+  if (!source) return '';
+  if (source.type === 'localMedia') return `localMedia|${source.folderId}|${source.relativePath}`;
+  if (source.type === 'urlRelay') return `urlRelay|${source.url}`;
+  return source.id || '';
+}
+
+function addSourcesToQueue(stream, sources) {
+  stream.sourceQueue = (stream.sourceQueue || []).map(normalizeStreamSource).filter(Boolean);
+  const existingKeys = new Set(stream.sourceQueue.map(sourceQueueKey));
+  const currentKey = sourceQueueKey(stream.currentSource);
+  for (const source of sources.map(normalizeStreamSource).filter(Boolean)) {
+    const key = sourceQueueKey(source);
+    if (!key || key === currentKey || existingKeys.has(key)) continue;
+    stream.sourceQueue.push(source);
+    existingKeys.add(key);
+  }
+  return stream.sourceQueue;
+}
+
+function removeQueuedSource(stream, sourceId) {
+  const before = stream.sourceQueue?.length || 0;
+  stream.sourceQueue = (stream.sourceQueue || []).filter((source) => source.id !== sourceId);
+  return before !== stream.sourceQueue.length;
+}
+
+function queuedSourceRows(stream, store) {
+  return (stream.sourceQueue || []).map((source, index) => {
+    const sourceUrl = playableSourceUrl(source, store);
+    const label = `${index + 1}. ${sourceSummary(source)}`;
+    const urlCell = sourceUrl
+      ? `<a href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">Open source</a>`
+      : '<span class="muted">Unavailable</span>';
+    return `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(source.mediaType)}</td><td>${urlCell}</td><td><form method="post" action="/dashboard/sources/queue/${escapeHtml(source.id)}/select" class="inline-form"><button type="submit">Use now</button></form><form method="post" action="/dashboard/sources/queue/${escapeHtml(source.id)}/remove" class="inline-form"><button type="submit" class="danger">Remove</button></form></td></tr>`;
+  }).join('');
+}
+
+function bodyValues(value) {
+  if (Array.isArray(value)) return value;
+  if (value === undefined || value === null || value === '') return [];
+  return [value];
+}
+
 function sourcePresetCards(stream, serverUrl) {
   const publishUrl = rtmpPublishUrlFor(stream.streamKey);
   return sourcePresets.map((preset) => {
@@ -911,10 +969,24 @@ function sourceFromRequest(req, store, user) {
   return null;
 }
 
-function saveUploadedMedia(store, user, stream, body) {
+function parseUploadItems(body) {
+  const raw = String(body.uploadData || '').trim();
+  if (!raw) return [];
+  if (raw.startsWith('[') || raw.startsWith('{')) {
+    const parsed = JSON.parse(raw);
+    return (Array.isArray(parsed) ? parsed : [parsed]).slice(0, maxBulkUploads);
+  }
+  return [{
+    data: raw,
+    name: body.uploadName || body.uploadLabel || 'uploaded-media',
+    label: body.uploadLabel || body.uploadName || 'Uploaded media'
+  }];
+}
+
+function saveUploadedMediaItem(store, user, body, item, index) {
   const media = store.settings.mediaLibrary || defaultMediaSettings();
   if (!media.enabled) throw new Error('The media library is disabled.');
-  const raw = String(body.uploadData || '');
+  const raw = String(item?.data || item?.uploadData || '');
   const match = raw.match(/^data:([^;,]+);base64,([A-Za-z0-9+/=\s]+)$/);
   if (!match) throw new Error('Upload data was not received.');
   const mime = match[1].toLowerCase();
@@ -923,27 +995,39 @@ function saveUploadedMedia(store, user, stream, body) {
     ['audio/ogg', '.ogg'], ['audio/opus', '.opus'], ['audio/wav', '.wav'], ['audio/x-wav', '.wav'],
     ['video/mp4', '.mp4'], ['video/quicktime', '.mov'], ['video/webm', '.webm'], ['video/x-matroska', '.mkv']
   ]);
-  const ext = extensionByMime.get(mime) || path.extname(String(body.uploadName || '')).toLowerCase();
+  const uploadName = String(item?.name || body.uploadName || body.uploadLabel || 'uploaded-media');
+  const ext = extensionByMime.get(mime) || path.extname(uploadName).toLowerCase();
   if (!mediaExtensions.has(ext)) throw new Error('Upload must be a supported audio or video file.');
   const buffer = Buffer.from(match[2].replace(/\s+/g, ''), 'base64');
-  const maxBytes = Number(process.env.AAASTREAMER_MAX_UPLOAD_BYTES || 75 * 1024 * 1024);
-  if (!buffer.length || buffer.length > maxBytes) throw new Error(`Upload must be smaller than ${Math.round(maxBytes / 1024 / 1024)} MB.`);
+  if (!buffer.length || buffer.length > maxUploadBytes) throw new Error(`Each upload must be smaller than ${Math.round(maxUploadBytes / 1024 / 1024)} MB.`);
   const uploadRoot = path.resolve(media.uploadFolder || path.join(dataDir, 'uploads'));
   const userFolder = path.join(uploadRoot, slugify(user.username || user.id));
   fs.mkdirSync(userFolder, { recursive: true });
-  const baseName = slugify(path.basename(String(body.uploadName || body.uploadLabel || 'uploaded-media'), ext)) || 'uploaded-media';
-  const fileName = `${Date.now()}-${baseName}${ext}`;
+  const baseName = slugify(path.basename(uploadName, ext)) || `uploaded-media-${index + 1}`;
+  const fileName = `${Date.now()}-${index + 1}-${baseName}${ext}`;
   const target = path.join(userFolder, fileName);
   fs.writeFileSync(target, buffer, { flag: 'wx' });
   const relativePath = path.relative(uploadRoot, target).split(path.sep).join('/');
+  const label = String(item?.label || (index === 0 ? body.uploadLabel : '') || uploadName || baseName).trim().slice(0, 160);
   return normalizeStreamSource({
     type: 'localMedia',
     folderId: 'uploads',
     relativePath,
-    label: String(body.uploadLabel || body.uploadName || baseName).trim().slice(0, 160),
+    label,
     mediaType: mediaTypeFor(target),
     enabled: true
   });
+}
+
+function saveUploadedMediaBatch(store, user, stream, body) {
+  const items = parseUploadItems(body);
+  if (!items.length) throw new Error('Upload data was not received.');
+  if (items.length > maxBulkUploads) throw new Error(`Upload no more than ${maxBulkUploads} files at once.`);
+  return items.map((item, index) => saveUploadedMediaItem(store, user, body, item, index));
+}
+
+function saveUploadedMedia(store, user, stream, body) {
+  return saveUploadedMediaBatch(store, user, stream, body)[0];
 }
 
 function ffmpegPath() {
@@ -953,9 +1037,41 @@ function ffmpegPath() {
 function stopSourceProcess(streamId) {
   const child = sourceProcesses.get(streamId);
   if (!child) return false;
-  child.kill('SIGTERM');
+  child.aaastreamerStopping = true;
   sourceProcesses.delete(streamId);
+  child.kill('SIGTERM');
   return true;
+}
+
+function advanceStreamSourceQueue(streamId) {
+  const store = readStore();
+  const stream = store.streams.find((item) => item.id === streamId);
+  if (!stream) return false;
+  normalizeStream(stream);
+  const nextIndex = stream.sourceQueue.findIndex((source) => playableSourceUrl(source, store));
+  if (nextIndex < 0) {
+    appendEvent('source_relay_queue_empty', { streamId });
+    return false;
+  }
+  const [nextSource] = stream.sourceQueue.splice(nextIndex, 1);
+  const previousSource = stream.currentSource;
+  stream.currentSource = nextSource;
+  addSourcesToQueue(stream, [previousSource]);
+  stream.updatedAt = nowIso();
+  store.events.push({
+    id: id('evt'),
+    type: 'source_relay_queue_advanced',
+    payload: { streamId: stream.id, sourceId: nextSource.id, label: nextSource.label },
+    createdAt: nowIso()
+  });
+  writeStore(store);
+  try {
+    startSourceProcess(stream, nextSource, store);
+    return true;
+  } catch (error) {
+    appendEvent('source_relay_queue_error', { streamId, message: error.message });
+    return false;
+  }
 }
 
 function startSourceProcess(stream, source, store) {
@@ -966,11 +1082,16 @@ function startSourceProcess(stream, source, store) {
   const outputKey = stream.streamKey;
   const output = `rtmp://127.0.0.1:1935/${rtmpAppName}/${outputKey}`;
   stopSourceProcess(stream.id);
+  const hasQueue = (stream.sourceQueue || []).some((queuedSource) => playableSourceUrl(queuedSource, store));
   const args = [
     '-hide_banner',
     '-loglevel', 'warning',
-    '-re',
-    '-stream_loop', '-1',
+    '-re'
+  ];
+  if (!hasQueue) {
+    args.push('-stream_loop', '-1');
+  }
+  args.push(
     '-i', input,
     '-map', '0:v?',
     '-map', '0:a?',
@@ -983,15 +1104,20 @@ function startSourceProcess(stream, source, store) {
     '-ac', '2',
     '-f', 'flv',
     output
-  ];
+  );
   const child = childProcess.spawn(ffmpegPath(), args, { stdio: ['ignore', 'ignore', 'pipe'] });
   sourceProcesses.set(stream.id, child);
   child.stderr.on('data', (data) => {
     appendEvent('source_relay_log', { streamId: stream.id, message: String(data).slice(0, 500) });
   });
   child.on('exit', (code, signal) => {
-    sourceProcesses.delete(stream.id);
+    if (sourceProcesses.get(stream.id) === child) {
+      sourceProcesses.delete(stream.id);
+    }
     appendEvent('source_relay_exit', { streamId: stream.id, code, signal });
+    if (!child.aaastreamerStopping && hasQueue) {
+      setTimeout(() => advanceStreamSourceQueue(stream.id), 1000);
+    }
   });
   return child;
 }
@@ -1237,6 +1363,7 @@ app.get('/dashboard', (req, res) => {
   const selectedSource = stream.currentSource || null;
   const mediaOptions = mediaSourceOptions(store, user, selectedSource);
   const relayRows = (stream.relaySources || []).map((source) => `<tr><td>${escapeHtml(source.label)}</td><td>${escapeHtml(source.mediaType)}</td><td><a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">Open URL</a></td><td><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/select" class="inline-form"><button type="submit">Use</button></form><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/delete" class="inline-form"><button type="submit" class="danger">Remove</button></form></td></tr>`).join('');
+  const queueRows = queuedSourceRows(stream, store);
   const activeSourceRunning = sourceProcesses.has(stream.id);
   const quickSourceCards = sourcePresetCards(stream, serverUrl);
   const body = `<h1>User panel</h1>
@@ -1263,9 +1390,10 @@ app.get('/dashboard', (req, res) => {
 <section><h2>Server media and URL relay</h2><p class="muted">Choose existing server media or a remote URL to use as on-demand content or as a looped broadcast source. Stream links stay hidden from visitors while you are offline unless on-demand playback is enabled and a valid source is selected.</p>
 <p>Current source: <strong>${escapeHtml(sourceSummary(selectedSource))}</strong>. Relay process: <strong>${activeSourceRunning ? 'running' : 'stopped'}</strong>.</p>
 <section class="subsection"><h3>Quick source setup</h3><p class="muted">Pick the source type first. Presets copy the correct connection URL or fill the relay fields so setup is not manual-only.</p><div class="preset-grid">${quickSourceCards}</div></section>
-<form method="post" action="/dashboard/sources/select"><label>Server media<select id="serverMediaSource" name="localMedia">${mediaOptions}</select></label><input type="hidden" name="sourceType" value="localMedia"><button type="submit">Use selected server media</button></form>
-<form method="post" action="/dashboard/sources/upload"><label>Upload audio or video<input id="mediaUpload" type="file" accept="audio/*,video/*"></label><input type="hidden" id="mediaUploadData" name="uploadData"><label>Upload title<input name="uploadLabel" placeholder="Intro music, event replay, audio described movie"></label><button type="submit">Upload and use media</button></form>
+<form method="post" action="/dashboard/sources/select"><label>Server media<select id="serverMediaSource" name="localMedia" multiple size="8">${mediaOptions}</select></label><input type="hidden" name="sourceType" value="localMedia"><p class="muted">Select one item to use it now, or select several items to queue them in order. Hold Control or Shift while selecting multiple files.</p><button type="submit">Use or queue selected server media</button></form>
+<form method="post" action="/dashboard/sources/upload"><label>Upload audio or video files<input id="mediaUpload" type="file" accept="audio/*,video/*" multiple></label><input type="hidden" id="mediaUploadData" name="uploadData"><label>Upload title<input name="uploadLabel" placeholder="Intro music, event replay, audio described movie"></label><button type="submit">Upload and queue media</button></form>
 <form method="post" action="/dashboard/sources/url"><input type="hidden" name="sourceType" value="urlRelay"><label>Relay label<input id="relayLabel" name="relayLabel" placeholder="Radio relay, remote event, training video"></label><label>Media type<select id="relayMediaType" name="relayMediaType"><option value="video">video</option><option value="audio">audio</option></select></label><label>HTTP or HTTPS media URL<input id="relayUrl" name="relayUrl" placeholder="https://example.com/stream.mp3"></label><button type="submit">Add URL relay source</button></form>
+<section class="subsection"><h3>Source queue</h3><p class="muted">Queued sources play after the current source when the source relay is running. A non-empty queue plays as a continuous playlist instead of stopping after one file.</p><table><tr><th>Name</th><th>Type</th><th>Source</th><th>Actions</th></tr>${queueRows || '<tr><td colspan="4">No queued sources. Upload or multi-select media to build a playlist.</td></tr>'}</table><form method="post" action="/dashboard/sources/queue/clear" class="inline-form"><button type="submit" class="danger">Clear queue</button></form></section>
 <table><tr><th>Name</th><th>Type</th><th>URL</th><th>Actions</th></tr>${relayRows || '<tr><td colspan="4">No URL relay sources configured.</td></tr>'}</table>
 <form method="post" action="/dashboard/sources/ondemand"><label><input type="checkbox" name="enabled" value="true" ${stream.onDemand?.enabled ? 'checked' : ''}> Enable on-demand playback for this stream</label><label><input type="checkbox" name="showWhenOffline" value="true" ${stream.onDemand?.showWhenOffline ? 'checked' : ''}> Show this stream to visitors when I am offline and selected media is available</label><label>On-demand title<input name="title" value="${escapeHtml(stream.onDemand?.title || '')}"></label><button type="submit">Save on-demand settings</button></form>
 <form method="post" action="/dashboard/sources/start" class="inline-form"><button type="submit">Start looping selected source as live stream</button></form>
@@ -1304,7 +1432,7 @@ const backgroundImageData=document.getElementById('backgroundImageData');
 if(backgroundUpload){backgroundUpload.addEventListener('change',()=>{const file=backgroundUpload.files&&backgroundUpload.files[0];if(!file)return;if(file.size>700000){setCopyStatus('Background image is too large. Use an image under 700 KB.');backgroundUpload.value='';return;}const reader=new FileReader();reader.onload=()=>{backgroundImageData.value=String(reader.result||'');setCopyStatus('Background image ready to save.');};reader.readAsDataURL(file);});}
 const mediaUpload=document.getElementById('mediaUpload');
 const mediaUploadData=document.getElementById('mediaUploadData');
-if(mediaUpload){mediaUpload.addEventListener('change',()=>{const file=mediaUpload.files&&mediaUpload.files[0];if(!file)return;if(file.size>${JSON.stringify(Number(process.env.AAASTREAMER_MAX_UPLOAD_BYTES || 75 * 1024 * 1024))}){setCopyStatus('Media file is too large for this server upload limit.');mediaUpload.value='';return;}const reader=new FileReader();reader.onload=()=>{mediaUploadData.value=String(reader.result||'');setCopyStatus('Media upload ready to submit.');};reader.readAsDataURL(file);});}
+if(mediaUpload){mediaUpload.addEventListener('change',async()=>{const files=Array.from(mediaUpload.files||[]);if(!files.length)return;if(files.length>${JSON.stringify(maxBulkUploads)}){setCopyStatus('Select no more than ${maxBulkUploads} files at once.');mediaUpload.value='';mediaUploadData.value='';return;}const tooLarge=files.find((file)=>file.size>${JSON.stringify(maxUploadBytes)});if(tooLarge){setCopyStatus(tooLarge.name+' is too large for this server upload limit.');mediaUpload.value='';mediaUploadData.value='';return;}const readFile=(file)=>new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve({name:file.name,type:file.type,data:String(reader.result||'')});reader.onerror=()=>reject(reader.error||new Error('Read failed'));reader.readAsDataURL(file);});try{const uploads=await Promise.all(files.map(readFile));mediaUploadData.value=JSON.stringify(uploads);setCopyStatus(files.length===1?'Media upload ready to submit.':files.length+' media files ready to upload and queue.');}catch{setCopyStatus('Media file could not be read. Choose the file again.');mediaUpload.value='';mediaUploadData.value='';}});}
 </script>`;
   res.send(page('Dashboard', body, user));
 });
@@ -1391,15 +1519,18 @@ app.post('/dashboard/sources/select', requireUser, (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
   const stream = ensureStreamForUser(store, user);
-  const source = sourceFromRequest({ ...req, body: { ...req.body, sourceType: 'localMedia' } }, store, req.user);
-  if (!source) {
+  const sources = bodyValues(req.body.localMedia)
+    .map((localMedia) => sourceFromRequest({ ...req, body: { ...req.body, localMedia, sourceType: 'localMedia' } }, store, req.user))
+    .filter(Boolean);
+  if (!sources.length) {
     res.status(400).send(page('Source not saved', '<h1>Source not saved</h1><p>Select a valid media file from an enabled folder.</p><a class="button" href="/dashboard">Back to dashboard</a>', req.user));
     return;
   }
   stream.sourceMode = 'media';
-  stream.currentSource = source;
+  stream.currentSource = sources[0];
+  addSourcesToQueue(stream, sources.slice(1));
   stream.updatedAt = nowIso();
-  store.events.push({ id: id('evt'), type: 'stream_source_selected', payload: { streamId: stream.id, sourceType: source.type, label: source.label }, createdAt: nowIso() });
+  store.events.push({ id: id('evt'), type: 'stream_source_selected', payload: { streamId: stream.id, sourceType: sources[0].type, label: sources[0].label, queued: Math.max(0, sources.length - 1) }, createdAt: nowIso() });
   writeStore(store);
   res.redirect('/dashboard');
 });
@@ -1427,16 +1558,67 @@ app.post('/dashboard/sources/upload', requireUser, (req, res) => {
   const user = store.users.find((item) => item.id === req.user.id);
   const stream = ensureStreamForUser(store, user);
   try {
-    const source = saveUploadedMedia(store, user, stream, req.body);
+    const sources = saveUploadedMediaBatch(store, user, stream, req.body);
+    const source = sources[0];
     stream.sourceMode = 'media';
     stream.currentSource = source;
+    addSourcesToQueue(stream, sources.slice(1));
     stream.onDemand = { ...stream.onDemand, enabled: true, showWhenOffline: true };
     stream.updatedAt = nowIso();
-    store.events.push({ id: id('evt'), type: 'media_uploaded', payload: { streamId: stream.id, label: source.label, mediaType: source.mediaType }, createdAt: nowIso() });
+    store.events.push({ id: id('evt'), type: 'media_uploaded', payload: { streamId: stream.id, label: source.label, mediaType: source.mediaType, count: sources.length, queued: Math.max(0, sources.length - 1) }, createdAt: nowIso() });
     writeStore(store);
   } catch (error) {
     res.status(400).send(page('Media upload failed', `<h1>Media upload failed</h1><p>${escapeHtml(error.message)}</p><a class="button" href="/dashboard">Back to dashboard</a>`, req.user));
     return;
+  }
+  res.redirect('/dashboard');
+});
+
+app.post('/dashboard/sources/queue/clear', requireUser, (req, res) => {
+  const store = readStore();
+  const stream = store.streams.find((item) => item.ownerId === req.user.id);
+  if (stream) {
+    stream.sourceQueue = [];
+    stream.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'source_queue_cleared', payload: { streamId: stream.id }, createdAt: nowIso() });
+    writeStore(store);
+  }
+  res.redirect('/dashboard');
+});
+
+app.post('/dashboard/sources/queue/:sourceId/select', requireUser, (req, res) => {
+  const store = readStore();
+  const stream = store.streams.find((item) => item.ownerId === req.user.id);
+  if (stream) {
+    const index = (stream.sourceQueue || []).findIndex((source) => source.id === req.params.sourceId);
+    if (index >= 0) {
+      const [source] = stream.sourceQueue.splice(index, 1);
+      const previousSource = stream.currentSource;
+      stream.currentSource = source;
+      addSourcesToQueue(stream, [previousSource]);
+      stream.sourceMode = source.type === 'urlRelay' ? 'url' : 'media';
+      stream.updatedAt = nowIso();
+      store.events.push({ id: id('evt'), type: 'source_queue_selected', payload: { streamId: stream.id, sourceId: source.id, label: source.label }, createdAt: nowIso() });
+      writeStore(store);
+      if (sourceProcesses.has(stream.id)) {
+        try {
+          startSourceProcess(stream, source, store);
+        } catch (error) {
+          appendEvent('source_relay_queue_error', { streamId: stream.id, message: error.message });
+        }
+      }
+    }
+  }
+  res.redirect('/dashboard');
+});
+
+app.post('/dashboard/sources/queue/:sourceId/remove', requireUser, (req, res) => {
+  const store = readStore();
+  const stream = store.streams.find((item) => item.ownerId === req.user.id);
+  if (stream && removeQueuedSource(stream, req.params.sourceId)) {
+    stream.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'source_queue_removed', payload: { streamId: stream.id, sourceId: req.params.sourceId }, createdAt: nowIso() });
+    writeStore(store);
   }
   res.redirect('/dashboard');
 });
@@ -1446,8 +1628,10 @@ app.post('/dashboard/sources/:sourceId/select', requireUser, (req, res) => {
   const stream = store.streams.find((item) => item.ownerId === req.user.id);
   const source = stream?.relaySources?.find((item) => item.id === req.params.sourceId);
   if (stream && source) {
+    const previousSource = stream.currentSource;
     stream.sourceMode = 'url';
     stream.currentSource = source;
+    addSourcesToQueue(stream, [previousSource]);
     stream.updatedAt = nowIso();
     store.events.push({ id: id('evt'), type: 'url_relay_source_selected', payload: { streamId: stream.id, sourceId: source.id }, createdAt: nowIso() });
     writeStore(store);
@@ -1460,6 +1644,7 @@ app.post('/dashboard/sources/:sourceId/delete', requireUser, (req, res) => {
   const stream = store.streams.find((item) => item.ownerId === req.user.id);
   if (stream) {
     stream.relaySources = (stream.relaySources || []).filter((item) => item.id !== req.params.sourceId);
+    stream.sourceQueue = (stream.sourceQueue || []).filter((item) => item.id !== req.params.sourceId);
     if (stream.currentSource?.id === req.params.sourceId) stream.currentSource = null;
     stream.updatedAt = nowIso();
     store.events.push({ id: id('evt'), type: 'url_relay_source_removed', payload: { streamId: stream.id, sourceId: req.params.sourceId }, createdAt: nowIso() });
@@ -1487,10 +1672,17 @@ app.post('/dashboard/sources/start', requireUser, (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
   const stream = ensureStreamForUser(store, user);
-  const source = stream.currentSource || stream.relaySources?.find((item) => item.enabled);
+  const source = firstPlayableSource(stream, store);
   if (!source || !playableSourceUrl(source, store)) {
     res.status(400).send(page('Source relay not started', '<h1>Source relay not started</h1><p>Select a valid server media file or URL relay source first.</p><a class="button" href="/dashboard">Back to dashboard</a>', req.user));
     return;
+  }
+  if (stream.currentSource?.id !== source.id) {
+    const previousSource = stream.currentSource;
+    removeQueuedSource(stream, source.id);
+    stream.currentSource = source;
+    addSourcesToQueue(stream, [previousSource]);
+    stream.sourceMode = source.type === 'urlRelay' ? 'url' : 'media';
   }
   try {
     startSourceProcess(stream, source, store);
