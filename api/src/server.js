@@ -8,6 +8,13 @@ const app = express();
 const uploadLimit = process.env.AAASTREAMER_UPLOAD_LIMIT || '75mb';
 app.use(express.json({ limit: uploadLimit }));
 app.use(express.urlencoded({ extended: false, limit: uploadLimit }));
+app.use((err, _req, res, next) => {
+  if (err?.type === 'entity.parse.failed' || err instanceof SyntaxError) {
+    res.status(400).json({ ok: false, error: 'Invalid request body.' });
+    return;
+  }
+  next(err);
+});
 
 const port = Number(process.env.AAASTREAMER_PORT || 8095);
 const maxUploadBytes = Number(process.env.AAASTREAMER_MAX_UPLOAD_BYTES || 75 * 1024 * 1024);
