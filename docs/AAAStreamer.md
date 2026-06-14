@@ -190,6 +190,12 @@ multiple destinations.
 This system is intended to run directly on the hosting server where streams are
 served. Docker deployment is included for predictable server setup.
 
+AAAStreamer's approved commercial strategy is documented in
+`docs/COMMERCIAL-STRATEGY.md`. Current commercial priorities are hosted
+platform delivery, self-hosted licensed installs, and managed deployment
+services. Community Edition is intentionally delayed until the commercial
+platform, documentation, support process, and recurring revenue are stable.
+
 ## Future work
 
 - database-backed analytics beyond the current JSON store
