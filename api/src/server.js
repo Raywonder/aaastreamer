@@ -177,12 +177,12 @@ function defaultEncoderSettings() {
     audioChannels: 'stereo',
     sampleRate: '48000',
     keyframeIntervalSeconds: 2,
-    latencyMode: 'low',
-    targetLatencySeconds: 2,
-    playerBufferSeconds: 4,
-    hlsSegmentDurationMs: 1000,
+    latencyMode: 'balanced',
+    targetLatencySeconds: 6,
+    playerBufferSeconds: 10,
+    hlsSegmentDurationMs: 2000,
     hlsPartDurationMs: 200,
-    hlsSegmentCount: 7
+    hlsSegmentCount: 8
   };
 }
 
@@ -351,9 +351,9 @@ function normalizeStreamSource(source) {
 function defaultLatencySettings() {
   return {
     mode: 'low',
-    targetLatencySeconds: 2,
-    playerBufferSeconds: 4,
-    reconnectBufferSeconds: 8
+    targetLatencySeconds: 6,
+    playerBufferSeconds: 10,
+    reconnectBufferSeconds: 10
   };
 }
 
@@ -710,8 +710,9 @@ function ensureStreamForUser(store, user, body = {}) {
     latencySettings: {
       ...defaultLatencySettings(),
       mode: encoderDefaults.latencyMode || 'low',
-      targetLatencySeconds: encoderDefaults.targetLatencySeconds || 2,
-      playerBufferSeconds: encoderDefaults.playerBufferSeconds || 4
+      targetLatencySeconds: encoderDefaults.targetLatencySeconds || 6,
+      playerBufferSeconds: encoderDefaults.playerBufferSeconds || 10,
+      reconnectBufferSeconds: encoderDefaults.reconnectBufferSeconds || 10
     },
     activeEncoders: {},
     createdAt,
@@ -825,7 +826,10 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
   const autoplay = options.autoplay ? ' autoplay' : '';
   const playerId = options.playerId || 'streamPlayer';
   const statusId = `${playerId}Status`;
-  const commonAttrs = `id="${escapeHtml(playerId)}" controls playsinline${autoplay} preload="metadata" data-target-latency="${escapeHtml(stream.latencySettings?.targetLatencySeconds || 2)}" data-player-buffer="${escapeHtml(stream.latencySettings?.playerBufferSeconds || 4)}"`;
+  const targetLatency = Number(stream.latencySettings?.targetLatencySeconds || 6);
+  const playerBuffer = Number(stream.latencySettings?.playerBufferSeconds || 10);
+  const reconnectBuffer = Number(stream.latencySettings?.reconnectBufferSeconds || 10);
+  const commonAttrs = `id="${escapeHtml(playerId)}" controls playsinline${autoplay} preload="auto" data-target-latency="${escapeHtml(targetLatency)}" data-player-buffer="${escapeHtml(playerBuffer)}" data-reconnect-buffer="${escapeHtml(reconnectBuffer)}"`;
   if (!isHlsUrl(playbackUrl)) {
     return `<video ${commonAttrs} src="${escapeHtml(playbackUrl)}"></video>`;
   }
@@ -836,11 +840,44 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
   const setStatus = (text) => { if (status) status.textContent = text; };
   if (!player) return;
   const source = player.dataset.hlsSrc;
+  const targetLatency = Math.max(2, Number(player.dataset.targetLatency || 6) || 6);
+  const playerBuffer = Math.max(targetLatency, Number(player.dataset.playerBuffer || 10) || 10);
+  const reconnectDelay = Math.max(2000, (Number(player.dataset.reconnectBuffer || 10) || 10) * 1000);
+  let retryTimer = null;
+  const retryNative = () => {
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(() => {
+      const currentTime = player.currentTime || 0;
+      player.src = source + (source.includes('?') ? '&' : '?') + 'refresh=' + Date.now();
+      player.load();
+      if (currentTime > 0) {
+        player.currentTime = currentTime;
+      }
+      player.play().catch(() => {});
+    }, reconnectDelay);
+  };
   if (player.canPlayType('application/vnd.apple.mpegurl')) {
     player.src = source;
+    player.addEventListener('waiting', () => setStatus('Buffering stream. Holding a little more audio for smooth playback.'));
+    player.addEventListener('stalled', retryNative);
+    player.addEventListener('error', retryNative);
     setStatus('Stream player ready.');
   } else if (window.Hls && Hls.isSupported()) {
-    const hls = new Hls({ lowLatencyMode: false, liveSyncDurationCount: 3, maxLiveSyncPlaybackRate: 1.1, backBufferLength: 30 });
+    const hls = new Hls({
+      lowLatencyMode: false,
+      liveSyncDuration: targetLatency,
+      maxLiveSyncPlaybackRate: 1.05,
+      maxBufferLength: playerBuffer,
+      maxMaxBufferLength: Math.max(playerBuffer * 2, 30),
+      backBufferLength: Math.max(playerBuffer, 30),
+      fragLoadingMaxRetry: 8,
+      fragLoadingRetryDelay: 1000,
+      fragLoadingMaxRetryTimeout: reconnectDelay,
+      manifestLoadingMaxRetry: 8,
+      manifestLoadingRetryDelay: 1000,
+      levelLoadingMaxRetry: 8,
+      levelLoadingRetryDelay: 1000
+    });
     hls.on(Hls.Events.ERROR, (_, data) => {
       if (!data?.fatal) return;
       setStatus('Playback lost. Trying to recover stream.');
@@ -849,6 +886,7 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
     });
     hls.loadSource(source);
     hls.attachMedia(player);
+    player.addEventListener('waiting', () => setStatus('Buffering stream. Holding a little more audio for smooth playback.'));
     setStatus('Stream player ready.');
   } else {
     setStatus('This browser cannot play HLS directly. Try Safari, VLC, or a current Chrome, Edge, or Firefox build with JavaScript enabled.');
@@ -1237,7 +1275,7 @@ ${supportAfter}
 const streamId=${JSON.stringify(stream.id)};
 const comments=document.getElementById('comments');
 const events=new EventSource('/events');
-events.onmessage=(event)=>{try{const msg=JSON.parse(event.data); if(msg.type==='comment' && msg.payload.streamId===streamId){comments.insertAdjacentHTML('beforeend', msg.payload.html); comments.scrollTop=comments.scrollHeight;} if(msg.type==='reaction' && msg.payload.streamId===streamId){const target=document.getElementById('reactions-'+msg.payload.commentId); if(target) target.innerHTML=msg.payload.html;}}catch{}};
+events.onmessage=(event)=>{try{const msg=JSON.parse(event.data); if(msg.type==='comment' && msg.payload.streamId===streamId){comments.insertAdjacentHTML('beforeend', msg.payload.html); comments.scrollTop=comments.scrollHeight;} if(msg.type==='reaction' && msg.payload.streamId===streamId){const target=document.getElementById('reactions-'+msg.payload.commentId); if(target) target.innerHTML=msg.payload.html;} if(['stream_latency_updated','stream_source_selected','source_queue_selected','source_relay_started','source_relay_stopped','ondemand_settings_updated'].includes(msg.type) && msg.payload.streamId===streamId){setTimeout(()=>window.location.reload(),500);}}catch{}};
 const form=document.getElementById('commentForm');
 if(form){form.addEventListener('submit', async (e)=>{e.preventDefault(); const data=Object.fromEntries(new FormData(form)); const res=await fetch('/api/streams/'+streamId+'/comments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}); if(res.ok) form.reset();});}
 document.addEventListener('click', async (event)=>{const button=event.target.closest('[data-reaction]'); if(!button)return; const commentId=button.dataset.commentId; const reaction=button.dataset.reaction; const res=await fetch('/api/comments/'+commentId+'/reactions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({streamId,reaction})}); if(res.ok){const data=await res.json(); const target=document.getElementById('reactions-'+commentId); if(target) target.innerHTML=data.html;}});
@@ -1408,7 +1446,7 @@ app.get('/dashboard', (req, res) => {
 <form method="post" action="/dashboard/sources/start" class="inline-form"><button type="submit">Start looping selected source as live stream</button></form>
 <form method="post" action="/dashboard/sources/stop" class="inline-form"><button type="submit" class="danger">Stop source relay</button></form>
 </section>
-<section><h2>Latency and buffer</h2><form method="post" action="/dashboard/latency"><label>Stream latency mode<select name="mode"><option value="low" ${stream.latencySettings.mode === 'low' ? 'selected' : ''}>Low latency</option><option value="balanced" ${stream.latencySettings.mode === 'balanced' ? 'selected' : ''}>Balanced</option><option value="stable" ${stream.latencySettings.mode === 'stable' ? 'selected' : ''}>Most stable</option></select></label><label>Target live latency, seconds<input name="targetLatencySeconds" type="number" min="1" max="30" step="0.5" value="${escapeHtml(stream.latencySettings.targetLatencySeconds)}"></label><label>Player buffer, seconds<input name="playerBufferSeconds" type="number" min="1" max="60" step="0.5" value="${escapeHtml(stream.latencySettings.playerBufferSeconds)}"></label><label>Reconnect buffer, seconds<input name="reconnectBufferSeconds" type="number" min="2" max="120" step="1" value="${escapeHtml(stream.latencySettings.reconnectBufferSeconds)}"></label><button type="submit">Save latency settings</button></form><p class="muted">Lower latency reacts faster but needs a stable network. Higher buffer values reduce stalls for mobile or busy networks.</p></section>
+<section><h2>Latency and buffer</h2><form method="post" action="/dashboard/latency"><label>Stream latency mode<select name="mode"><option value="low" ${stream.latencySettings.mode === 'low' ? 'selected' : ''}>Low latency</option><option value="balanced" ${stream.latencySettings.mode === 'balanced' ? 'selected' : ''}>Balanced</option><option value="stable" ${stream.latencySettings.mode === 'stable' ? 'selected' : ''}>Most stable</option></select></label><label>Target live latency, seconds<input name="targetLatencySeconds" type="number" min="2" max="30" step="0.5" value="${escapeHtml(stream.latencySettings.targetLatencySeconds)}"></label><label>Player buffer, seconds<input name="playerBufferSeconds" type="number" min="4" max="60" step="0.5" value="${escapeHtml(stream.latencySettings.playerBufferSeconds)}"></label><label>Reconnect buffer, seconds<input name="reconnectBufferSeconds" type="number" min="4" max="120" step="1" value="${escapeHtml(stream.latencySettings.reconnectBufferSeconds)}"></label><button type="submit">Save latency settings</button></form><p class="muted">Lower latency reacts faster but needs a stable network. Higher buffer values reduce stalls for mobile or busy networks.</p></section>
 <section><h2>Stream profile</h2><form method="post" action="/dashboard/stream"><label>Title<input name="title" value="${escapeHtml(stream.title)}"></label><label>Description<textarea name="description" rows="4">${escapeHtml(stream.description || '')}</textarea></label><label>Links, one per line. Use Label|https://example.com<textarea name="links" rows="4">${escapeHtml(linksText(stream.links))}</textarea></label><label>Optional photo background<input id="backgroundUpload" type="file" accept="image/png,image/jpeg,image/webp"></label><input type="hidden" id="backgroundImageData" name="backgroundImageData"><label><input type="checkbox" name="removeBackground" value="true"> Remove current background</label><label>Visibility<select name="visibility"><option ${stream.visibility === 'public' ? 'selected' : ''}>public</option><option ${stream.visibility === 'unlisted' ? 'selected' : ''}>unlisted</option></select></label><label><input type="checkbox" name="allowComments" value="true" ${stream.allowComments ? 'checked' : ''}> Allow visitor comments</label><button type="submit">Save stream profile</button></form></section>
 <section><h2>Support and payment box</h2><p class="muted">Add trusted donation or payment embed HTML for this stream. It is not shown to visitors unless both enabled and shown on the watch page are checked.</p><form method="post" action="/dashboard/support"><label><input type="checkbox" name="enabled" value="true" ${stream.support?.enabled ? 'checked' : ''}> Enable support box for this stream</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${stream.support?.showOnWatchPage ? 'checked' : ''}> Show support box on the visitor watch page</label><label>Placement<select name="placement"><option value="before" ${stream.support?.placement === 'before' ? 'selected' : ''}>Before stream player</option><option value="during" ${stream.support?.placement === 'during' ? 'selected' : ''}>Beside stream player area</option><option value="after" ${!['before', 'during'].includes(stream.support?.placement) ? 'selected' : ''}>After comments and stream details</option></select></label><label>Heading<input name="title" value="${escapeHtml(stream.support?.title || 'Support this stream')}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(stream.support?.description || '')}</textarea></label><label>Payment or donation embed HTML<textarea name="embedHtml" rows="6">${escapeHtml(stream.support?.embedHtml || '')}</textarea></label><button type="submit">Save support settings</button></form>${renderSupportBox(stream, 'dashboard')}</section>
 <script>
@@ -1722,9 +1760,9 @@ app.post('/dashboard/latency', requireUser, (req, res) => {
   const mode = ['low', 'balanced', 'stable'].includes(req.body.mode) ? req.body.mode : 'low';
   stream.latencySettings = {
     mode,
-    targetLatencySeconds: clampNumber(req.body.targetLatencySeconds, 1, 30, mode === 'stable' ? 8 : 2),
-    playerBufferSeconds: clampNumber(req.body.playerBufferSeconds, 1, 60, mode === 'stable' ? 12 : 4),
-    reconnectBufferSeconds: clampNumber(req.body.reconnectBufferSeconds, 2, 120, 8)
+    targetLatencySeconds: clampNumber(req.body.targetLatencySeconds, 2, 30, mode === 'stable' ? 12 : mode === 'balanced' ? 6 : 4),
+    playerBufferSeconds: clampNumber(req.body.playerBufferSeconds, 4, 60, mode === 'stable' ? 18 : mode === 'balanced' ? 10 : 8),
+    reconnectBufferSeconds: clampNumber(req.body.reconnectBufferSeconds, 4, 120, 10)
   };
   stream.updatedAt = nowIso();
   store.events.push({ id: id('evt'), type: 'stream_latency_updated', payload: { streamId: stream.id, latencySettings: stream.latencySettings }, createdAt: nowIso() });
@@ -1957,7 +1995,7 @@ app.get('/admin/encoders', requireAdmin, (req, res) => {
   const store = readStore();
   const settings = store.settings.encoderDefaults;
   const body = `<h1>Admin panel</h1>${adminTabs('encoders')}
-<section><h2>Default encoder settings</h2><form method="post" action="/admin/encoders"><label>Video bitrate<input name="videoBitrate" value="${escapeHtml(settings.videoBitrate)}"></label><label>Audio bitrate<select name="audioBitrate">${audioBitrates.map((rate) => `<option ${rate === settings.audioBitrate ? 'selected' : ''}>${rate}</option>`).join('')}</select></label><label>Audio channels<select name="audioChannels"><option value="stereo" selected>stereo</option></select></label><label>Sample rate<select name="sampleRate"><option ${settings.sampleRate === '44100' ? 'selected' : ''}>44100</option><option ${settings.sampleRate !== '44100' ? 'selected' : ''}>48000</option></select></label><label>Keyframe interval seconds<input name="keyframeIntervalSeconds" type="number" min="1" max="10" value="${escapeHtml(settings.keyframeIntervalSeconds)}"></label><label>Default latency mode<select name="latencyMode"><option value="low" ${settings.latencyMode === 'low' ? 'selected' : ''}>Low latency</option><option value="balanced" ${settings.latencyMode === 'balanced' ? 'selected' : ''}>Balanced</option><option value="stable" ${settings.latencyMode === 'stable' ? 'selected' : ''}>Most stable</option></select></label><label>Target live latency, seconds<input name="targetLatencySeconds" type="number" min="1" max="30" step="0.5" value="${escapeHtml(settings.targetLatencySeconds)}"></label><label>Player buffer, seconds<input name="playerBufferSeconds" type="number" min="1" max="60" step="0.5" value="${escapeHtml(settings.playerBufferSeconds)}"></label><label>HLS segment duration, ms<input name="hlsSegmentDurationMs" type="number" min="500" max="6000" step="100" value="${escapeHtml(settings.hlsSegmentDurationMs)}"></label><label>HLS part duration, ms<input name="hlsPartDurationMs" type="number" min="100" max="1000" step="50" value="${escapeHtml(settings.hlsPartDurationMs)}"></label><label>HLS segment count<input name="hlsSegmentCount" type="number" min="3" max="20" step="1" value="${escapeHtml(settings.hlsSegmentCount)}"></label><button type="submit">Save encoder defaults</button></form></section>
+<section><h2>Default encoder settings</h2><form method="post" action="/admin/encoders"><label>Video bitrate<input name="videoBitrate" value="${escapeHtml(settings.videoBitrate)}"></label><label>Audio bitrate<select name="audioBitrate">${audioBitrates.map((rate) => `<option ${rate === settings.audioBitrate ? 'selected' : ''}>${rate}</option>`).join('')}</select></label><label>Audio channels<select name="audioChannels"><option value="stereo" selected>stereo</option></select></label><label>Sample rate<select name="sampleRate"><option ${settings.sampleRate === '44100' ? 'selected' : ''}>44100</option><option ${settings.sampleRate !== '44100' ? 'selected' : ''}>48000</option></select></label><label>Keyframe interval seconds<input name="keyframeIntervalSeconds" type="number" min="1" max="10" value="${escapeHtml(settings.keyframeIntervalSeconds)}"></label><label>Default latency mode<select name="latencyMode"><option value="low" ${settings.latencyMode === 'low' ? 'selected' : ''}>Low latency</option><option value="balanced" ${settings.latencyMode === 'balanced' ? 'selected' : ''}>Balanced</option><option value="stable" ${settings.latencyMode === 'stable' ? 'selected' : ''}>Most stable</option></select></label><label>Target live latency, seconds<input name="targetLatencySeconds" type="number" min="2" max="30" step="0.5" value="${escapeHtml(settings.targetLatencySeconds)}"></label><label>Player buffer, seconds<input name="playerBufferSeconds" type="number" min="4" max="60" step="0.5" value="${escapeHtml(settings.playerBufferSeconds)}"></label><label>HLS segment duration, ms<input name="hlsSegmentDurationMs" type="number" min="1000" max="6000" step="100" value="${escapeHtml(settings.hlsSegmentDurationMs)}"></label><label>HLS part duration, ms<input name="hlsPartDurationMs" type="number" min="100" max="1000" step="50" value="${escapeHtml(settings.hlsPartDurationMs)}"></label><label>HLS segment count<input name="hlsSegmentCount" type="number" min="4" max="20" step="1" value="${escapeHtml(settings.hlsSegmentCount)}"></label><button type="submit">Save encoder defaults</button></form></section>
 <section><h2>Recommended software</h2><ul><li>OBS Studio: Custom streaming server, RTMP URL, stream key.</li><li>Ecamm Live: RTMP destination with the same server URL and stream key.</li><li>Audio Hijack: pair with a supported broadcaster or virtual camera/RTMP workflow for audio-only or mixed sessions.</li><li>Larix Broadcaster and Streamlabs: custom RTMP destination using the same details.</li></ul></section>`;
   res.send(page('Admin encoder settings', body, req.user));
 });
@@ -1970,12 +2008,12 @@ app.post('/admin/encoders', requireAdmin, (req, res) => {
     audioChannels: 'stereo',
     sampleRate: req.body.sampleRate === '44100' ? '44100' : '48000',
     keyframeIntervalSeconds: clampNumber(req.body.keyframeIntervalSeconds, 1, 10, 2),
-    latencyMode: ['low', 'balanced', 'stable'].includes(req.body.latencyMode) ? req.body.latencyMode : 'low',
-    targetLatencySeconds: clampNumber(req.body.targetLatencySeconds, 1, 30, 2),
-    playerBufferSeconds: clampNumber(req.body.playerBufferSeconds, 1, 60, 4),
-    hlsSegmentDurationMs: clampNumber(req.body.hlsSegmentDurationMs, 500, 6000, 1000),
+    latencyMode: ['low', 'balanced', 'stable'].includes(req.body.latencyMode) ? req.body.latencyMode : 'balanced',
+    targetLatencySeconds: clampNumber(req.body.targetLatencySeconds, 2, 30, 6),
+    playerBufferSeconds: clampNumber(req.body.playerBufferSeconds, 4, 60, 10),
+    hlsSegmentDurationMs: clampNumber(req.body.hlsSegmentDurationMs, 1000, 6000, 2000),
     hlsPartDurationMs: clampNumber(req.body.hlsPartDurationMs, 100, 1000, 200),
-    hlsSegmentCount: clampNumber(req.body.hlsSegmentCount, 3, 20, 7)
+    hlsSegmentCount: clampNumber(req.body.hlsSegmentCount, 4, 20, 8)
   };
   store.events.push({ id: id('evt'), type: 'encoder_defaults_updated', payload: store.settings.encoderDefaults, createdAt: nowIso() });
   writeStore(store);
