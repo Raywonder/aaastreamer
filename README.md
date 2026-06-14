@@ -93,6 +93,9 @@ VoiceLink-facing endpoints:
 
 ## Project layout
 
+- [docs/COMMERCIAL-STRATEGY.md](/Users/admin/git/Raywonder/aaastreamer/docs/COMMERCIAL-STRATEGY.md)
+  Approved hosted, self-hosted licensed, managed deployment, pricing, licensing,
+  offline grace, internal licensing, and product-positioning strategy.
 - [docs/AAAStreamer.md](/Users/admin/git/Raywonder/aaastreamer/docs/AAAStreamer.md)
   Product and deployment notes moved from the original root markdown file.
 - [docker-compose.yml](/Users/admin/git/Raywonder/aaastreamer/docker-compose.yml)
