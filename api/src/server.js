@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import childProcess from 'child_process';
+import dns from 'dns';
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
@@ -288,6 +289,7 @@ function ensureDataStore() {
         social: defaultSocialSettings(),
         visitorCommentsEnabled: true,
         messaging: defaultMessagingSettings(),
+        commentAccessRules: [],
         supportDefaults: defaultSupportSettings(),
         registrationsEnabled: process.env.AAASTREAMER_REGISTRATION_ENABLED === 'true',
         registrationDefaultRole: 'user',
@@ -326,6 +328,83 @@ function normalizeMessagingSettings(settings = {}) {
     retentionHours: clampNumber(settings.retentionHours, 0, 24 * 365, defaults.retentionHours),
     maxStoredMessages: clampNumber(settings.maxStoredMessages, 100, 50000, defaults.maxStoredMessages)
   };
+}
+
+function normalizeCommentAccessRule(rule = {}) {
+  const targetType = ['user', 'ipv4', 'ipv6', 'ip', 'host', 'dns'].includes(rule.targetType) ? rule.targetType : '';
+  const action = ['allow', 'review', 'hide', 'block'].includes(rule.action) ? rule.action : '';
+  const targetValue = String(rule.targetValue || '').trim().toLowerCase().slice(0, 255);
+  if (!targetType || !action || !targetValue) return null;
+  return {
+    id: String(rule.id || id('car')).slice(0, 80),
+    targetType,
+    targetValue,
+    action,
+    notes: String(rule.notes || '').trim().slice(0, 500),
+    createdAt: rule.createdAt || nowIso()
+  };
+}
+
+function normalizeIpAddress(value = '') {
+  const raw = String(value || '').split(',')[0].trim().replace(/^::ffff:/i, '');
+  return raw.replace(/^\[|\]$/g, '');
+}
+
+function requestClientIp(req) {
+  return normalizeIpAddress(req.ip || req.get('x-forwarded-for') || req.socket?.remoteAddress || '');
+}
+
+function ipVersion(ip) {
+  if (!ip) return '';
+  return ip.includes(':') ? 'ipv6' : 'ipv4';
+}
+
+function requestHostName(req) {
+  return String(req.get('x-forwarded-host') || req.get('host') || '').split(',')[0].trim().toLowerCase().replace(/:\d+$/, '').slice(0, 255);
+}
+
+async function reverseDnsHost(ip) {
+  if (!ip) return '';
+  try {
+    const names = await Promise.race([
+      dns.promises.reverse(ip),
+      new Promise((resolve) => setTimeout(() => resolve([]), 500))
+    ]);
+    return String((Array.isArray(names) && names[0]) || '').toLowerCase().slice(0, 255);
+  } catch {
+    return '';
+  }
+}
+
+function valueMatchesRule(value, targetValue) {
+  const normalizedValue = String(value || '').toLowerCase();
+  const normalizedTarget = String(targetValue || '').toLowerCase();
+  if (!normalizedValue || !normalizedTarget) return false;
+  if (normalizedTarget.includes('*')) {
+    const pattern = normalizedTarget.split('*').map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*');
+    return new RegExp(`^${pattern}$`, 'i').test(normalizedValue);
+  }
+  return normalizedValue === normalizedTarget || normalizedValue.endsWith(`.${normalizedTarget}`);
+}
+
+function commentIdentityForRules(commentIdentity, user) {
+  return {
+    user: user?.username || user?.displayName || commentIdentity.authorName || '',
+    ip: commentIdentity.ipAddress || '',
+    ipv4: commentIdentity.ipVersion === 'ipv4' ? commentIdentity.ipAddress : '',
+    ipv6: commentIdentity.ipVersion === 'ipv6' ? commentIdentity.ipAddress : '',
+    host: commentIdentity.requestHost || '',
+    dns: commentIdentity.reverseDnsHost || ''
+  };
+}
+
+function evaluateCommentAccessRules(store, commentIdentity, user) {
+  const values = commentIdentityForRules(commentIdentity, user);
+  for (const rule of store.settings.commentAccessRules || []) {
+    const target = values[rule.targetType] || '';
+    if (valueMatchesRule(target, rule.targetValue)) return rule;
+  }
+  return null;
 }
 
 function pruneComments(store) {
@@ -761,6 +840,9 @@ function normalizeStore(store) {
   store.settings.siteName = store.settings.platformBranding.platformName || store.settings.siteName;
   store.settings.visitorCommentsEnabled ??= true;
   store.settings.messaging = normalizeMessagingSettings(store.settings.messaging || {});
+  store.settings.commentAccessRules = Array.isArray(store.settings.commentAccessRules)
+    ? store.settings.commentAccessRules.map(normalizeCommentAccessRule).filter(Boolean).slice(-500)
+    : [];
   store.settings.supportDefaults = { ...defaultSupportSettings(), ...(store.settings.supportDefaults || {}) };
   store.settings.mediaLibrary = normalizeMediaSettings(store.settings.mediaLibrary);
   store.settings.registrationsEnabled ??= process.env.AAASTREAMER_REGISTRATION_ENABLED === 'true';
@@ -997,6 +1079,16 @@ function requireAdmin(req, res, next) {
   const user = currentUser(req);
   if (!user || user.role !== 'admin') {
     res.status(403).json({ success: false, error: 'Admin access required' });
+    return;
+  }
+  req.user = user;
+  next();
+}
+
+function requireModeratorOrAdmin(req, res, next) {
+  const user = currentUser(req);
+  if (!user || !['admin', 'moderator'].includes(user.role)) {
+    res.status(403).json({ success: false, error: 'Moderator access required' });
     return;
   }
   req.user = user;
@@ -1618,7 +1710,7 @@ function adminTabs(active) {
     ['encoders', 'Encoder settings'],
     ['updater', 'Updater']
   ];
-  return `<nav class="tabs" aria-label="Admin sections">${tabs.map(([idValue, label]) => `<a href="/admin/${idValue}" ${active === idValue ? 'aria-current="page"' : ''}>${label}</a>`).join('')}</nav>`;
+  return `<nav class="tabs" role="tablist" aria-label="Admin sections">${tabs.map(([idValue, label]) => `<a role="tab" class="tab-button" href="/admin/${idValue}" ${active === idValue ? 'aria-selected="true" aria-current="page"' : 'aria-selected="false"'}>${escapeHtml(label)}</a>`).join('')}</nav>`;
 }
 
 function sanitizeSupportEmbed(raw) {
@@ -1714,7 +1806,7 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
   if (!isHlsUrl(playbackUrl)) {
     return `<video ${commonAttrs} src="${escapeHtml(playbackUrl)}"></video>${volumeScript}`;
   }
-  return `<video ${commonAttrs} data-hls-src="${escapeHtml(playbackUrl)}"></video><p id="${escapeHtml(statusId)}" class="muted" role="status">Loading stream player.</p>${volumeScript}<script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script><script>
+  return `<video ${commonAttrs} data-hls-src="${escapeHtml(playbackUrl)}"></video><p id="${escapeHtml(statusId)}" class="muted" role="status">Loading live stream.</p>${volumeScript}<script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script><script>
 (() => {
   const player = document.getElementById(${JSON.stringify(playerId)});
   const status = document.getElementById(${JSON.stringify(statusId)});
@@ -1731,7 +1823,7 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
     clearTimeout(retryTimer);
     retryTimer = setTimeout(() => {
       nativeRetryCount += 1;
-      setStatus('Playback stalled. Reloading the live stream buffer.');
+      setStatus('Refreshing the live stream buffer.');
       player.src = refreshSource();
       player.load();
       player.play().catch(() => {});
@@ -1739,13 +1831,13 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
   };
   if (player.canPlayType('application/vnd.apple.mpegurl')) {
     player.src = source;
-    player.addEventListener('waiting', () => setStatus('Buffering stream. Holding a little more audio for smooth playback.'));
-    player.addEventListener('playing', () => { nativeRetryCount = 0; setStatus('Stream player ready.'); });
+    player.addEventListener('waiting', () => setStatus('Loading more live audio and video.'));
+    player.addEventListener('playing', () => { nativeRetryCount = 0; setStatus(''); });
     player.addEventListener('pause', () => clearTimeout(retryTimer));
     player.addEventListener('stalled', retryNative);
     player.addEventListener('error', retryNative);
     player.addEventListener('emptied', () => { if (nativeRetryCount < 5) retryNative(); });
-    setStatus('Stream player ready.');
+    setStatus('');
   } else if (window.Hls && Hls.isSupported()) {
     const hls = new Hls({
       enableWorker: true,
@@ -1769,15 +1861,16 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
     });
     hls.on(Hls.Events.ERROR, (_, data) => {
       if (!data?.fatal) return;
-      setStatus('Playback lost. Trying to recover stream.');
+      setStatus('Refreshing the live stream buffer.');
       if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
       else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
     });
     player.addEventListener('stalled', () => hls.startLoad());
     hls.loadSource(source);
     hls.attachMedia(player);
-    player.addEventListener('waiting', () => setStatus('Buffering stream. Holding a little more audio for smooth playback.'));
-    setStatus('Stream player ready.');
+    player.addEventListener('waiting', () => setStatus('Loading more live audio and video.'));
+    player.addEventListener('playing', () => setStatus(''));
+    setStatus('');
   } else {
     setStatus('This browser cannot play HLS directly. Try Safari, VLC, or a current Chrome, Edge, or Firefox build with JavaScript enabled.');
   }
@@ -3810,14 +3903,22 @@ app.post('/admin/branding', requireAdmin, (req, res) => {
   res.redirect('/admin/branding');
 });
 
-app.get('/admin/messaging', requireAdmin, (req, res) => {
+app.get('/admin/messaging', requireModeratorOrAdmin, (req, res) => {
   const store = readStore();
   const messaging = normalizeMessagingSettings(store.settings.messaging || {});
   const support = store.settings.supportDefaults || defaultSupportSettings();
+  const isAdmin = req.user.role === 'admin';
+  const ruleRows = (store.settings.commentAccessRules || []).map((rule) => `<tr><td>${escapeHtml(rule.targetType)}</td><td><code>${escapeHtml(rule.targetValue)}</code></td><td>${escapeHtml(rule.action)}</td><td>${escapeHtml(rule.notes || '')}</td><td><form class="inline-form" method="post" action="/admin/comment-rules/${escapeHtml(rule.id)}/delete"><button type="submit" class="danger">Remove rule</button></form></td></tr>`).join('');
   const messageRows = (store.comments || []).slice(-150).reverse().map((comment) => {
     const stream = store.streams.find((item) => item.id === comment.streamId);
     const status = comment.status || 'visible';
-    return `<tr><td>${escapeHtml(comment.createdAt || '')}</td><td>${escapeHtml(stream?.title || 'Unknown stream')}</td><td>${escapeHtml(comment.authorName || '')}<br><span class="muted">${escapeHtml(comment.authorType || '')}</span></td><td>${escapeHtml(status)}</td><td>${escapeHtml(comment.message || '')}</td><td><form class="inline-form" method="post" action="/admin/comments/${escapeHtml(comment.id)}/moderate"><button name="action" value="approve" type="submit">Approve</button><button name="action" value="hide" type="submit">Hide</button><button name="action" value="delete" type="submit" class="danger">Delete</button></form></td></tr>`;
+    const identity = [
+      comment.ipVersion && comment.ipAddress ? `${comment.ipVersion}: ${comment.ipAddress}` : '',
+      comment.requestHost ? `host: ${comment.requestHost}` : '',
+      comment.reverseDnsHost ? `dns: ${comment.reverseDnsHost}` : ''
+    ].filter(Boolean).join('<br>') || '<span class="muted">No network identity saved</span>';
+    const quickValue = comment.authorName || comment.ipAddress || comment.requestHost || '';
+    return `<tr><td>${escapeHtml(comment.createdAt || '')}</td><td>${escapeHtml(stream?.title || 'Unknown stream')}</td><td>${escapeHtml(comment.authorName || '')}<br><span class="muted">${escapeHtml(comment.authorType || '')}</span></td><td>${identity}</td><td>${escapeHtml(status)}</td><td>${escapeHtml(comment.message || '')}</td><td><form class="inline-form" method="post" action="/admin/comments/${escapeHtml(comment.id)}/moderate"><button name="action" value="approve" type="submit">Approve</button><button name="action" value="hide" type="submit">Hide</button><button name="action" value="delete" type="submit" class="danger">Delete</button></form><form class="inline-form" method="post" action="/admin/comment-rules"><input type="hidden" name="targetValue" value="${escapeHtml(quickValue)}"><label>Rule target<select name="targetType"><option value="user">User/name</option><option value="ip">IP address</option><option value="ipv4">IPv4 only</option><option value="ipv6">IPv6 only</option><option value="host">Host</option><option value="dns">Reverse DNS</option></select></label><label>Action<select name="action"><option value="review">Review first</option><option value="hide">Auto-hide</option><option value="block">Block</option><option value="allow">Allow</option></select></label><button type="submit">Add rule from this comment</button></form></td></tr>`;
   }).join('');
   const retentionOptions = [
     [0, 'Keep until manually cleared'],
@@ -3829,10 +3930,17 @@ app.get('/admin/messaging', requireAdmin, (req, res) => {
     [336, '2 weeks'],
     [720, '30 days']
   ].map(([value, label]) => `<option value="${value}" ${Number(messaging.retentionHours) === value ? 'selected' : ''}>${label}</option>`).join('');
-  const body = `<h1>Admin panel</h1>${adminTabs('messaging')}
-<section><h2>Messaging features</h2><form method="post" action="/admin/messaging"><label><input type="checkbox" name="visitorMessagesEnabled" value="true" ${messaging.visitorMessagesEnabled ? 'checked' : ''}> Guests can post stream messages when comments are enabled on the stream</label><label><input type="checkbox" name="loggedInUserMessagesEnabled" value="true" ${messaging.loggedInUserMessagesEnabled ? 'checked' : ''}> Logged-in users can post stream messages</label><label><input type="checkbox" name="reactionsEnabled" value="true" ${messaging.reactionsEnabled ? 'checked' : ''}> Enable reactions on messages</label><label><input type="checkbox" name="requireNameForGuests" value="true" ${messaging.requireNameForGuests ? 'checked' : ''}> Require guests to enter a display name</label><label><input type="checkbox" name="requireGuestReview" value="true" ${messaging.requireGuestReview ? 'checked' : ''}> Hold guest messages for admin review</label><label><input type="checkbox" name="autoHideBlockedWords" value="true" ${messaging.autoHideBlockedWords ? 'checked' : ''}> Auto-hide messages containing blocked words</label><label>Maximum message length<input type="number" min="100" max="5000" step="50" name="maxMessageLength" value="${escapeHtml(messaging.maxMessageLength)}"></label><label>Auto-clear messages after<select name="retentionHours">${retentionOptions}</select></label><label>Maximum stored messages<input type="number" min="100" max="50000" step="100" name="maxStoredMessages" value="${escapeHtml(messaging.maxStoredMessages)}"></label><label>Blocked words or phrases, one per line<textarea name="blockedWords" rows="5">${escapeHtml(messaging.blockedWords || '')}</textarea></label><button type="submit">Save messaging settings</button></form></section>
-<section><h2>Message moderation</h2><p class="muted">Approve pending messages, hide messages from stream pages, or delete messages that should not be retained.</p><table><tr><th>Time</th><th>Stream</th><th>Author</th><th>Status</th><th>Message</th><th>Actions</th></tr>${messageRows || '<tr><td colspan="6">No messages have been posted yet.</td></tr>'}</table><form method="post" action="/admin/comments/prune"><button type="submit">Run message cleanup now</button></form></section>
-<section><h2>Default support and payment box</h2><p class="muted">These defaults are copied into new streams. Stream owners can link their own PayPal, Stripe, Cash App, Apple Pay, or payment embed. The platform payment area can hold WHMCS-linked payment methods for Devine Creations or AAAStreamer support.</p><form method="post" action="/admin/support-defaults"><label><input type="checkbox" name="enabled" value="true" ${support.enabled ? 'checked' : ''}> Enable support box by default for new streams</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${support.showOnWatchPage ? 'checked' : ''}> Show support boxes to visitors by default</label><label>Default placement<select name="placement"><option value="before" ${support.placement === 'before' ? 'selected' : ''}>Before stream player</option><option value="during" ${support.placement === 'during' ? 'selected' : ''}>Beside stream player area</option><option value="after" ${!['before', 'during'].includes(support.placement) ? 'selected' : ''}>After comments and stream details</option></select></label><label>Heading<input name="title" value="${escapeHtml(support.title)}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(support.description)}</textarea></label><label>Creator payment or donation embed HTML<textarea name="embedHtml" rows="6">${escapeHtml(support.embedHtml)}</textarea></label><label><input type="checkbox" name="platformShareEnabled" value="true" ${support.platformShareEnabled ? 'checked' : ''}> Enable platform support share notice</label><label>Platform share percent<input type="number" min="0" max="100" step="0.1" name="platformSharePercent" value="${escapeHtml(support.platformSharePercent ?? 15)}"></label><label>Platform payment heading<input name="platformPaymentTitle" value="${escapeHtml(support.platformPaymentTitle || 'Support AAAStreamer hosting')}"></label><label>Platform payment description<textarea name="platformPaymentDescription" rows="3">${escapeHtml(support.platformPaymentDescription || '')}</textarea></label><label>Platform or WHMCS payment embed HTML<textarea name="platformPaymentEmbedHtml" rows="6">${escapeHtml(support.platformPaymentEmbedHtml || '')}</textarea></label><button type="submit">Save support defaults</button></form></section>`;
+  const messageSettingsSection = isAdmin
+    ? `<section id="message-settings"><h2>Messaging features</h2><form method="post" action="/admin/messaging"><label><input type="checkbox" name="visitorMessagesEnabled" value="true" ${messaging.visitorMessagesEnabled ? 'checked' : ''}> Guests can post stream messages when comments are enabled on the stream</label><label><input type="checkbox" name="loggedInUserMessagesEnabled" value="true" ${messaging.loggedInUserMessagesEnabled ? 'checked' : ''}> Logged-in users can post stream messages</label><label><input type="checkbox" name="reactionsEnabled" value="true" ${messaging.reactionsEnabled ? 'checked' : ''}> Enable reactions on messages</label><label><input type="checkbox" name="requireNameForGuests" value="true" ${messaging.requireNameForGuests ? 'checked' : ''}> Require guests to enter a display name</label><label><input type="checkbox" name="requireGuestReview" value="true" ${messaging.requireGuestReview ? 'checked' : ''}> Hold guest messages for admin review</label><label><input type="checkbox" name="autoHideBlockedWords" value="true" ${messaging.autoHideBlockedWords ? 'checked' : ''}> Auto-hide messages containing blocked words</label><label>Maximum message length<input type="number" min="100" max="5000" step="50" name="maxMessageLength" value="${escapeHtml(messaging.maxMessageLength)}"></label><label>Auto-clear messages after<select name="retentionHours">${retentionOptions}</select></label><label>Maximum stored messages<input type="number" min="100" max="50000" step="100" name="maxStoredMessages" value="${escapeHtml(messaging.maxStoredMessages)}"></label><label>Blocked words or phrases, one per line<textarea name="blockedWords" rows="5">${escapeHtml(messaging.blockedWords || '')}</textarea></label><button type="submit">Save messaging settings</button></form></section>`
+    : `<section id="message-settings"><h2>Messaging features</h2><p class="notice" role="status">Moderator access is active. You can moderate messages and manage comment access rules; global messaging settings stay with administrators.</p></section>`;
+  const supportDefaultsSection = isAdmin
+    ? `<section id="support-defaults"><h2>Default support and payment box</h2><p class="muted">These defaults are copied into new streams. Stream owners can link their own PayPal, Stripe, Cash App, Apple Pay, or payment embed. The platform payment area can hold WHMCS-linked payment methods for Devine Creations or AAAStreamer support.</p><form method="post" action="/admin/support-defaults"><label><input type="checkbox" name="enabled" value="true" ${support.enabled ? 'checked' : ''}> Enable support box by default for new streams</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${support.showOnWatchPage ? 'checked' : ''}> Show support boxes to visitors by default</label><label>Default placement<select name="placement"><option value="before" ${support.placement === 'before' ? 'selected' : ''}>Before stream player</option><option value="during" ${support.placement === 'during' ? 'selected' : ''}>Beside stream player area</option><option value="after" ${!['before', 'during'].includes(support.placement) ? 'selected' : ''}>After comments and stream details</option></select></label><label>Heading<input name="title" value="${escapeHtml(support.title)}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(support.description)}</textarea></label><label>Creator payment or donation embed HTML<textarea name="embedHtml" rows="6">${escapeHtml(support.embedHtml)}</textarea></label><label><input type="checkbox" name="platformShareEnabled" value="true" ${support.platformShareEnabled ? 'checked' : ''}> Enable platform support share notice</label><label>Platform share percent<input type="number" min="0" max="100" step="0.1" name="platformSharePercent" value="${escapeHtml(support.platformSharePercent ?? 15)}"></label><label>Platform payment heading<input name="platformPaymentTitle" value="${escapeHtml(support.platformPaymentTitle || 'Support AAAStreamer hosting')}"></label><label>Platform payment description<textarea name="platformPaymentDescription" rows="3">${escapeHtml(support.platformPaymentDescription || '')}</textarea></label><label>Platform or WHMCS payment embed HTML<textarea name="platformPaymentEmbedHtml" rows="6">${escapeHtml(support.platformPaymentEmbedHtml || '')}</textarea></label><button type="submit">Save support defaults</button></form></section>`
+    : '';
+  const body = `<h1>Admin panel</h1>${adminTabs('messaging')}<nav class="tabs" role="tablist" aria-label="Messaging subsections"><a class="tab-button" role="tab" href="#message-settings">Message settings</a><a class="tab-button" role="tab" href="#moderation">Moderation queue</a><a class="tab-button" role="tab" href="#comment-rules">Comment access rules</a>${isAdmin ? '<a class="tab-button" role="tab" href="#support-defaults">Support defaults</a>' : ''}</nav>
+${messageSettingsSection}
+<section id="moderation"><h2>Message moderation</h2><p class="muted">Approve pending messages, hide messages from stream pages, delete messages, or create access rules tied to users, IPv4, IPv6, host, or reverse DNS identity.</p><table><tr><th>Time</th><th>Stream</th><th>Author</th><th>Network identity</th><th>Status</th><th>Message</th><th>Actions</th></tr>${messageRows || '<tr><td colspan="7">No messages have been posted yet.</td></tr>'}</table><form method="post" action="/admin/comments/prune"><button type="submit">Run message cleanup now</button></form></section>
+<section id="comment-rules"><h2>Comment access rules</h2><p class="muted">Rules are checked from top to bottom when a comment is posted. Targets support exact values or wildcard patterns such as <code>*.example.net</code>.</p><table><tr><th>Target type</th><th>Target value</th><th>Action</th><th>Notes</th><th>Remove</th></tr>${ruleRows || '<tr><td colspan="5">No comment access rules are configured yet.</td></tr>'}</table><form method="post" action="/admin/comment-rules"><label>Target type<select name="targetType"><option value="user">User/name</option><option value="ip">Any IP</option><option value="ipv4">IPv4 only</option><option value="ipv6">IPv6 only</option><option value="host">Host header</option><option value="dns">Reverse DNS hostname</option></select></label><label>Target value<input name="targetValue" placeholder="username, 203.0.113.10, 2001:db8::1, or *.example.net" required></label><label>Action<select name="action"><option value="review">Review first</option><option value="hide">Auto-hide</option><option value="block">Block posting</option><option value="allow">Allow</option></select></label><label>Notes<input name="notes" placeholder="Why this rule exists"></label><button type="submit">Add comment access rule</button></form></section>
+${supportDefaultsSection}`;
   res.send(page('Admin messaging', body, req.user));
 });
 
@@ -3856,7 +3964,7 @@ app.post('/admin/messaging', requireAdmin, (req, res) => {
   res.redirect('/admin/messaging');
 });
 
-app.post('/admin/comments/prune', requireAdmin, (req, res) => {
+app.post('/admin/comments/prune', requireModeratorOrAdmin, (req, res) => {
   const store = readStore();
   const before = store.comments.length;
   pruneComments(store);
@@ -3865,7 +3973,33 @@ app.post('/admin/comments/prune', requireAdmin, (req, res) => {
   res.redirect('/admin/messaging');
 });
 
-app.post('/admin/comments/:commentId/moderate', requireAdmin, (req, res) => {
+app.post('/admin/comment-rules', requireModeratorOrAdmin, (req, res) => {
+  const store = readStore();
+  const rule = normalizeCommentAccessRule({
+    targetType: req.body.targetType,
+    targetValue: req.body.targetValue,
+    action: req.body.action,
+    notes: req.body.notes
+  });
+  if (rule) {
+    store.settings.commentAccessRules ||= [];
+    store.settings.commentAccessRules.push(rule);
+    store.events.push({ id: id('evt'), type: 'comment_access_rule_added', payload: { targetType: rule.targetType, action: rule.action }, createdAt: nowIso() });
+    writeStore(store);
+  }
+  res.redirect('/admin/messaging#comment-rules');
+});
+
+app.post('/admin/comment-rules/:ruleId/delete', requireModeratorOrAdmin, (req, res) => {
+  const store = readStore();
+  const before = (store.settings.commentAccessRules || []).length;
+  store.settings.commentAccessRules = (store.settings.commentAccessRules || []).filter((rule) => rule.id !== req.params.ruleId);
+  store.events.push({ id: id('evt'), type: 'comment_access_rule_removed', payload: { before, after: store.settings.commentAccessRules.length }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/admin/messaging#comment-rules');
+});
+
+app.post('/admin/comments/:commentId/moderate', requireModeratorOrAdmin, (req, res) => {
   const store = readStore();
   const commentIndex = store.comments.findIndex((comment) => comment.id === req.params.commentId);
   if (commentIndex >= 0) {
@@ -4436,7 +4570,7 @@ app.get('/api/streams/:streamId', (req, res) => {
   res.json({ success: true, stream: publicStreamSummary(stream, store, user?.role === 'admin' || stream.ownerId === user?.id) });
 });
 
-app.post('/api/streams/:streamId/comments', (req, res) => {
+app.post('/api/streams/:streamId/comments', async (req, res) => {
   const store = readStore();
   const stream = store.streams.find((item) => item.id === req.params.streamId || item.slug === req.params.streamId);
   if (!stream || !stream.allowComments) {
@@ -4467,8 +4601,30 @@ app.post('/api/streams/:streamId/comments', (req, res) => {
     res.status(400).json({ success: false, error: 'Comment is required' });
     return;
   }
+  const ipAddress = requestClientIp(req);
+  const commentIdentity = {
+    ipAddress,
+    ipVersion: ipVersion(ipAddress),
+    requestHost: requestHostName(req),
+    reverseDnsHost: await reverseDnsHost(ipAddress),
+    userAgent: String(req.get('user-agent') || '').slice(0, 300),
+    authorName
+  };
+  const accessRule = evaluateCommentAccessRules(store, commentIdentity, user);
+  if (accessRule?.action === 'block') {
+    store.events.push({ id: id('evt'), type: 'comment_blocked_by_access_rule', payload: { streamId: stream.id, targetType: accessRule.targetType, ipVersion: commentIdentity.ipVersion }, createdAt: nowIso() });
+    writeStore(store);
+    res.status(403).json({ success: false, error: 'Comments are not available for this visitor.' });
+    return;
+  }
   const blockedWord = messaging.autoHideBlockedWords ? messageHitsBlockedWord(message, messaging) : '';
-  const status = blockedWord ? 'hidden' : (!user && messaging.requireGuestReview ? 'pending' : 'visible');
+  const status = accessRule?.action === 'allow'
+    ? (blockedWord ? 'hidden' : 'visible')
+    : accessRule?.action === 'hide'
+      ? 'hidden'
+      : accessRule?.action === 'review'
+        ? 'pending'
+        : blockedWord ? 'hidden' : (!user && messaging.requireGuestReview ? 'pending' : 'visible');
   const comment = {
     id: id('cmt'),
     streamId: stream.id,
@@ -4479,7 +4635,12 @@ app.post('/api/streams/:streamId/comments', (req, res) => {
     message,
     reactions: {},
     status,
-    moderationReason: blockedWord ? `Blocked word or phrase: ${blockedWord}` : '',
+    moderationReason: accessRule ? `Comment access rule: ${accessRule.targetType} ${accessRule.action}` : blockedWord ? `Blocked word or phrase: ${blockedWord}` : '',
+    ipAddress: commentIdentity.ipAddress,
+    ipVersion: commentIdentity.ipVersion,
+    requestHost: commentIdentity.requestHost,
+    reverseDnsHost: commentIdentity.reverseDnsHost,
+    userAgent: commentIdentity.userAgent,
     createdAt: nowIso()
   };
   store.comments.push(comment);
