@@ -41,6 +41,8 @@ const whmcsApiSecret = process.env.AAASTREAMER_WHMCS_API_SECRET || '';
 const whmcsApiAccessKey = process.env.AAASTREAMER_WHMCS_API_ACCESS_KEY || '';
 const stripeSecretKey = process.env.AAASTREAMER_STRIPE_SECRET_KEY || '';
 const stripeWebhookSecret = process.env.AAASTREAMER_STRIPE_WEBHOOK_SECRET || '';
+const dnsApiToken = process.env.AAASTREAMER_DNS_API_TOKEN || '';
+const mastodonAccessToken = process.env.AAASTREAMER_MASTODON_ACCESS_TOKEN || '';
 const allowRestream = process.env.ALLOW_RESTREAM !== 'false';
 const allowAdHocStreams = process.env.AAASTREAMER_ALLOW_AD_HOC_STREAMS === 'true';
 const sessionCookieName = 'aaastreamer_session';
@@ -156,10 +158,14 @@ function ensureDataStore() {
       events: [],
       payments: [],
       sessions: [],
+      scheduledShows: [],
       settings: {
         siteName: process.env.AAASTREAMER_SITE_NAME || 'AAAStreamer',
         platformBranding: defaultPlatformBranding(),
         paymentIntegration: defaultPaymentIntegrationSettings(),
+        license: defaultLicenseSettings(),
+        dns: defaultDnsSettings(),
+        social: defaultSocialSettings(),
         visitorCommentsEnabled: true,
         messaging: defaultMessagingSettings(),
         supportDefaults: defaultSupportSettings(),
@@ -232,6 +238,162 @@ function defaultPaymentIntegrationSettings() {
     defaultAmountCents: 500,
     minimumAmountCents: 100,
     platformStatement: 'A 15% platform support share helps cover hosting, storage, domains, bandwidth, and support.'
+  };
+}
+
+function defaultLicenseSettings() {
+  return {
+    licensingEnabled: process.env.AAASTREAMER_LICENSE_ENABLED !== 'false',
+    licenseServerUrl: process.env.AAASTREAMER_LICENSE_SERVER_URL || 'https://devine-creations.com',
+    whmcsProductId: process.env.AAASTREAMER_WHMCS_PRODUCT_ID || '',
+    licenseKey: process.env.AAASTREAMER_LICENSE_KEY || '',
+    installId: process.env.AAASTREAMER_INSTALL_ID || '',
+    installDomain: process.env.AAASTREAMER_INSTALL_DOMAIN || '',
+    edition: process.env.AAASTREAMER_EDITION || 'self-hosted',
+    validationStatus: 'unknown',
+    lastValidationAt: '',
+    nextValidationAt: '',
+    graceEndsAt: ''
+  };
+}
+
+function defaultDnsSettings() {
+  return {
+    provider: process.env.AAASTREAMER_DNS_PROVIDER || '',
+    zoneId: process.env.AAASTREAMER_DNS_ZONE_ID || '',
+    defaultTarget: process.env.AAASTREAMER_DNS_DEFAULT_TARGET || '',
+    defaultNameservers: process.env.AAASTREAMER_DNS_DEFAULT_NAMESERVERS || '',
+    lastActionAt: '',
+    lastActionStatus: 'not configured',
+    lastActionMessage: ''
+  };
+}
+
+function defaultSocialSettings() {
+  return {
+    mastodonEnabled: Boolean(mastodonAccessToken),
+    mastodonInstanceUrl: process.env.AAASTREAMER_MASTODON_INSTANCE_URL || 'https://md.tappedin.fm',
+    mastodonAccountLabel: process.env.AAASTREAMER_MASTODON_ACCOUNT_LABEL || 'TappedIn',
+    defaultShareText: 'Watch this stream on AAAStreamer.'
+  };
+}
+
+async function createDnsRecord(settings, { name, type, content, proxied = false }) {
+  if (settings.provider !== 'cloudflare') throw new Error('DNS provider is not configured for Cloudflare.');
+  if (!settings.zoneId || !dnsApiToken) throw new Error('Cloudflare zone ID and API token are required.');
+  const recordType = ['A', 'AAAA', 'CNAME'].includes(String(type || '').toUpperCase()) ? String(type).toUpperCase() : 'CNAME';
+  const response = await fetch(`https://api.cloudflare.com/client/v4/zones/${encodeURIComponent(settings.zoneId)}/dns_records`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${dnsApiToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      type: recordType,
+      name: String(name || '').trim(),
+      content: String(content || '').trim(),
+      proxied: Boolean(proxied)
+    })
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload.success === false) {
+    const message = payload.errors?.map((error) => error.message).join('; ') || `Cloudflare DNS request failed with HTTP ${response.status}.`;
+    throw new Error(message);
+  }
+  return payload.result;
+}
+
+async function postMastodonStatus(settings, status) {
+  if (!settings.mastodonEnabled || !mastodonAccessToken) throw new Error('Mastodon sharing is not configured.');
+  const base = String(settings.mastodonInstanceUrl || '').replace(/\/+$/, '');
+  if (!/^https?:\/\//i.test(base)) throw new Error('Mastodon instance URL is invalid.');
+  const response = await fetch(`${base}/api/v1/statuses`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${mastodonAccessToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ status, visibility: 'public' })
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error || `Mastodon returned HTTP ${response.status}.`);
+  }
+  return payload;
+}
+
+function defaultStreamMediaBehavior() {
+  return {
+    autoEnableUploads: true,
+    autoQueueUploads: true,
+    autoRefreshMedia: true,
+    uploadEnableDelaySeconds: 0,
+    playbackMode: 'loop',
+    continuousPlayback: true
+  };
+}
+
+function normalizeStreamMediaBehavior(settings = {}) {
+  const defaults = defaultStreamMediaBehavior();
+  const playbackMode = ['loop', 'sequential', 'random', 'disabled'].includes(settings.playbackMode)
+    ? settings.playbackMode
+    : defaults.playbackMode;
+  return {
+    ...defaults,
+    ...settings,
+    playbackMode,
+    autoEnableUploads: settings.autoEnableUploads !== false,
+    autoQueueUploads: settings.autoQueueUploads !== false,
+    autoRefreshMedia: settings.autoRefreshMedia !== false,
+    uploadEnableDelaySeconds: clampNumber(settings.uploadEnableDelaySeconds, 0, 86400, 0),
+    continuousPlayback: settings.continuousPlayback !== false
+  };
+}
+
+function normalizeUser(user) {
+  if (!user || typeof user !== 'object') return user;
+  user.whmcsClientId = String(user.whmcsClientId || '').replace(/[^0-9]/g, '').slice(0, 20);
+  user.whmcsPortalEmail = String(user.whmcsPortalEmail || '').trim().slice(0, 180);
+  return user;
+}
+
+function defaultScheduledShow() {
+  return {
+    title: '',
+    description: '',
+    streamId: '',
+    ownerId: '',
+    mode: 'live',
+    sourceId: '',
+    accessLevel: 'public',
+    priceCents: 0,
+    currency: 'usd',
+    status: 'scheduled',
+    enabled: true,
+    startedByScheduler: false
+  };
+}
+
+function normalizeScheduledShow(show) {
+  if (!show || typeof show !== 'object') return null;
+  const defaults = defaultScheduledShow();
+  const mode = ['live', 'media'].includes(show.mode) ? show.mode : defaults.mode;
+  const accessLevel = ['public', 'members', 'paid'].includes(show.accessLevel) ? show.accessLevel : defaults.accessLevel;
+  const status = ['scheduled', 'live', 'ended', 'cancelled'].includes(show.status) ? show.status : defaults.status;
+  return {
+    ...defaults,
+    ...show,
+    id: show.id || id('sch'),
+    title: String(show.title || 'Scheduled show').trim().slice(0, 160) || 'Scheduled show',
+    description: String(show.description || '').trim().slice(0, 1500),
+    mode,
+    accessLevel,
+    priceCents: clampNumber(show.priceCents, 0, 10000000, 0),
+    currency: String(show.currency || 'usd').trim().toLowerCase().replace(/[^a-z]/g, '').slice(0, 3) || 'usd',
+    status,
+    enabled: show.enabled !== false,
+    createdAt: show.createdAt || nowIso(),
+    updatedAt: show.updatedAt || show.createdAt || nowIso()
   };
 }
 
@@ -330,6 +492,8 @@ function normalizeStore(store) {
   store.events ||= [];
   store.payments ||= [];
   store.sessions ||= [];
+  store.scheduledShows ||= [];
+  store.shareLinks ||= [];
   store.settings ||= {};
   store.settings.siteName ||= process.env.AAASTREAMER_SITE_NAME || 'AAAStreamer';
   if (!store.settings.platformBranding) {
@@ -338,6 +502,9 @@ function normalizeStore(store) {
     store.settings.platformBranding = { ...defaultPlatformBranding(), ...store.settings.platformBranding };
   }
   store.settings.paymentIntegration = { ...defaultPaymentIntegrationSettings(), ...(store.settings.paymentIntegration || {}) };
+  store.settings.license = { ...defaultLicenseSettings(), ...(store.settings.license || {}) };
+  store.settings.dns = { ...defaultDnsSettings(), ...(store.settings.dns || {}) };
+  store.settings.social = { ...defaultSocialSettings(), ...(store.settings.social || {}) };
   store.settings.siteName = store.settings.platformBranding.platformName || store.settings.siteName;
   store.settings.visitorCommentsEnabled ??= true;
   store.settings.messaging = { ...defaultMessagingSettings(), ...(store.settings.messaging || {}) };
@@ -348,6 +515,9 @@ function normalizeStore(store) {
   store.settings.encoderDefaults = { ...defaultEncoderSettings(), ...(store.settings.encoderDefaults || {}) };
   store.settings.updateManifestUrl ||= updateManifestUrl;
   store.settings.maintenanceMode ||= { enabled: false, message: '' };
+  store.users = (store.users || []).map(normalizeUser).filter(Boolean);
+  store.scheduledShows = (store.scheduledShows || []).map(normalizeScheduledShow).filter(Boolean);
+  store.shareLinks = (store.shareLinks || []).filter((link) => link?.token && link?.streamId);
   for (const stream of store.streams) normalizeStream(stream);
   return store;
 }
@@ -361,6 +531,7 @@ function normalizeStream(stream) {
   stream.latencySettings = { ...defaultLatencySettings(), ...(stream.latencySettings || {}) };
   stream.support = { ...defaultSupportSettings(), ...(stream.support || {}) };
   stream.extraContent = { ...defaultExtraContentSettings(), ...(stream.extraContent || {}) };
+  stream.mediaBehavior = normalizeStreamMediaBehavior(stream.mediaBehavior);
   stream.onDemand = {
     enabled: false,
     showWhenOffline: false,
@@ -421,6 +592,8 @@ function normalizeStreamSource(source) {
     relativePath: source.relativePath || '',
     url: source.url || '',
     enabled: source.enabled !== false,
+    enableAt: source.enableAt || '',
+    autoEnabled: source.autoEnabled === true,
     createdAt: source.createdAt || nowIso()
   };
 }
@@ -586,6 +759,28 @@ function watchUrlFor(stream) {
   return `${publicUrl || ''}/s/${stream.slug}`;
 }
 
+function tokenUrlFor(token) {
+  return `${publicUrl || ''}/go/${encodeURIComponent(token)}`;
+}
+
+function ensureShareLink(store, stream, createdBy = '') {
+  store.shareLinks ||= [];
+  let link = store.shareLinks.find((item) => item.streamId === stream.id && item.purpose === 'stream');
+  if (!link) {
+    link = {
+      id: id('shr'),
+      token: id('go'),
+      streamId: stream.id,
+      purpose: 'stream',
+      createdBy,
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    };
+    store.shareLinks.push(link);
+  }
+  return link;
+}
+
 function isLive(stream) {
   return stream?.status === 'live' && Object.values(stream.activeEncoders || {}).some((encoder) => encoder.status === 'live');
 }
@@ -676,6 +871,7 @@ function localMediaUrlFor(source) {
 
 function playableSourceUrl(source, store) {
   if (!source?.enabled) return '';
+  if (source.enableAt && new Date(source.enableAt).getTime() > Date.now()) return '';
   if (source.type === 'urlRelay') return /^https?:\/\//i.test(source.url) ? source.url : '';
   if (source.type === 'localMedia') {
     const settings = store.settings.mediaLibrary || defaultMediaSettings();
@@ -781,6 +977,7 @@ function ensureStreamForUser(store, user, body = {}) {
     backgroundImage: '',
     support: { ...store.settings?.supportDefaults },
     extraContent: defaultExtraContentSettings(),
+    mediaBehavior: defaultStreamMediaBehavior(),
     onDemand: { enabled: false, showWhenOffline: false, title: '' },
     sourceMode: 'rtmp',
     currentSource: null,
@@ -982,7 +1179,9 @@ function adminTabs(active) {
     ['signups', 'Signups'],
     ['branding', 'Branding'],
     ['messaging', 'Messaging'],
+    ['share-links', 'Share links'],
     ['payments', 'Payments'],
+    ['install', 'Install and licensing'],
     ['media', 'Media sources'],
     ['encoders', 'Encoder settings'],
     ['updater', 'Updater']
@@ -1212,6 +1411,81 @@ function sourcePresetCards(stream, serverUrl) {
   }).join('');
 }
 
+function dashboardTabs(active) {
+  const tabs = [
+    ['overview', 'Overview'],
+    ['media', 'Media management'],
+    ['schedule', 'Calendar'],
+    ['profile', 'Stream profile'],
+    ['support', 'Support and payments'],
+    ['advanced', 'Advanced']
+  ];
+  return `<nav class="tabs" aria-label="Dashboard sections">${tabs.map(([idValue, label]) => `<a href="/dashboard?tab=${escapeHtml(idValue)}" ${active === idValue ? 'aria-current="page"' : ''}>${escapeHtml(label)}</a>`).join('')}</nav>`;
+}
+
+function effectiveSupportSettings(stream, user, settings = {}) {
+  const support = { ...defaultSupportSettings(), ...(stream.support || {}) };
+  const paymentSettings = settings.paymentIntegration || settings || defaultPaymentIntegrationSettings();
+  if (!support.whmcsClientId) {
+    support.whmcsClientId = user?.whmcsClientId || (user?.role === 'admin' ? paymentSettings.whmcsDefaultClientId : '') || '';
+  }
+  return support;
+}
+
+function mediaCatalogCheckboxes(store, user, selectedSources = []) {
+  const selectedKeys = new Set((selectedSources || []).map(sourceQueueKey));
+  const rows = [];
+  for (const folder of mediaCatalog(store, user)) {
+    for (const file of folder.files) {
+      const source = normalizeStreamSource({
+        type: 'localMedia',
+        folderId: file.folderId,
+        relativePath: file.relativePath,
+        label: file.label,
+        mediaType: file.mediaType
+      });
+      const key = sourceQueueKey(source);
+      rows.push(`<tr><td><input type="checkbox" name="localMedia" value="${escapeHtml(`${file.folderId}|${file.relativePath}`)}" ${selectedKeys.has(key) ? 'checked' : ''}></td><td>${escapeHtml(file.label)}</td><td>${escapeHtml(folder.label)}</td><td>${escapeHtml(file.mediaType)}</td><td>${escapeHtml(formatBytes(file.size))}</td><td>${escapeHtml(file.modifiedAt || '')}</td></tr>`);
+    }
+  }
+  return rows.join('') || '<tr><td colspan="6">No media files are available from enabled folders.</td></tr>';
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  return `${(value / 1024 / 1024 / 1024).toFixed(1)} GB`;
+}
+
+function sourceByIdOrKey(stream, store, sourceId) {
+  const target = String(sourceId || '');
+  if (!target) return null;
+  return streamSources(stream).find((source) => source.id === target || sourceQueueKey(source) === target) || null;
+}
+
+function scheduledShowsForStream(store, stream) {
+  return (store.scheduledShows || [])
+    .filter((show) => show.streamId === stream.id)
+    .sort((a, b) => String(a.startAt || '').localeCompare(String(b.startAt || '')));
+}
+
+function datetimeLocalValue(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '';
+  const pad = (number) => String(number).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function isoFromDatetimeLocal(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const date = new Date(text);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : '';
+}
+
 function sourceFromRequest(req, store, user) {
   const type = String(req.body.sourceType || '').trim();
   if (type === 'localMedia') {
@@ -1403,6 +1677,67 @@ function startSourceProcess(stream, source, store) {
   return child;
 }
 
+function runSchedulerTick() {
+  let store;
+  try {
+    store = readStore();
+  } catch (error) {
+    appendEvent('scheduler_tick_failed', { message: error.message });
+    return;
+  }
+  const now = Date.now();
+  let changed = false;
+  for (const show of store.scheduledShows || []) {
+    if (!show.enabled || show.status === 'cancelled') continue;
+    const stream = store.streams.find((item) => item.id === show.streamId);
+    if (!stream) continue;
+    normalizeStream(stream);
+    const startsAt = new Date(show.startAt || '').getTime();
+    const endsAt = new Date(show.endAt || '').getTime();
+    if (show.status === 'scheduled' && Number.isFinite(startsAt) && startsAt <= now) {
+      show.status = 'live';
+      show.updatedAt = nowIso();
+      if (show.mode === 'media') {
+        const source = sourceByIdOrKey(stream, store, show.sourceId);
+        if (source && playableSourceUrl(source, store)) {
+          stream.currentSource = source;
+          stream.sourceMode = source.type === 'urlRelay' ? 'url' : 'media';
+          stream.status = 'live';
+          stream.hlsUrl = hlsUrlFor(stream.streamKey);
+          try {
+            startSourceProcess(stream, source, store);
+            show.startedByScheduler = true;
+            store.events.push({ id: id('evt'), type: 'scheduled_media_started', payload: { showId: show.id, streamId: stream.id, sourceId: source.id }, createdAt: nowIso() });
+          } catch (error) {
+            show.status = 'scheduled';
+            store.events.push({ id: id('evt'), type: 'scheduled_media_start_failed', payload: { showId: show.id, streamId: stream.id, message: error.message }, createdAt: nowIso() });
+          }
+        } else {
+          store.events.push({ id: id('evt'), type: 'scheduled_media_unavailable', payload: { showId: show.id, streamId: stream.id }, createdAt: nowIso() });
+        }
+      } else {
+        store.events.push({ id: id('evt'), type: 'scheduled_live_window_started', payload: { showId: show.id, streamId: stream.id }, createdAt: nowIso() });
+      }
+      broadcast({ type: 'scheduled_show_started', payload: { showId: show.id, streamId: stream.id, title: show.title, mode: show.mode } });
+      changed = true;
+    }
+    if (show.status === 'live' && Number.isFinite(endsAt) && endsAt <= now) {
+      show.status = 'ended';
+      show.enabled = false;
+      show.updatedAt = nowIso();
+      if (show.startedByScheduler) {
+        stopSourceProcess(stream.id);
+        stream.status = 'ended';
+        stream.updatedAt = nowIso();
+      }
+      store.events.push({ id: id('evt'), type: 'scheduled_show_ended', payload: { showId: show.id, streamId: stream.id }, createdAt: nowIso() });
+      broadcast({ type: 'scheduled_show_ended', payload: { showId: show.id, streamId: stream.id, title: show.title } });
+      changed = true;
+    }
+  }
+  if (changed) writeStore(store);
+}
+
 function getGitRevision() {
   try {
     return childProcess.execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
@@ -1447,6 +1782,12 @@ app.get('/events', (req, res) => {
   req.on('close', () => sseClients.delete(res));
 });
 
+app.get('/api/media/catalog', (req, res) => {
+  const store = readStore();
+  const user = currentUser(req);
+  res.json({ success: true, folders: mediaCatalog(store, user) });
+});
+
 app.get('/media/:folderId/*', (req, res) => {
   const store = readStore();
   const relativePath = req.params[0] || '';
@@ -1462,6 +1803,20 @@ app.get('/media/:folderId/*', (req, res) => {
     return;
   }
   res.sendFile(target);
+});
+
+app.get('/go/:token', (req, res) => {
+  const store = readStore();
+  const link = (store.shareLinks || []).find((item) => item.token === req.params.token);
+  const stream = link ? store.streams.find((item) => item.id === link.streamId) : null;
+  if (!stream) {
+    res.status(404).send(page('Link not found', '<h1>Link not found</h1><p>This share link is no longer available.</p>', currentUser(req)));
+    return;
+  }
+  link.lastUsedAt = nowIso();
+  link.useCount = Number(link.useCount || 0) + 1;
+  writeStore(store);
+  res.redirect(`/s/${encodeURIComponent(stream.slug)}`);
 });
 
 app.use((req, res, next) => {
@@ -1644,9 +1999,14 @@ app.get('/dashboard', (req, res) => {
   }
   const store = readStore();
   const stream = ensureStreamForUser(store, user);
+  const paymentSettings = store.settings.paymentIntegration || defaultPaymentIntegrationSettings();
+  stream.support = effectiveSupportSettings(stream, user, store.settings);
+  const shareLink = ensureShareLink(store, stream, user.id);
   writeStore(store);
+  const activeTab = ['overview', 'media', 'schedule', 'profile', 'support', 'advanced'].includes(req.query.tab) ? req.query.tab : 'overview';
   const serverUrl = rtmpUrlFor(stream.streamKey);
   const watchUrl = watchUrlFor(stream);
+  const shareUrl = tokenUrlFor(shareLink.token);
   const hlsUrl = stream.hlsUrl || hlsUrlFor(stream.streamKey);
   const embedCode = embedCodeFor(stream);
   const encoders = [
@@ -1657,58 +2017,55 @@ app.get('/dashboard', (req, res) => {
   const destinationRows = (stream.destinations || []).map((destination) => `<tr><td>${escapeHtml(destination.name)}</td><td>${escapeHtml(destination.platform)}</td><td>${destination.enabled ? 'enabled' : 'disabled'}</td><td><code>${escapeHtml(destination.rtmpUrl)}</code></td><td><form method="post" action="/dashboard/destinations/${escapeHtml(destination.id)}/delete"><button type="submit" class="danger">Remove</button></form></td></tr>`).join('');
   const presetOptions = platformPresets.map((preset) => `<option value="${escapeHtml(preset.id)}" data-ingest="${escapeHtml(preset.ingest)}">${escapeHtml(preset.name)}</option>`).join('');
   const selectedSource = stream.currentSource || null;
-  const mediaOptions = mediaSourceOptions(store, user, selectedSource);
   const relayRows = (stream.relaySources || []).map((source) => `<tr><td>${escapeHtml(source.label)}</td><td>${escapeHtml(source.mediaType)}</td><td><a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">Open URL</a></td><td><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/select" class="inline-form"><button type="submit">Use</button></form><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/delete" class="inline-form"><button type="submit" class="danger">Remove</button></form></td></tr>`).join('');
   const queueRows = queuedSourceRows(stream, store);
   const activeSourceRunning = sourceProcesses.has(stream.id);
   const quickSourceCards = sourcePresetCards(stream, serverUrl);
-  const body = `<h1>User panel</h1>
-<section><h2>User streaming details</h2>
-<p class="muted">Use these connection details in OBS, Ecamm Live, Audio Hijack, Streamlabs, vMix, Larix Broadcaster, or any app that can publish RTMP. The server URL stays the same; the stream key identifies your account or encoder.</p>
+  const behavior = normalizeStreamMediaBehavior(stream.mediaBehavior);
+  const scheduleRows = scheduledShowsForStream(store, stream).map((show) => `<tr><td>${escapeHtml(show.title)}</td><td>${escapeHtml(show.startAt || '')}</td><td>${escapeHtml(show.mode)}</td><td>${escapeHtml(show.status)}</td><td><form method="post" action="/dashboard/schedule/${escapeHtml(show.id)}/toggle" class="inline-form"><button type="submit">${show.enabled ? 'Disable' : 'Enable'}</button></form><form method="post" action="/dashboard/schedule/${escapeHtml(show.id)}/cancel" class="inline-form"><button type="submit" class="danger">Cancel</button></form></td></tr>`).join('');
+  const tabs = dashboardTabs(activeTab);
+  const overviewTab = `<section><h2>User streaming details</h2>
+<p class="muted">Use these connection details in OBS, Ecamm Live, Audio Hijack, Streamlabs, vMix, Larix Broadcaster, or any app that can publish RTMP.</p>
 <div class="field-row"><label>Server URL<input id="rtmpUrl" readonly value="${escapeHtml(serverUrl)}"></label><button type="button" data-copy-target="rtmpUrl">Copy URL</button></div>
 <div class="field-row"><label>Stream key<input id="streamKey" readonly value="${escapeHtml(stream.streamKey)}"></label><button type="button" data-copy-target="streamKey">Copy key</button></div>
-<div class="field-row"><label>Watch page<input id="watchUrl" readonly value="${escapeHtml(watchUrl)}"></label><button type="button" data-copy-target="watchUrl">Copy watch link</button></div>
+<div class="field-row"><label>Share link<input id="watchUrl" readonly value="${escapeHtml(shareUrl)}"></label><button type="button" data-copy-target="watchUrl">Copy share link</button></div>
+<div class="field-row"><label>Direct watch page<input id="directWatchUrl" readonly value="${escapeHtml(watchUrl)}"></label><button type="button" data-copy-target="directWatchUrl">Copy direct watch link</button></div>
 <div class="field-row"><label>HLS playback URL<input id="hlsUrl" readonly value="${escapeHtml(hlsUrl)}"></label><button type="button" data-copy-target="hlsUrl">Copy HLS link</button></div>
 <div class="field-row"><label>Web embed code<input id="embedCode" readonly value="${escapeHtml(embedCode)}"></label><button type="button" data-copy-target="embedCode">Copy embed code</button></div>
-<p><button type="button" id="shareStream">Share stream link</button></p>
-<p id="copyStatus" class="notice" role="status" aria-live="polite"></p>
+<p><button type="button" id="shareStream">Share stream link</button></p><p id="copyStatus" class="notice" role="status" aria-live="polite"></p>
+<form method="post" action="/dashboard/share/mastodon"><label>Optional Mastodon share text<textarea name="status" rows="3">${escapeHtml(`${stream.title}\n${shareUrl}`)}</textarea></label><button type="submit">Share on Mastodon</button></form>
 <form class="inline-form" method="post" action="/dashboard/stream/key"><input type="hidden" name="action" value="regenerate"><button type="submit">Regenerate stream key</button></form>
-<form class="inline-form" method="post" action="/dashboard/stream/key"><input type="hidden" name="action" value="revoke"><button type="submit" class="danger">Revoke current stream key</button></form>
-<p class="muted">Changing the key immediately prevents future publishes with the old key. Update OBS or any other streaming app after regenerating or revoking a key.</p>
-</section>
-<section><h2>Encoder keys</h2><p class="muted">Add separate keys when you want more than one encoder configured, such as OBS on Windows plus Ecamm on Mac. Audio presets are stereo and can be set from 96k through 320k.</p>
-<table><tr><th>Name</th><th>Key</th><th>Audio bitrate</th><th>Status</th><th>HLS output</th></tr>${encoderRows}</table>
+<form class="inline-form" method="post" action="/dashboard/stream/key"><input type="hidden" name="action" value="revoke"><button type="submit" class="danger">Revoke current stream key</button></form></section>
+<section><h2>Encoder keys</h2><table><tr><th>Name</th><th>Key</th><th>Audio bitrate</th><th>Status</th><th>HLS output</th></tr>${encoderRows}</table>
 <form method="post" action="/dashboard/encoders"><label>Encoder name<input name="name" placeholder="OBS Windows, Ecamm Mac, Audio Hijack"></label><label>Audio bitrate<select name="audioBitrate">${audioBitrates.map((rate) => `<option ${rate === stream.encoderSettings.audioBitrate ? 'selected' : ''}>${rate}</option>`).join('')}</select></label><button type="submit">Add encoder key</button></form></section>
-<section><h2>Destinations</h2><p class="muted">Add external destinations so the stream details are kept with the account. OBS and Ecamm can stream directly to these platforms, and AAAStreamer keeps the connection data organized for later API fan-out.</p>
-<table><tr><th>Name</th><th>Platform</th><th>Status</th><th>RTMP URL</th><th>Action</th></tr>${destinationRows || '<tr><td colspan="5">No destinations configured yet.</td></tr>'}</table>
-<form method="post" action="/dashboard/destinations"><label>Platform<select id="platformPreset" name="platform">${presetOptions}</select></label><label>Name<input name="name" placeholder="Main YouTube channel"></label><label>RTMP or RTMPS URL<input id="destinationRtmpUrl" name="rtmpUrl"></label><label>Stream key<input name="streamKey"></label><label><input type="checkbox" name="enabled" value="true" checked> Enable destination</label><button type="submit">Add destination</button></form>
-<p class="muted">Popular destination dashboards: ${platformPresets.filter((preset) => preset.url).map((preset) => `<a href="${escapeHtml(preset.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(preset.name)}</a>`).join(', ')}.</p></section>
-<section><h2>Server media and URL relay</h2><p class="muted">Choose existing server media or a remote URL to use as on-demand content or as a looped broadcast source. Stream links stay hidden from visitors while you are offline unless on-demand playback is enabled and a valid source is selected.</p>
-<p>Current source: <strong>${escapeHtml(sourceSummary(selectedSource))}</strong>. Relay process: <strong>${activeSourceRunning ? 'running' : 'stopped'}</strong>.</p>
-<section class="subsection"><h3>Quick source setup</h3><p class="muted">Pick the source type first. Presets copy the correct connection URL or fill the relay fields so setup is not manual-only.</p><div class="preset-grid">${quickSourceCards}</div></section>
-<form method="post" action="/dashboard/sources/select"><label>Server media<select id="serverMediaSource" name="localMedia" multiple size="8">${mediaOptions}</select></label><input type="hidden" name="sourceType" value="localMedia"><p class="muted">Select one item to use it now, or select several items to queue them in order. Hold Control or Shift while selecting multiple files.</p><button type="submit">Use or queue selected server media</button></form>
-<form method="post" action="/dashboard/sources/upload"><label>Upload audio or video files<input id="mediaUpload" type="file" accept="audio/*,video/*" multiple></label><input type="hidden" id="mediaUploadData" name="uploadData"><label>Upload title<input name="uploadLabel" placeholder="Intro music, event replay, audio described movie"></label><button type="submit">Upload and queue media</button></form>
+<section><h2>Destinations</h2><table><tr><th>Name</th><th>Platform</th><th>Status</th><th>RTMP URL</th><th>Action</th></tr>${destinationRows || '<tr><td colspan="5">No destinations configured yet.</td></tr>'}</table>
+<form method="post" action="/dashboard/destinations"><label>Platform<select id="platformPreset" name="platform">${presetOptions}</select></label><label>Name<input name="name" placeholder="Main YouTube channel"></label><label>RTMP or RTMPS URL<input id="destinationRtmpUrl" name="rtmpUrl"></label><label>Stream key<input name="streamKey"></label><label><input type="checkbox" name="enabled" value="true" checked> Enable destination</label><button type="submit">Add destination</button></form></section>`;
+  const mediaTab = `<section><h2>Media management</h2><p>Current source: <strong>${escapeHtml(sourceSummary(selectedSource))}</strong>. Relay process: <strong>${activeSourceRunning ? 'running' : 'stopped'}</strong>.</p>
+<form method="post" action="/dashboard/media-settings"><div class="grid"><label><input type="checkbox" name="autoEnableUploads" value="true" ${behavior.autoEnableUploads ? 'checked' : ''}> Auto-enable new uploads</label><label><input type="checkbox" name="autoQueueUploads" value="true" ${behavior.autoQueueUploads ? 'checked' : ''}> Auto-add uploads to queue</label><label><input type="checkbox" name="autoRefreshMedia" value="true" ${behavior.autoRefreshMedia ? 'checked' : ''}> Auto-refresh media list</label><label>Enable delay after upload, seconds<input type="number" min="0" max="86400" name="uploadEnableDelaySeconds" value="${escapeHtml(behavior.uploadEnableDelaySeconds)}"></label><label>Playback action<select name="playbackMode"><option value="loop" ${behavior.playbackMode === 'loop' ? 'selected' : ''}>Auto loop continuously</option><option value="sequential" ${behavior.playbackMode === 'sequential' ? 'selected' : ''}>Play queue in order</option><option value="random" ${behavior.playbackMode === 'random' ? 'selected' : ''}>Random queue playback</option><option value="disabled" ${behavior.playbackMode === 'disabled' ? 'selected' : ''}>Stop or disable source relay</option></select></label></div><button type="submit">Save media settings</button></form>
+<section class="subsection"><h3>Quick source setup</h3><div class="preset-grid">${quickSourceCards}</div></section>
+<form method="post" action="/dashboard/sources/select"><input type="hidden" name="sourceType" value="localMedia"><p><button type="button" id="checkAllMedia">Check all media</button><button type="button" id="uncheckAllMedia" class="secondary">Uncheck all media</button></p><table id="mediaCatalog"><tr><th>Select</th><th>Name</th><th>Folder</th><th>Type</th><th>Size</th><th>Modified</th></tr>${mediaCatalogCheckboxes(store, user, streamSources(stream))}</table><button type="submit">Use selected media</button></form>
+<form method="post" action="/dashboard/sources/upload"><label>Upload audio or video files<input id="mediaUpload" type="file" accept="audio/*,video/*" multiple></label><input type="hidden" id="mediaUploadData" name="uploadData"><label>Upload title<input name="uploadLabel" placeholder="Intro music, event replay, audio described movie"></label><button type="submit">Upload media</button></form>
 <form method="post" action="/dashboard/sources/url"><input type="hidden" name="sourceType" value="urlRelay"><label>Relay label<input id="relayLabel" name="relayLabel" placeholder="Radio relay, remote event, training video"></label><label>Media type<select id="relayMediaType" name="relayMediaType"><option value="video">video</option><option value="audio">audio</option></select></label><label>HTTP or HTTPS media URL<input id="relayUrl" name="relayUrl" placeholder="https://example.com/stream.mp3"></label><button type="submit">Add URL relay source</button></form>
-<section class="subsection"><h3>Source queue</h3><p class="muted">Queued sources play after the current source when the source relay is running. A non-empty queue plays as a continuous playlist instead of stopping after one file.</p><table><tr><th>Name</th><th>Type</th><th>Source</th><th>Actions</th></tr>${queueRows || '<tr><td colspan="4">No queued sources. Upload or multi-select media to build a playlist.</td></tr>'}</table><form method="post" action="/dashboard/sources/queue/clear" class="inline-form"><button type="submit" class="danger">Clear queue</button></form></section>
-<table><tr><th>Name</th><th>Type</th><th>URL</th><th>Actions</th></tr>${relayRows || '<tr><td colspan="4">No URL relay sources configured.</td></tr>'}</table>
-<form method="post" action="/dashboard/sources/ondemand"><label><input type="checkbox" name="enabled" value="true" ${stream.onDemand?.enabled ? 'checked' : ''}> Enable on-demand playback for this stream</label><label><input type="checkbox" name="showWhenOffline" value="true" ${stream.onDemand?.showWhenOffline ? 'checked' : ''}> Show this stream to visitors when I am offline and selected media is available</label><label>On-demand title<input name="title" value="${escapeHtml(stream.onDemand?.title || '')}"></label><button type="submit">Save on-demand settings</button></form>
-<form method="post" action="/dashboard/sources/start" class="inline-form"><button type="submit">Start looping selected source as live stream</button></form>
-<form method="post" action="/dashboard/sources/stop" class="inline-form"><button type="submit" class="danger">Stop source relay</button></form>
-</section>
-<section><h2>Latency and buffer</h2><form method="post" action="/dashboard/latency"><label>Stream latency mode<select name="mode"><option value="low" ${stream.latencySettings.mode === 'low' ? 'selected' : ''}>Low latency</option><option value="balanced" ${stream.latencySettings.mode === 'balanced' ? 'selected' : ''}>Balanced</option><option value="stable" ${stream.latencySettings.mode === 'stable' ? 'selected' : ''}>Most stable</option></select></label><label>Target live latency, seconds<input name="targetLatencySeconds" type="number" min="2" max="30" step="0.5" value="${escapeHtml(stream.latencySettings.targetLatencySeconds)}"></label><label>Player buffer, seconds<input name="playerBufferSeconds" type="number" min="4" max="60" step="0.5" value="${escapeHtml(stream.latencySettings.playerBufferSeconds)}"></label><label>Reconnect buffer, seconds<input name="reconnectBufferSeconds" type="number" min="4" max="120" step="1" value="${escapeHtml(stream.latencySettings.reconnectBufferSeconds)}"></label><button type="submit">Save latency settings</button></form><p class="muted">Lower latency reacts faster but needs a stable network. Higher buffer values reduce stalls for mobile or busy networks.</p></section>
-<section><h2>Stream profile</h2><form method="post" action="/dashboard/stream"><label>Title<input name="title" value="${escapeHtml(stream.title)}"></label><label>Description<textarea name="description" rows="4">${escapeHtml(stream.description || '')}</textarea></label><label>Links, one per line. Use Label|https://example.com<textarea name="links" rows="4">${escapeHtml(linksText(stream.links))}</textarea></label><label>Optional photo background<input id="backgroundUpload" type="file" accept="image/png,image/jpeg,image/webp"></label><input type="hidden" id="backgroundImageData" name="backgroundImageData"><label><input type="checkbox" name="removeBackground" value="true"> Remove current background</label><label>Visibility<select name="visibility"><option ${stream.visibility === 'public' ? 'selected' : ''}>public</option><option ${stream.visibility === 'unlisted' ? 'selected' : ''}>unlisted</option></select></label><label><input type="checkbox" name="allowComments" value="true" ${stream.allowComments ? 'checked' : ''}> Allow visitor comments</label><button type="submit">Save stream profile</button></form></section>
-<details class="panel"><summary>Extra embedded content</summary><p class="muted">Add general embedded content next to the stream description. This can be WHMCS client login, a calendar, a store widget, a form, sponsor content, or anything else the stream owner needs. Custom installs start blank until configured.</p><form method="post" action="/dashboard/extra-content"><label><input type="checkbox" name="enabled" value="true" ${stream.extraContent?.enabled ? 'checked' : ''}> Enable extra embedded content</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${stream.extraContent?.showOnWatchPage ? 'checked' : ''}> Show on visitor stream page</label><label>Heading<input name="title" value="${escapeHtml(stream.extraContent?.title || 'Additional content')}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(stream.extraContent?.description || '')}</textarea></label><label>Embed HTML<textarea name="embedHtml" rows="8">${escapeHtml(stream.extraContent?.embedHtml || '')}</textarea></label><button type="submit">Save extra content</button></form>${renderExtraContentBox(stream, 'dashboard')}</details>
-<section><h2>Support and payment box</h2><p class="muted">Add creator payment links, trusted payment embed HTML, or connected payment identifiers. Stripe Connect account IDs allow integrated checkout to send the creator portion to the creator and keep the configured platform support share.</p><form method="post" action="/dashboard/support"><label><input type="checkbox" name="enabled" value="true" ${stream.support?.enabled ? 'checked' : ''}> Enable support box for this stream</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${stream.support?.showOnWatchPage ? 'checked' : ''}> Show support box on the visitor watch page</label><label>Placement<select name="placement"><option value="before" ${stream.support?.placement === 'before' ? 'selected' : ''}>Before stream player</option><option value="during" ${stream.support?.placement === 'during' ? 'selected' : ''}>Beside stream player area</option><option value="after" ${!['before', 'during'].includes(stream.support?.placement) ? 'selected' : ''}>After comments and stream details</option></select></label><label>Heading<input name="title" value="${escapeHtml(stream.support?.title || 'Support this stream')}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(stream.support?.description || '')}</textarea></label><label>PayPal URL<input name="paypalUrl" value="${escapeHtml(stream.support?.paypalUrl || '')}" placeholder="https://paypal.me/example"></label><label>Stripe payment link<input name="stripeUrl" value="${escapeHtml(stream.support?.stripeUrl || '')}" placeholder="https://buy.stripe.com/..."></label><label>Stripe Connect account ID<input name="stripeConnectAccountId" value="${escapeHtml(stream.support?.stripeConnectAccountId || '')}" placeholder="acct_..."></label><label>WHMCS client ID for invoice payments<input name="whmcsClientId" value="${escapeHtml(stream.support?.whmcsClientId || '')}" inputmode="numeric"></label><label>Cash App URL<input name="cashAppUrl" value="${escapeHtml(stream.support?.cashAppUrl || '')}" placeholder="https://cash.app/$name"></label><label>Apple Pay or payment URL<input name="applePayUrl" value="${escapeHtml(stream.support?.applePayUrl || '')}" placeholder="https://example.com/apple-pay"></label><label>Payment notes<textarea name="paymentNotes" rows="3">${escapeHtml(stream.support?.paymentNotes || '')}</textarea></label><label>Payment or donation embed HTML<textarea name="embedHtml" rows="6">${escapeHtml(stream.support?.embedHtml || '')}</textarea></label><button type="submit">Save support settings</button></form>${renderSupportBox(stream, 'dashboard')}</section>
-<script>
+<section class="subsection"><h3>Source queue</h3><table><tr><th>Name</th><th>Type</th><th>Source</th><th>Actions</th></tr>${queueRows || '<tr><td colspan="4">No queued sources. Upload or check media to build a playlist.</td></tr>'}</table><form method="post" action="/dashboard/sources/queue/clear" class="inline-form"><button type="submit" class="danger">Clear queue</button></form><form method="post" action="/dashboard/sources/action" class="inline-form"><label>Relay action<select name="sourceAction"><option value="start">Start selected or queued media</option><option value="loop">Auto loop current source</option><option value="random">Random playback</option><option value="stop">Stop or disable source relay</option></select></label><button type="submit">Apply action</button></form></section>
+<table><tr><th>Name</th><th>Type</th><th>URL</th><th>Actions</th></tr>${relayRows || '<tr><td colspan="4">No URL relay sources configured.</td></tr>'}</table></section>`;
+  const scheduleTab = `<section><h2>Calendar and scheduled shows</h2><p class="muted">Schedule a live encoder session or pre-created uploaded media. The internal scheduler checks active entries and starts media playback when the show is due.</p><form method="post" action="/dashboard/schedule"><label>Show title<input name="title" required></label><label>Start time<input type="datetime-local" name="startAt" required></label><label>End time<input type="datetime-local" name="endAt"></label><label>Show type<select name="mode"><option value="live">Live stream from encoder</option><option value="media">Pre-created uploaded or server media</option></select></label><label>Media source for pre-created show<select name="sourceId"><option value="">No media source</option>${streamSources(stream).map((source) => `<option value="${escapeHtml(source.id)}">${escapeHtml(sourceSummary(source))}</option>`).join('')}</select></label><label>Description<textarea name="description" rows="4"></textarea></label><button type="submit">Add scheduled show</button></form><table><tr><th>Show</th><th>Start</th><th>Type</th><th>Status</th><th>Actions</th></tr>${scheduleRows || '<tr><td colspan="5">No shows are scheduled yet.</td></tr>'}</table></section>`;
+  const profileTab = `<section><h2>Stream profile</h2><form method="post" action="/dashboard/stream"><label>Title<input name="title" value="${escapeHtml(stream.title)}"></label><label>Description<textarea name="description" rows="4">${escapeHtml(stream.description || '')}</textarea></label><label>Links, one per line. Use Label|https://example.com<textarea name="links" rows="4">${escapeHtml(linksText(stream.links))}</textarea></label><label>Optional photo background<input id="backgroundUpload" type="file" accept="image/png,image/jpeg,image/webp"></label><input type="hidden" id="backgroundImageData" name="backgroundImageData"><label><input type="checkbox" name="removeBackground" value="true"> Remove current background</label><label>Visibility<select name="visibility"><option ${stream.visibility === 'public' ? 'selected' : ''}>public</option><option ${stream.visibility === 'unlisted' ? 'selected' : ''}>unlisted</option></select></label><label><input type="checkbox" name="allowComments" value="true" ${stream.allowComments ? 'checked' : ''}> Allow visitor comments</label><button type="submit">Save stream profile</button></form></section>
+<section><h2>Extra embedded content</h2><form method="post" action="/dashboard/extra-content"><label><input type="checkbox" name="enabled" value="true" ${stream.extraContent?.enabled ? 'checked' : ''}> Enable extra embedded content</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${stream.extraContent?.showOnWatchPage ? 'checked' : ''}> Show on visitor stream page</label><label>Heading<input name="title" value="${escapeHtml(stream.extraContent?.title || 'Additional content')}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(stream.extraContent?.description || '')}</textarea></label><label>Embed HTML<textarea name="embedHtml" rows="8">${escapeHtml(stream.extraContent?.embedHtml || '')}</textarea></label><button type="submit">Save extra content</button></form>${renderExtraContentBox(stream, 'dashboard')}</section>`;
+  const support = effectiveSupportSettings(stream, user, store.settings);
+  const supportTab = `<section><h2>Support and payment box</h2><p class="muted">Admin streams use the configured WHMCS default client when the stream field is blank. Linked user accounts use their stored WHMCS client ID.</p><form method="post" action="/dashboard/support"><label><input type="checkbox" name="enabled" value="true" ${support.enabled ? 'checked' : ''}> Enable support box for this stream</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${support.showOnWatchPage ? 'checked' : ''}> Show support box on the visitor watch page</label><label>Placement<select name="placement"><option value="before" ${support.placement === 'before' ? 'selected' : ''}>Before stream player</option><option value="during" ${support.placement === 'during' ? 'selected' : ''}>Beside stream player area</option><option value="after" ${!['before', 'during'].includes(support.placement) ? 'selected' : ''}>After comments and stream details</option></select></label><label>Heading<input name="title" value="${escapeHtml(support.title || 'Support this stream')}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(support.description || '')}</textarea></label><label>PayPal URL<input name="paypalUrl" value="${escapeHtml(support.paypalUrl || '')}" placeholder="https://paypal.me/example"></label><label>Stripe payment link<input name="stripeUrl" value="${escapeHtml(support.stripeUrl || '')}" placeholder="https://buy.stripe.com/..."></label><label>Stripe Connect account ID<input name="stripeConnectAccountId" value="${escapeHtml(support.stripeConnectAccountId || '')}" placeholder="acct_..."></label><label>WHMCS client ID for invoice payments<input name="whmcsClientId" value="${escapeHtml(support.whmcsClientId || '')}" inputmode="numeric" placeholder="${escapeHtml(user.role === 'admin' ? paymentSettings.whmcsDefaultClientId || 'Admin default not set' : user.whmcsClientId || 'Linked client ID')}"></label><label>Cash App URL<input name="cashAppUrl" value="${escapeHtml(support.cashAppUrl || '')}" placeholder="https://cash.app/$name"></label><label>Apple Pay or payment URL<input name="applePayUrl" value="${escapeHtml(support.applePayUrl || '')}" placeholder="https://example.com/apple-pay"></label><label>Payment notes<textarea name="paymentNotes" rows="3">${escapeHtml(support.paymentNotes || '')}</textarea></label><label>Payment or donation embed HTML<textarea name="embedHtml" rows="6">${escapeHtml(support.embedHtml || '')}</textarea></label><button type="submit">Save support settings</button></form>${renderSupportBox({ ...stream, support }, 'dashboard')}</section>`;
+  const advancedTab = `<section><h2>Latency and buffer</h2><form method="post" action="/dashboard/latency"><label>Stream latency mode<select name="mode"><option value="low" ${stream.latencySettings.mode === 'low' ? 'selected' : ''}>Low latency</option><option value="balanced" ${stream.latencySettings.mode === 'balanced' ? 'selected' : ''}>Balanced</option><option value="stable" ${stream.latencySettings.mode === 'stable' ? 'selected' : ''}>Most stable</option></select></label><label>Target live latency, seconds<input name="targetLatencySeconds" type="number" min="2" max="30" step="0.5" value="${escapeHtml(stream.latencySettings.targetLatencySeconds)}"></label><label>Player buffer, seconds<input name="playerBufferSeconds" type="number" min="4" max="60" step="0.5" value="${escapeHtml(stream.latencySettings.playerBufferSeconds)}"></label><label>Reconnect buffer, seconds<input name="reconnectBufferSeconds" type="number" min="4" max="120" step="1" value="${escapeHtml(stream.latencySettings.reconnectBufferSeconds)}"></label><button type="submit">Save latency settings</button></form></section><section><h2>On-demand display</h2><form method="post" action="/dashboard/sources/ondemand"><label><input type="checkbox" name="enabled" value="true" ${stream.onDemand?.enabled ? 'checked' : ''}> Enable on-demand playback</label><label><input type="checkbox" name="showWhenOffline" value="true" ${stream.onDemand?.showWhenOffline ? 'checked' : ''}> Show to visitors when offline and selected media is available</label><label>On-demand title<input name="title" value="${escapeHtml(stream.onDemand?.title || '')}"></label><button type="submit">Save on-demand settings</button></form></section>`;
+  const selectedBody = { overview: overviewTab, media: mediaTab, schedule: scheduleTab, profile: profileTab, support: supportTab, advanced: advancedTab }[activeTab];
+  const body = `<h1>User panel</h1>${tabs}${selectedBody}<script>
 const copyStatus=document.getElementById('copyStatus');
-function setCopyStatus(message){copyStatus.textContent=message;}
+function setCopyStatus(message){if(copyStatus) copyStatus.textContent=message;}
 async function copyText(value,label){
   if(navigator.clipboard && window.isSecureContext){await navigator.clipboard.writeText(value);}
   else{const area=document.createElement('textarea');area.value=value;area.setAttribute('readonly','');area.style.position='fixed';area.style.left='-9999px';document.body.appendChild(area);area.select();document.execCommand('copy');area.remove();}
   setCopyStatus(label+' copied.');
 }
 document.querySelectorAll('[data-copy-target]').forEach((button)=>button.addEventListener('click',async()=>{const field=document.getElementById(button.dataset.copyTarget);try{await copyText(field.value,button.textContent.replace(/^Copy /,''));}catch{setCopyStatus('Copy failed. Select the field and copy it manually.');}}));
-document.getElementById('shareStream').addEventListener('click',async()=>{const url=document.getElementById('watchUrl').value;const title=${JSON.stringify(stream.title)};try{if(navigator.share){await navigator.share({title,url});setCopyStatus('Share sheet opened.');}else{await copyText(url,'Stream link');}}catch(error){if(error && error.name==='AbortError')return;try{await copyText(url,'Stream link');}catch{setCopyStatus('Sharing failed. Select the watch page field and copy it manually.');}}});
+const shareStream=document.getElementById('shareStream');
+if(shareStream){shareStream.addEventListener('click',async()=>{const url=document.getElementById('watchUrl').value;const title=${JSON.stringify(stream.title)};try{if(navigator.share){await navigator.share({title,url});setCopyStatus('Share sheet opened.');}else{await copyText(url,'Stream link');}}catch(error){if(error && error.name==='AbortError')return;try{await copyText(url,'Stream link');}catch{setCopyStatus('Sharing failed. Select the watch page field and copy it manually.');}}});}
 const platformPreset=document.getElementById('platformPreset');
 const destinationRtmpUrl=document.getElementById('destinationRtmpUrl');
 if(platformPreset){platformPreset.addEventListener('change',()=>{const option=platformPreset.selectedOptions[0];if(option && !destinationRtmpUrl.value){destinationRtmpUrl.value=option.dataset.ingest||'';}});platformPreset.dispatchEvent(new Event('change'));}
@@ -1727,9 +2084,15 @@ document.querySelectorAll('[data-source-preset]').forEach((button)=>button.addEv
 const backgroundUpload=document.getElementById('backgroundUpload');
 const backgroundImageData=document.getElementById('backgroundImageData');
 if(backgroundUpload){backgroundUpload.addEventListener('change',()=>{const file=backgroundUpload.files&&backgroundUpload.files[0];if(!file)return;if(file.size>700000){setCopyStatus('Background image is too large. Use an image under 700 KB.');backgroundUpload.value='';return;}const reader=new FileReader();reader.onload=()=>{backgroundImageData.value=String(reader.result||'');setCopyStatus('Background image ready to save.');};reader.readAsDataURL(file);});}
+const checkAllMedia=document.getElementById('checkAllMedia');
+const uncheckAllMedia=document.getElementById('uncheckAllMedia');
+function setMediaChecks(checked){document.querySelectorAll('#mediaCatalog input[type="checkbox"]').forEach((box)=>{box.checked=checked;});}
+if(checkAllMedia) checkAllMedia.addEventListener('click',()=>setMediaChecks(true));
+if(uncheckAllMedia) uncheckAllMedia.addEventListener('click',()=>setMediaChecks(false));
 const mediaUpload=document.getElementById('mediaUpload');
 const mediaUploadData=document.getElementById('mediaUploadData');
 if(mediaUpload){mediaUpload.addEventListener('change',async()=>{const files=Array.from(mediaUpload.files||[]);if(!files.length)return;if(files.length>${JSON.stringify(maxBulkUploads)}){setCopyStatus('Select no more than ${maxBulkUploads} files at once.');mediaUpload.value='';mediaUploadData.value='';return;}const tooLarge=files.find((file)=>file.size>${JSON.stringify(maxUploadBytes)});if(tooLarge){setCopyStatus(tooLarge.name+' is too large for this server upload limit.');mediaUpload.value='';mediaUploadData.value='';return;}const readFile=(file)=>new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve({name:file.name,type:file.type,data:String(reader.result||'')});reader.onerror=()=>reject(reader.error||new Error('Read failed'));reader.readAsDataURL(file);});try{const uploads=await Promise.all(files.map(readFile));mediaUploadData.value=JSON.stringify(uploads);setCopyStatus(files.length===1?'Media upload ready to submit.':files.length+' media files ready to upload and queue.');}catch{setCopyStatus('Media file could not be read. Choose the file again.');mediaUpload.value='';mediaUploadData.value='';}});}
+${behavior.autoRefreshMedia && activeTab === 'media' ? `let mediaCount=document.querySelectorAll('#mediaCatalog input[type="checkbox"]').length;setInterval(async()=>{try{const response=await fetch('/api/media/catalog');const payload=await response.json();const nextCount=(payload.folders||[]).reduce((total,folder)=>total+(folder.files||[]).length,0);if(nextCount!==mediaCount) location.reload();}catch{}},30000);` : ''}
 </script>`;
   res.send(page('Dashboard', body, user));
 });
@@ -1856,10 +2219,21 @@ app.post('/dashboard/sources/upload', requireUser, (req, res) => {
   const stream = ensureStreamForUser(store, user);
   try {
     const sources = saveUploadedMediaBatch(store, user, stream, req.body);
+    const behavior = normalizeStreamMediaBehavior(stream.mediaBehavior);
+    const enableAt = behavior.uploadEnableDelaySeconds > 0
+      ? new Date(Date.now() + behavior.uploadEnableDelaySeconds * 1000).toISOString()
+      : '';
+    for (const source of sources) {
+      source.enabled = behavior.autoEnableUploads;
+      source.enableAt = enableAt;
+      source.autoEnabled = behavior.autoEnableUploads;
+    }
     const source = sources[0];
     stream.sourceMode = 'media';
-    stream.currentSource = source;
-    addSourcesToQueue(stream, sources.slice(1));
+    if (!stream.currentSource || behavior.autoQueueUploads) {
+      stream.currentSource ||= source;
+      addSourcesToQueue(stream, stream.currentSource?.id === source.id ? sources.slice(1) : sources);
+    }
     stream.onDemand = { ...stream.onDemand, enabled: true, showWhenOffline: true };
     stream.updatedAt = nowIso();
     store.events.push({ id: id('evt'), type: 'media_uploaded', payload: { streamId: stream.id, label: source.label, mediaType: source.mediaType, count: sources.length, queued: Math.max(0, sources.length - 1) }, createdAt: nowIso() });
@@ -2003,6 +2377,51 @@ app.post('/dashboard/sources/stop', requireUser, (req, res) => {
   res.redirect('/dashboard');
 });
 
+app.post('/dashboard/sources/action', requireUser, (req, res) => {
+  const store = readStore();
+  const user = store.users.find((item) => item.id === req.user.id);
+  const stream = ensureStreamForUser(store, user);
+  const sourceAction = String(req.body.sourceAction || '').trim();
+  if (sourceAction === 'stop' || sourceAction === 'disable') {
+    const stopped = stopSourceProcess(stream.id);
+    stream.mediaBehavior = normalizeStreamMediaBehavior({ ...stream.mediaBehavior, playbackMode: 'disabled', continuousPlayback: false });
+    store.events.push({ id: id('evt'), type: 'source_relay_stopped', payload: { streamId: stream.id, stopped, sourceAction }, createdAt: nowIso() });
+    writeStore(store);
+    res.redirect('/dashboard?tab=media');
+    return;
+  }
+  if (sourceAction === 'random') {
+    stream.sourceQueue = (stream.sourceQueue || []).sort(() => Math.random() - 0.5);
+    stream.mediaBehavior = normalizeStreamMediaBehavior({ ...stream.mediaBehavior, playbackMode: 'random', continuousPlayback: true });
+  } else if (sourceAction === 'loop') {
+    stream.mediaBehavior = normalizeStreamMediaBehavior({ ...stream.mediaBehavior, playbackMode: 'loop', continuousPlayback: true });
+  } else {
+    stream.mediaBehavior = normalizeStreamMediaBehavior({ ...stream.mediaBehavior, playbackMode: 'sequential', continuousPlayback: true });
+  }
+  const source = firstPlayableSource(stream, store);
+  if (!source || !playableSourceUrl(source, store)) {
+    res.status(400).send(page('Source relay not started', '<h1>Source relay not started</h1><p>Select a valid server media file or URL relay source first.</p><a class="button" href="/dashboard?tab=media">Back to media management</a>', req.user));
+    return;
+  }
+  if (stream.currentSource?.id !== source.id) {
+    const previousSource = stream.currentSource;
+    removeQueuedSource(stream, source.id);
+    stream.currentSource = source;
+    addSourcesToQueue(stream, [previousSource]);
+    stream.sourceMode = source.type === 'urlRelay' ? 'url' : 'media';
+  }
+  try {
+    startSourceProcess(stream, source, store);
+  } catch (error) {
+    res.status(500).send(page('Source relay not started', `<h1>Source relay not started</h1><p>${escapeHtml(error.message)}</p><a class="button" href="/dashboard?tab=media">Back to media management</a>`, req.user));
+    return;
+  }
+  stream.updatedAt = nowIso();
+  store.events.push({ id: id('evt'), type: 'source_relay_action_started', payload: { streamId: stream.id, sourceAction, sourceType: source.type, label: source.label }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/dashboard?tab=media');
+});
+
 app.post('/dashboard/latency', requireUser, (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
@@ -2049,6 +2468,109 @@ app.post('/dashboard/support', requireUser, (req, res) => {
   store.events.push({ id: id('evt'), type: 'stream_support_updated', payload: { streamId: stream.id, enabled: stream.support.enabled, showOnWatchPage: stream.support.showOnWatchPage }, createdAt: nowIso() });
   writeStore(store);
   res.redirect('/dashboard');
+});
+
+app.post('/dashboard/media-settings', requireUser, (req, res) => {
+  const store = readStore();
+  const user = store.users.find((item) => item.id === req.user.id);
+  const stream = ensureStreamForUser(store, user);
+  stream.mediaBehavior = normalizeStreamMediaBehavior({
+    autoEnableUploads: req.body.autoEnableUploads === 'true',
+    autoQueueUploads: req.body.autoQueueUploads === 'true',
+    autoRefreshMedia: req.body.autoRefreshMedia === 'true',
+    uploadEnableDelaySeconds: req.body.uploadEnableDelaySeconds,
+    playbackMode: req.body.playbackMode,
+    continuousPlayback: req.body.playbackMode !== 'disabled'
+  });
+  stream.updatedAt = nowIso();
+  store.events.push({ id: id('evt'), type: 'stream_media_settings_updated', payload: { streamId: stream.id, mediaBehavior: stream.mediaBehavior }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/dashboard?tab=media');
+});
+
+app.post('/dashboard/share/mastodon', requireUser, async (req, res) => {
+  const store = readStore();
+  const user = store.users.find((item) => item.id === req.user.id);
+  const stream = ensureStreamForUser(store, user);
+  const link = ensureShareLink(store, stream, user.id);
+  const shareUrl = tokenUrlFor(link.token);
+  const social = store.settings.social || defaultSocialSettings();
+  const rawStatus = String(req.body.status || '').trim();
+  const status = (rawStatus || `${stream.title}\n${shareUrl}`).includes(shareUrl)
+    ? rawStatus || `${stream.title}\n${shareUrl}`
+    : `${rawStatus}\n${shareUrl}`;
+  try {
+    const result = await postMastodonStatus(social, status.slice(0, 480));
+    store.events.push({ id: id('evt'), type: 'mastodon_stream_shared', payload: { streamId: stream.id, statusUrl: result.url || null, instance: social.mastodonInstanceUrl }, createdAt: nowIso() });
+    writeStore(store);
+    res.redirect('/dashboard');
+  } catch (error) {
+    store.events.push({ id: id('evt'), type: 'mastodon_stream_share_failed', payload: { streamId: stream.id, message: error.message }, createdAt: nowIso() });
+    writeStore(store);
+    res.status(502).send(page('Mastodon share failed', `<h1>Mastodon share failed</h1><p>${escapeHtml(error.message)}</p><p><a class="button" href="/dashboard">Back to dashboard</a></p>`, req.user));
+  }
+});
+
+app.post('/dashboard/schedule', requireUser, (req, res) => {
+  const store = readStore();
+  const user = store.users.find((item) => item.id === req.user.id);
+  const stream = ensureStreamForUser(store, user);
+  const startAt = isoFromDatetimeLocal(req.body.startAt);
+  if (!startAt) {
+    res.status(400).send(page('Schedule not saved', '<h1>Schedule not saved</h1><p>Choose a valid start time.</p><a class="button" href="/dashboard?tab=schedule">Back to calendar</a>', req.user));
+    return;
+  }
+  const mode = req.body.mode === 'media' ? 'media' : 'live';
+  const source = mode === 'media' ? sourceByIdOrKey(stream, store, req.body.sourceId) : null;
+  if (mode === 'media' && !source) {
+    res.status(400).send(page('Schedule not saved', '<h1>Schedule not saved</h1><p>Choose a media source for a pre-created show.</p><a class="button" href="/dashboard?tab=schedule">Back to calendar</a>', req.user));
+    return;
+  }
+  const accessLevel = ['public', 'members'].includes(req.body.accessLevel) ? req.body.accessLevel : 'public';
+  const show = normalizeScheduledShow({
+    title: req.body.title,
+    description: req.body.description,
+    streamId: stream.id,
+    ownerId: user.id,
+    mode,
+    sourceId: source?.id || '',
+    accessLevel,
+    priceCents: 0,
+    currency: store.settings.paymentIntegration?.currency || 'usd',
+    startAt,
+    endAt: isoFromDatetimeLocal(req.body.endAt),
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  });
+  store.scheduledShows.push(show);
+  store.events.push({ id: id('evt'), type: 'scheduled_show_created', payload: { showId: show.id, streamId: stream.id, mode, accessLevel }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/dashboard?tab=schedule');
+});
+
+app.post('/dashboard/schedule/:showId/toggle', requireUser, (req, res) => {
+  const store = readStore();
+  const show = (store.scheduledShows || []).find((item) => item.id === req.params.showId && item.ownerId === req.user.id);
+  if (show) {
+    show.enabled = !show.enabled;
+    show.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'scheduled_show_toggled', payload: { showId: show.id, enabled: show.enabled }, createdAt: nowIso() });
+    writeStore(store);
+  }
+  res.redirect('/dashboard?tab=schedule');
+});
+
+app.post('/dashboard/schedule/:showId/cancel', requireUser, (req, res) => {
+  const store = readStore();
+  const show = (store.scheduledShows || []).find((item) => item.id === req.params.showId && item.ownerId === req.user.id);
+  if (show) {
+    show.status = 'cancelled';
+    show.enabled = false;
+    show.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'scheduled_show_cancelled', payload: { showId: show.id }, createdAt: nowIso() });
+    writeStore(store);
+  }
+  res.redirect('/dashboard?tab=schedule');
 });
 
 app.post('/dashboard/extra-content', requireUser, (req, res) => {
@@ -2197,6 +2719,19 @@ app.post('/admin/messaging', requireAdmin, (req, res) => {
   res.redirect('/admin/messaging');
 });
 
+app.get('/admin/share-links', requireAdmin, (req, res) => {
+  const store = readStore();
+  const rows = (store.shareLinks || []).slice().reverse().map((link) => {
+    const stream = store.streams.find((item) => item.id === link.streamId);
+    const owner = stream ? store.users.find((user) => user.id === stream.ownerId) : null;
+    const tokenUrl = tokenUrlFor(link.token);
+    const directUrl = stream ? watchUrlFor(stream) : '';
+    return `<tr><td>${escapeHtml(stream?.title || 'Missing stream')}</td><td>${escapeHtml(owner?.username || 'unknown')}</td><td><input readonly value="${escapeHtml(tokenUrl)}"></td><td>${directUrl ? `<details><summary>Show direct URL</summary><input readonly value="${escapeHtml(directUrl)}"></details>` : 'None'}</td><td>${escapeHtml(link.useCount || 0)}</td><td>${escapeHtml(link.lastUsedAt || 'Never')}</td></tr>`;
+  }).join('');
+  const body = `<h1>Admin panel</h1>${adminTabs('share-links')}<section><h2>Tracked share links</h2><p class="muted">Token links are the default public sharing format. Direct stream URLs remain available for desktop clients, API calls, and advanced users, but are hidden by default in public-facing copy/share flows.</p><table><tr><th>Stream</th><th>Owner</th><th>Token URL</th><th>Direct URL</th><th>Uses</th><th>Last used</th></tr>${rows || '<tr><td colspan="6">No tracked share links have been generated yet.</td></tr>'}</table></section>`;
+  res.send(page('Admin share links', body, req.user));
+});
+
 app.get('/admin/payments', requireAdmin, (req, res) => {
   const store = readStore();
   const settings = store.settings.paymentIntegration || defaultPaymentIntegrationSettings();
@@ -2207,6 +2742,78 @@ app.get('/admin/payments', requireAdmin, (req, res) => {
 <section><h2>Integration health</h2><p>Stripe checkout: <strong>${ready.stripe ? 'ready' : 'not ready'}</strong>.</p><p>Stripe webhook verification: <strong>${ready.stripeWebhook ? 'ready' : 'not ready'}</strong>.</p><p>WHMCS API: <strong>${ready.whmcs ? 'ready' : 'not ready'}</strong>.</p><form method="post" action="/admin/payments/test-whmcs"><button type="submit">Test WHMCS API connection</button></form></section>
 <section><h2>Recent payment records</h2><table><tr><th>Time</th><th>Provider</th><th>Status</th><th>Stream</th><th>Amount</th><th>Platform share</th></tr>${recentPayments.map((payment) => `<tr><td>${escapeHtml(payment.createdAt || '')}</td><td>${escapeHtml(payment.provider || '')}</td><td>${escapeHtml(payment.status || '')}</td><td>${escapeHtml(payment.streamSlug || payment.streamId || '')}</td><td>${escapeHtml(formatMoney(payment.amountCents, payment.currency || settings.currency))}</td><td>${escapeHtml(formatMoney(payment.platformFeeCents || 0, payment.currency || settings.currency))}</td></tr>`).join('') || '<tr><td colspan="6">No payment records yet.</td></tr>'}</table></section>`;
   res.send(page('Admin payments', body, req.user));
+});
+
+app.get('/admin/install', requireAdmin, (req, res) => {
+  const store = readStore();
+  const license = store.settings.license || defaultLicenseSettings();
+  const dns = store.settings.dns || defaultDnsSettings();
+  const body = `<h1>Admin panel</h1>${adminTabs('install')}
+<section><h2>Server install and license</h2><p class="muted">Customer-owned installs use their own local payment links while license, product, invoice, and account continuity stay linked to the Devine Creations WHMCS portal.</p><form method="post" action="/admin/install/license"><label><input type="checkbox" name="licensingEnabled" value="true" ${license.licensingEnabled ? 'checked' : ''}> Enable license validation for this install</label><label>License server URL<input name="licenseServerUrl" value="${escapeHtml(license.licenseServerUrl || '')}"></label><label>WHMCS product ID<input name="whmcsProductId" value="${escapeHtml(license.whmcsProductId || '')}"></label><label>License key<input name="licenseKey" value="${escapeHtml(license.licenseKey || '')}"></label><label>Install ID<input name="installId" value="${escapeHtml(license.installId || '')}"></label><label>Install domain<input name="installDomain" value="${escapeHtml(license.installDomain || '')}"></label><label>Edition<select name="edition"><option value="hosted" ${license.edition === 'hosted' ? 'selected' : ''}>Hosted</option><option value="self-hosted" ${license.edition === 'self-hosted' ? 'selected' : ''}>Self-hosted licensed</option><option value="managed" ${license.edition === 'managed' ? 'selected' : ''}>Managed deployment</option><option value="enterprise" ${license.edition === 'enterprise' ? 'selected' : ''}>Enterprise or internal</option></select></label><button type="submit">Save license settings</button></form><p>Validation status: <strong>${escapeHtml(license.validationStatus || 'unknown')}</strong>. Last checked: ${escapeHtml(license.lastValidationAt || 'Never')}.</p></section>
+<section><h2>DNS and domain automation</h2><p class="muted">DNS changes are only performed when a supported provider token is configured on the server. Cloudflare is supported in this build. Existing nameservers and domain ownership must already allow this install to manage records.</p><form method="post" action="/admin/install/dns-settings"><label>DNS provider<select name="provider"><option value="">Not configured</option><option value="cloudflare" ${dns.provider === 'cloudflare' ? 'selected' : ''}>Cloudflare</option></select></label><label>Zone ID<input name="zoneId" value="${escapeHtml(dns.zoneId || '')}"></label><label>Default DNS target<input name="defaultTarget" value="${escapeHtml(dns.defaultTarget || '')}" placeholder="live.tappedin.fm or server hostname"></label><label>Default nameservers<input name="defaultNameservers" value="${escapeHtml(dns.defaultNameservers || '')}"></label><button type="submit">Save DNS settings</button></form><form method="post" action="/admin/install/dns-record"><label>Record name<input name="name" placeholder="live"></label><label>Record type<select name="type"><option value="CNAME">CNAME</option><option value="A">A</option><option value="AAAA">AAAA</option></select></label><label>Record target<input name="content" value="${escapeHtml(dns.defaultTarget || '')}"></label><label><input type="checkbox" name="proxied" value="true"> Proxy through provider when supported</label><button type="submit">Create DNS record</button></form><p>Last DNS action: <strong>${escapeHtml(dns.lastActionStatus || 'not configured')}</strong> ${escapeHtml(dns.lastActionMessage || '')}</p></section>
+<section><h2>Server installer</h2><p>Installer script path in this release: <code>scripts/install-aaastreamer-server.sh</code>.</p><p class="muted">The installer creates a service, env file, optional nginx vhost, and the licensing/DNS configuration hooks needed for production setup.</p></section>`;
+  res.send(page('Admin install and licensing', body, req.user));
+});
+
+app.post('/admin/install/license', requireAdmin, (req, res) => {
+  const store = readStore();
+  const existing = store.settings.license || defaultLicenseSettings();
+  store.settings.license = {
+    ...existing,
+    licensingEnabled: req.body.licensingEnabled === 'true',
+    licenseServerUrl: safeUrl(req.body.licenseServerUrl) || 'https://devine-creations.com',
+    whmcsProductId: String(req.body.whmcsProductId || '').trim().replace(/[^0-9]/g, '').slice(0, 20),
+    licenseKey: String(req.body.licenseKey || '').trim().slice(0, 160),
+    installId: String(req.body.installId || '').trim().slice(0, 160),
+    installDomain: String(req.body.installDomain || '').trim().replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 180),
+    edition: ['hosted', 'self-hosted', 'managed', 'enterprise'].includes(req.body.edition) ? req.body.edition : 'self-hosted'
+  };
+  store.events.push({ id: id('evt'), type: 'license_settings_updated', payload: { edition: store.settings.license.edition, licensingEnabled: store.settings.license.licensingEnabled }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/admin/install');
+});
+
+app.post('/admin/install/dns-settings', requireAdmin, (req, res) => {
+  const store = readStore();
+  const existing = store.settings.dns || defaultDnsSettings();
+  store.settings.dns = {
+    ...existing,
+    provider: req.body.provider === 'cloudflare' ? 'cloudflare' : '',
+    zoneId: String(req.body.zoneId || '').trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 120),
+    defaultTarget: String(req.body.defaultTarget || '').trim().replace(/[^a-zA-Z0-9_.:-]/g, '').slice(0, 240),
+    defaultNameservers: String(req.body.defaultNameservers || '').trim().slice(0, 500)
+  };
+  store.events.push({ id: id('evt'), type: 'dns_settings_updated', payload: { provider: store.settings.dns.provider, hasZoneId: Boolean(store.settings.dns.zoneId) }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/admin/install');
+});
+
+app.post('/admin/install/dns-record', requireAdmin, async (req, res) => {
+  const store = readStore();
+  const dns = store.settings.dns || defaultDnsSettings();
+  try {
+    const result = await createDnsRecord(dns, {
+      name: req.body.name,
+      type: req.body.type,
+      content: req.body.content || dns.defaultTarget,
+      proxied: req.body.proxied === 'true'
+    });
+    dns.lastActionAt = nowIso();
+    dns.lastActionStatus = 'success';
+    dns.lastActionMessage = `Created ${result.type || req.body.type} record ${result.name || req.body.name}.`;
+    store.settings.dns = dns;
+    store.events.push({ id: id('evt'), type: 'dns_record_created', payload: { name: result.name || req.body.name, type: result.type || req.body.type }, createdAt: nowIso() });
+    writeStore(store);
+    res.redirect('/admin/install');
+  } catch (error) {
+    dns.lastActionAt = nowIso();
+    dns.lastActionStatus = 'failed';
+    dns.lastActionMessage = error.message;
+    store.settings.dns = dns;
+    store.events.push({ id: id('evt'), type: 'dns_record_create_failed', payload: { message: error.message }, createdAt: nowIso() });
+    writeStore(store);
+    res.status(502).send(page('DNS record not created', `<h1>DNS record not created</h1><p>${escapeHtml(error.message)}</p><p><a class="button" href="/admin/install">Back to install settings</a></p>`, req.user));
+  }
 });
 
 app.post('/admin/payments', requireAdmin, (req, res) => {
@@ -2404,8 +3011,9 @@ app.post('/api/streams/:streamId/support-payments', async (req, res) => {
     res.status(404).json({ success: false, error: 'Stream not found.' });
     return;
   }
-  const support = { ...defaultSupportSettings(), ...(stream.support || {}) };
   const settings = store.settings.paymentIntegration || defaultPaymentIntegrationSettings();
+  const owner = store.users.find((user) => user.id === stream.ownerId);
+  const support = effectiveSupportSettings(stream, owner, store.settings);
   const minimum = Number(settings.minimumAmountCents || 100);
   const requestedCents = centsFromAmount(req.body.amount, Number(settings.defaultAmountCents || 500));
   const amountCents = Math.max(minimum, requestedCents);
@@ -2784,5 +3392,6 @@ app.post('/api/streams/:streamId/restream/stop', requireUser, (req, res) => {
 
 app.listen(port, () => {
   ensureDataStore();
+  setInterval(runSchedulerTick, 30000).unref();
   console.log(`AAAStreamer listening on ${port}`);
 });

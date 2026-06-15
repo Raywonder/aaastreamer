@@ -13,13 +13,17 @@ accessibility, automation, and scalability.
 - Multi-platform restream support
 - visitor watch pages
 - user dashboard with streaming server URL, stream key, watch/HLS links, copy/share buttons, and stream-key rotation controls
-- separate admin pages for streams, accounts, signup settings, branding, messaging, encoder defaults, and updates
+- tracked token share links with direct technical URLs available to signed-in users and clients that need them
+- tabbed user dashboard for overview, media management, calendar, stream profile, support/payments, and advanced settings
+- separate admin pages for streams, accounts, signup settings, branding, messaging, share links, payments, install/licensing, media, encoder defaults, and updates
 - optional user signup page controlled from the admin panel
 - platform branding controls for the public name, sub-heading, slogan, tagline, and description shown on default installs
 - enhanced guest and logged-in user stream messaging with message types and reactions
 - optional support/payment embed boxes configured by admins or stream owners, hidden from visitors by default
 - offline-safe public listings that hide stream links unless the creator is live or on-demand content is available
 - server media folders, streamer uploads, and URL relay sources for on-demand playback or looped source broadcasts
+- checkbox-based media selection, check-all controls, delayed auto-enable for uploads, queue auto-add, media auto-refresh, and loop/sequential/random relay actions
+- scheduled live windows and scheduled pre-created media shows
 - multi-encoder keys per account for OBS, Ecamm Live, Audio Hijack workflows, Streamlabs, Larix, vMix, and other RTMP tools
 - stereo audio bitrate presets from 96k through 320k
 - stream latency and player buffer controls for low-latency, balanced, or stable playback
@@ -28,19 +32,23 @@ accessibility, automation, and scalability.
 - accessible management APIs
 - moderation-aware validation hooks
 - analytics-ready event payloads
+- self-hosted installer with systemd, nginx, WHMCS/license, social sharing, and DNS provider hooks
 
 ## Built-in panels
 
 - `/` lists public streams for visitors.
 - `/s/:slug` opens a public watch page with HLS playback and live comments.
 - `/login` signs users and admins in.
-- `/dashboard` shows streamers their connection details, copy/share controls, stream-key management, encoder keys, destination records, embed code, and stream profile editor.
+- `/dashboard` shows streamers a tabbed panel for connection details, copy/share controls, stream-key management, encoder keys, destination records, media management, scheduled shows, embed code, support/payment settings, and stream profile editing.
 - `/signup` allows new users to create accounts when signups are enabled.
 - `/admin/streams` lets admins view streams and recent events.
 - `/admin/accounts` lets admins create and review users.
 - `/admin/signups` controls whether user signup is enabled and what role new accounts receive.
 - `/admin/branding` controls the platform name, sub-heading, slogan, tagline, and public description.
 - `/admin/messaging` controls guest messages, logged-in user messages, reactions, guest-name requirements, message length, and default support/payment-box settings.
+- `/admin/share-links` shows tracked token share URLs, direct URLs, use counts, and last-used timestamps.
+- `/admin/payments` controls WHMCS and Stripe routing.
+- `/admin/install` controls install identity, license metadata, and DNS provider settings.
 - `/admin/media` controls server media folders, uploaded media location, URL relay permissions, scan depth, and whether folders are visible to normal users.
 - `/admin/encoders` controls default encoder, audio, latency, buffer, and HLS timing settings.
 - `/admin/updater` controls update source, maintenance mode, and the direct-host updater.
@@ -59,7 +67,7 @@ rtmp://HOSTNAME:1935/live
 
 By default, unknown stream keys are rejected. Set `AAASTREAMER_ALLOW_AD_HOC_STREAMS=true` only for open testing environments.
 
-Users can copy the server URL, stream key, watch page, and HLS playback URL from the dashboard. The dashboard can also open the platform share sheet for the public watch page when the browser supports it. Regenerating or revoking a stream key immediately replaces the stored key for that user and stream; the old key will no longer be accepted for future publishes.
+Users can copy the server URL, stream key, tracked token share URL, direct watch page, and HLS playback URL from the dashboard. The dashboard can also open the platform share sheet for the token share URL when the browser supports it. Regenerating or revoking a stream key immediately replaces the stored key for that user and stream; the old key will no longer be accepted for future publishes.
 
 The dashboard also provides an iframe embed code for the public stream page and
 lets streamers add an optional background image, useful links, and a support or
@@ -99,21 +107,63 @@ folder.
 
 Streamers can:
 
-- select approved server media as their stream source
-- upload supported audio or video files into the configured upload folder
+- select approved server media as their stream source using checkboxes
+- check all available media items when building a queue
+- upload one or more supported audio or video files into the configured upload folder
+- choose whether uploads auto-enable immediately or after a configured delay
+- choose whether uploaded media is automatically added to the queue
+- keep the media management tab auto-refreshing when new media appears
 - add HTTP or HTTPS URL relay sources
 - use quick source setup cards for RTMP encoders, audio stream URLs, video
   stream or file URLs, HLS playlists, server media, uploads, and custom RTMP
   sources
 - enable on-demand playback so an offline stream can still be watched
-- start or stop a looped source relay that publishes selected media through the
-  local RTMP ingest path with `ffmpeg`
+- choose loop, sequential, random, start, stop, or disable actions for the
+  source relay that publishes selected media through the local RTMP ingest path
+  with `ffmpeg`
 
 URL relays support remote media URLs and live HTTP audio/video streams. Local
 media and URL relays can be used for 24/7 channels, music streams,
 audio-description streams, training material, or replay content. Admins decide
 which server folders are visible to users and which remain hidden for
 admin-curated streams.
+
+## Calendar and internal scheduler
+
+The dashboard calendar schedules future shows. A show can be a live encoder
+window, where OBS, Ecamm, Audio Hijack, Larix, or another encoder supplies the
+stream, or a pre-created media show that starts an uploaded/server media source
+at the scheduled time. The internal scheduler runs inside the server process,
+writes events, emits live notifications over server-sent events, and stops
+scheduler-started media at the configured end time.
+
+Paid scheduled admission is not shown until the checkout-to-access-pass
+enforcement path is complete. Support payments are available today; gated event
+access is deliberately kept out of the UI until it can be enforced end to end.
+
+## Share links and Mastodon
+
+Tracked token URLs are the default share format for guests and dashboard share
+actions. Direct watch and HLS URLs still work for desktop clients, VLC, and
+advanced users who need backend or player access, but they are hidden from the
+default guest sharing path.
+
+Admins can audit share links from `/admin/share-links`. When
+`AAASTREAMER_MASTODON_INSTANCE_URL` and `AAASTREAMER_MASTODON_ACCESS_TOKEN` are
+configured, stream owners can post their tracked share link through the
+configured Mastodon identity, such as a TappedIn bot or user on `md.tappedin.fm`.
+
+## Installer, licensing, and DNS
+
+`scripts/install-aaastreamer-server.sh` is the first Linux server installer. It
+installs dependencies, creates a service user, pulls the app, writes the env
+file, creates a systemd service, and optionally writes an nginx vhost.
+
+Self-hosted and managed installs keep their own local creator payment methods,
+but license and invoice tracking remain linked to the Devine Creations WHMCS
+portal using license key, install ID, domain, edition, product ID, and
+validation status. DNS automation is provider-backed; Cloudflare record creation
+is supported when the API token and zone ID are configured.
 
 ## Encoder and destination setup
 
