@@ -2771,7 +2771,7 @@ app.get('/signup', (req, res) => {
     res.status(404).send(page('Signups closed', '<h1>Signups closed</h1><p>New account signups are not enabled on this server.</p>', currentUser(req)));
     return;
   }
-  res.send(page('Sign up', `<h1>Create your AAAStreamer account</h1><form method="post" action="/signup"><label>Username<input name="username" autocomplete="username" required></label><label>Display name<input name="displayName"></label><label>Account type<select name="role">${roleOptions(store.settings.registrationDefaultRole || 'user', false)}</select></label><label>Password<input name="password" type="password" autocomplete="new-password" required minlength="8"></label><button type="submit">Create account</button></form>`, null));
+  res.send(page('Sign up', `<h1>Create your AAAStreamer account</h1><p class="muted">New accounts start as standard users. An administrator can assign creator, moderator, manager, enterprise, or administrator access after review.</p><form method="post" action="/signup"><label>Username<input name="username" autocomplete="username" required></label><label>Display name<input name="displayName"></label><label>Password<input name="password" type="password" autocomplete="new-password" required minlength="8"></label><button type="submit">Create account</button></form>`, null));
 });
 
 app.post('/signup', (req, res) => {
@@ -2795,7 +2795,7 @@ app.post('/signup', (req, res) => {
     id: id('usr'),
     username,
     displayName: String(req.body.displayName || username).trim().slice(0, 80) || username,
-    role: normalizeRole(req.body.role || store.settings.registrationDefaultRole, 'user') === 'admin' ? 'user' : normalizeRole(req.body.role || store.settings.registrationDefaultRole, 'user'),
+    role: 'user',
     passwordHash: hashPassword(password),
     streamKey: id('sk'),
     active: true,
