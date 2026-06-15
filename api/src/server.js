@@ -35,7 +35,7 @@ const port = Number(process.env.AAASTREAMER_PORT || 8095);
 const maxUploadBytes = Number(process.env.AAASTREAMER_MAX_UPLOAD_BYTES || 75 * 1024 * 1024);
 const maxBulkUploads = Math.max(1, Math.min(25, Number(process.env.AAASTREAMER_MAX_BULK_UPLOADS || 12) || 12));
 const repoRoot = fs.existsSync(path.resolve(process.cwd(), 'api/src/server.js')) ? process.cwd() : path.resolve(process.cwd(), '..');
-const dataDir = path.resolve(process.cwd(), 'data');
+const dataDir = path.resolve(process.env.AAASTREAMER_DATA_DIR || path.join(process.cwd(), 'data'));
 const dataFile = path.join(dataDir, 'aaastreamer.json');
 const hlsPath = process.env.HLS_PATH || '/tmp/hls';
 const publicUrl = (process.env.AAASTREAMER_PUBLIC_URL || '').replace(/\/+$/, '');
@@ -58,6 +58,18 @@ const sseClients = new Set();
 const appVersion = process.env.AAASTREAMER_VERSION || '0.1.3';
 const updateManifestUrl = process.env.AAASTREAMER_UPDATE_MANIFEST_URL || 'https://raw.githubusercontent.com/Raywonder/aaastreamer/main/api/package.json';
 const audioBitrates = ['96k', '128k', '160k', '192k', '256k', '320k'];
+const licenseTierCatalog = [
+  { id: 'hosted-starter', model: 'hosted', name: 'AAAStreamer Hosted Starter', setupCents: 0, monthlyCents: 1499, description: 'Hosted starter station for creators who want Devine Creations to run the infrastructure.' },
+  { id: 'hosted-professional', model: 'hosted', name: 'AAAStreamer Hosted Professional', setupCents: 0, monthlyCents: 4999, description: 'Hosted station with more creator, scheduling, and moderation room.' },
+  { id: 'hosted-network', model: 'hosted', name: 'AAAStreamer Hosted Network', setupCents: 0, monthlyCents: 9900, description: 'Hosted network plan for larger channels, teams, or multiple shows.' },
+  { id: 'self-hosted-starter', model: 'self-hosted', name: 'AAAStreamer Self-Hosted Starter', setupCents: 9900, monthlyCents: 999, description: 'Customer-owned install with license validation and standard update tracking.' },
+  { id: 'self-hosted-professional', model: 'self-hosted', name: 'AAAStreamer Self-Hosted Professional', setupCents: 9900, monthlyCents: 4999, description: 'Customer-owned install with higher usage allowance and stronger managed-support options.' },
+  { id: 'managed-starter', model: 'managed', name: 'AAAStreamer Managed Starter', setupCents: 0, monthlyCents: 14900, description: 'Customer-owned infrastructure managed by Devine Creations.' },
+  { id: 'managed-professional', model: 'managed', name: 'AAAStreamer Managed Professional', setupCents: 0, monthlyCents: 29900, description: 'Managed deployment for active stations with more support and update handling.' },
+  { id: 'managed-network', model: 'managed', name: 'AAAStreamer Managed Network', setupCents: 0, monthlyCents: 49900, description: 'Managed deployment for larger broadcaster networks.' },
+  { id: 'enterprise-network', model: 'enterprise', name: 'AAAStreamer Enterprise / Networks', setupCents: null, monthlyCents: null, customPricing: true, description: 'Custom enterprise pricing and deployment terms.' },
+  { id: 'internal-enterprise', model: 'enterprise', name: 'AAAStreamer Internal Enterprise', setupCents: 0, monthlyCents: 0, internal: true, unlimited: true, description: 'Unrestricted internal Devine Creations/TappedIn infrastructure license.' }
+];
 const sourceProcesses = new Map();
 const mediaExtensions = new Map([
   ['.aac', 'audio'], ['.aif', 'audio'], ['.aiff', 'audio'], ['.alac', 'audio'], ['.flac', 'audio'],
@@ -487,21 +499,30 @@ function defaultPaymentIntegrationSettings() {
 }
 
 function defaultLicenseSettings() {
+  const tier = licenseTierCatalog.find((item) => item.id === process.env.AAASTREAMER_LICENSE_TIER) || licenseTierCatalog.find((item) => item.id === 'self-hosted-starter');
+  const internalUse = process.env.AAASTREAMER_INTERNAL_ENTERPRISE === 'true' || tier?.internal === true;
   return {
     licensingEnabled: process.env.AAASTREAMER_LICENSE_ENABLED !== 'false',
     licenseServerUrl: process.env.AAASTREAMER_LICENSE_SERVER_URL || 'https://devine-creations.com',
     whmcsProductId: process.env.AAASTREAMER_WHMCS_PRODUCT_ID || '',
+    whmcsProductCode: process.env.AAASTREAMER_WHMCS_PRODUCT_CODE || tier?.id || 'self-hosted-starter',
+    whmcsAdminUsername: process.env.AAASTREAMER_WHMCS_ADMIN_USERNAME || '',
+    whmcsClientId: process.env.AAASTREAMER_WHMCS_CLIENT_ID || process.env.AAASTREAMER_WHMCS_DEFAULT_CLIENT_ID || '',
+    whmcsClientEmail: process.env.AAASTREAMER_WHMCS_CLIENT_EMAIL || '',
     licenseKey: process.env.AAASTREAMER_LICENSE_KEY || '',
     installId: process.env.AAASTREAMER_INSTALL_ID || '',
     installDomain: process.env.AAASTREAMER_INSTALL_DOMAIN || '',
-    edition: process.env.AAASTREAMER_EDITION || 'self-hosted',
+    edition: process.env.AAASTREAMER_EDITION || tier?.model || 'self-hosted',
+    deploymentTier: process.env.AAASTREAMER_LICENSE_TIER || tier?.id || 'self-hosted-starter',
+    installAuthMode: process.env.AAASTREAMER_INSTALL_AUTH_MODE || (internalUse ? 'internal-enterprise-token' : 'license-token'),
+    internalUse,
     validationStatus: 'unknown',
     lastValidationAt: '',
     nextValidationAt: '',
     graceEndsAt: '',
     clientLinked: process.env.AAASTREAMER_CLIENT_LINKED === 'true',
     lockClientLinkedSettings: process.env.AAASTREAMER_LOCK_CLIENT_LINKED_SETTINGS === 'true',
-    reissueLimits: { monthly: 2, quarterly: 4, yearly: 8 },
+    reissueLimits: internalUse ? { unlimited: true, monthly: null, quarterly: null, yearly: null } : { monthly: 2, quarterly: 4, yearly: 8 },
     reissues: []
   };
 }
@@ -532,8 +553,26 @@ function licenseReissueCounts(license = {}) {
 
 function canReissueLicense(license = {}) {
   const limits = { monthly: 2, quarterly: 4, yearly: 8, ...(license.reissueLimits || {}) };
+  if (limits.unlimited === true || license.internalUse === true || license.deploymentTier === 'internal-enterprise') return true;
   const counts = licenseReissueCounts(license);
-  return Object.keys(limits).every((key) => counts[key] < Number(limits[key] || 0));
+  return Object.entries(limits).every(([key, value]) => {
+    if (key === 'unlimited') return true;
+    if (value === null || value === '' || value === 'unlimited') return true;
+    return counts[key] < Number(value || 0);
+  });
+}
+
+function formatReissueLimit(value) {
+  if (value === null || value === undefined || value === '' || value === 'unlimited') return 'unlimited';
+  return String(value);
+}
+
+function licenseTierOptions(selected) {
+  return licenseTierCatalog.map((tier) => `<option value="${escapeHtml(tier.id)}" ${tier.id === selected ? 'selected' : ''}>${escapeHtml(tier.name)}</option>`).join('');
+}
+
+function licenseTierRows() {
+  return licenseTierCatalog.map((tier) => `<tr><td>${escapeHtml(tier.name)}</td><td>${escapeHtml(tier.model)}</td><td>${tier.customPricing ? 'Custom pricing' : escapeHtml(formatMoney(tier.setupCents || 0, 'usd'))}</td><td>${tier.customPricing ? 'Custom pricing' : escapeHtml(formatMoney(tier.monthlyCents || 0, 'usd'))}</td><td>${tier.unlimited ? 'Unlimited internal use' : escapeHtml(tier.description)}</td></tr>`).join('');
 }
 
 function defaultSocialSettings() {
@@ -625,6 +664,7 @@ function normalizeStreamMediaBehavior(settings = {}) {
 
 function normalizeUser(user) {
   if (!user || typeof user !== 'object') return user;
+  user.role = normalizeRole(user.role || 'user');
   user.whmcsClientId = String(user.whmcsClientId || '').replace(/[^0-9]/g, '').slice(0, 20);
   user.whmcsPortalEmail = String(user.whmcsPortalEmail || '').trim().slice(0, 180);
   user.recoveryEmail = String(user.recoveryEmail || user.whmcsPortalEmail || '').trim().slice(0, 180);
@@ -731,6 +771,10 @@ function roleOptions(selected, includeAdmin = false) {
     .filter((role) => includeAdmin || role.value !== 'admin')
     .map((role) => `<option value="${escapeHtml(role.value)}" ${role.value === selected ? 'selected' : ''}>${escapeHtml(role.label)}</option>`)
     .join('');
+}
+
+function canBroadcast(user) {
+  return ['creator', 'broadcaster', 'producer', 'manager', 'enterprise', 'admin'].includes(user?.role);
 }
 
 function defaultSupportSettings() {
@@ -850,6 +894,12 @@ function normalizeStore(store) {
   store.settings.paymentIntegration = { ...defaultPaymentIntegrationSettings(), ...(store.settings.paymentIntegration || {}) };
   store.settings.license = { ...defaultLicenseSettings(), ...(store.settings.license || {}) };
   store.settings.license.reissueLimits = { ...defaultLicenseSettings().reissueLimits, ...(store.settings.license.reissueLimits || {}) };
+  if (store.settings.license.internalUse || store.settings.license.deploymentTier === 'internal-enterprise') {
+    store.settings.license.internalUse = true;
+    store.settings.license.edition = 'enterprise';
+    store.settings.license.installAuthMode = 'internal-enterprise-token';
+    store.settings.license.reissueLimits = { unlimited: true, monthly: null, quarterly: null, yearly: null };
+  }
   store.settings.license.reissues = Array.isArray(store.settings.license.reissues) ? store.settings.license.reissues : [];
   store.settings.dns = { ...defaultDnsSettings(), ...(store.settings.dns || {}) };
   store.settings.social = { ...defaultSocialSettings(), ...(store.settings.social || {}) };
@@ -867,6 +917,13 @@ function normalizeStore(store) {
   store.settings.updateManifestUrl ||= updateManifestUrl;
   store.settings.maintenanceMode ||= { enabled: false, message: '' };
   store.users = (store.users || []).map(normalizeUser).filter(Boolean);
+  const streamOwnerIds = new Set((store.streams || []).map((stream) => stream.ownerId).filter(Boolean));
+  for (const user of store.users) {
+    if (streamOwnerIds.has(user.id) && !canBroadcast(user)) {
+      user.role = 'broadcaster';
+      user.updatedAt ||= nowIso();
+    }
+  }
   store.scheduledShows = (store.scheduledShows || []).map(normalizeScheduledShow).filter(Boolean);
   store.shareLinks = (store.shareLinks || []).filter((link) => link?.token && link?.streamId);
   const now = Date.now();
@@ -1085,6 +1142,20 @@ function requireUser(req, res, next) {
   const user = currentUser(req);
   if (!user) {
     res.status(401).json({ success: false, error: 'Login required' });
+    return;
+  }
+  req.user = user;
+  next();
+}
+
+function requireBroadcaster(req, res, next) {
+  const user = currentUser(req);
+  if (!user) {
+    res.status(401).json({ success: false, error: 'Login required' });
+    return;
+  }
+  if (!canBroadcast(user)) {
+    res.status(403).json({ success: false, error: 'Broadcast access is required. Open your dashboard and choose Get broadcast access first.' });
     return;
   }
   req.user = user;
@@ -1443,6 +1514,7 @@ function scanMediaFolder(folder, maxDepth) {
 function ensureStreamForUser(store, user, body = {}) {
   const existing = store.streams.find((stream) => stream.ownerId === user.id);
   if (existing) return normalizeStream(existing);
+  user.streamKey ||= id('sk');
   const createdAt = nowIso();
   const title = body.title || `${user.displayName || user.username}'s Stream`;
   const encoderDefaults = store.settings?.encoderDefaults || defaultEncoderSettings();
@@ -2464,7 +2536,7 @@ app.get('/events', (req, res) => {
   req.on('close', () => sseClients.delete(res));
 });
 
-app.get('/api/media/catalog', requireUser, (req, res) => {
+app.get('/api/media/catalog', requireBroadcaster, (req, res) => {
   const store = readStore();
   res.json({ success: true, folders: mediaCatalog(store, req.user) });
 });
@@ -2484,7 +2556,7 @@ app.get('/api/streams/:streamId/links', (req, res) => {
   res.json({ success: true, links: stream.links || [], html: editableLinks(stream, canEditStream(user, stream)) });
 });
 
-app.post('/api/streams/:streamId/links', requireUser, async (req, res) => {
+app.post('/api/streams/:streamId/links', requireBroadcaster, async (req, res) => {
   const store = readStore();
   const stream = store.streams.find((item) => item.id === req.params.streamId || item.slug === req.params.streamId);
   if (!canEditStream(req.user, stream)) {
@@ -2513,7 +2585,7 @@ app.post('/api/streams/:streamId/links', requireUser, async (req, res) => {
   res.json({ success: true, links: stream.links, html: editableLinks(stream, true) });
 });
 
-app.post('/api/streams/:streamId/links/:index', requireUser, (req, res) => {
+app.post('/api/streams/:streamId/links/:index', requireBroadcaster, (req, res) => {
   const store = readStore();
   const stream = store.streams.find((item) => item.id === req.params.streamId || item.slug === req.params.streamId);
   if (!canEditStream(req.user, stream)) {
@@ -2540,7 +2612,7 @@ app.post('/api/streams/:streamId/links/:index', requireUser, (req, res) => {
   res.json({ success: true, links: stream.links, html: editableLinks(stream, true) });
 });
 
-app.get('/dashboard/media/preview/:folderId/*', requireUser, (req, res) => {
+app.get('/dashboard/media/preview/:folderId/*', requireBroadcaster, (req, res) => {
   const store = readStore();
   const folder = resolveMediaFolder(store, req.params.folderId);
   const relativePath = req.params[0] || '';
@@ -2570,7 +2642,7 @@ app.get('/dashboard/media/preview/:folderId/*', requireUser, (req, res) => {
   res.send(page('Media preview', `<h1>Media preview</h1><section><h2>${escapeHtml(title)}</h2><p>Preview starts around ${escapeHtml(formatDuration(startAt))} and plays for one minute with a fade in and fade out.</p>${player}<h3>Detected metadata</h3><ul><li>File: ${escapeHtml(path.basename(relativePath))}</li><li>Duration: ${escapeHtml(formatDuration(duration))}</li><li>Artist: ${escapeHtml(info.artist || 'None')}</li><li>Album: ${escapeHtml(info.album || 'None')}</li></ul><h3>Detected chapters</h3>${chapters}</section>`, req.user));
 });
 
-app.get('/dashboard/media/preview-stream/:folderId/*', requireUser, (req, res) => {
+app.get('/dashboard/media/preview-stream/:folderId/*', requireBroadcaster, (req, res) => {
   const store = readStore();
   const folder = resolveMediaFolder(store, req.params.folderId);
   const relativePath = req.params[0] || '';
@@ -2687,7 +2759,7 @@ ${supportBefore}
 ${renderPlaybackPlayer(playbackUrl, stream)}${supportDuring}</div>
 <section><h2>About this stream</h2><p>${escapeHtml(stream.description || 'No description yet.')}</p>${renderExtraContentBox(stream, 'watch')}<h3>Links</h3><div id="streamLinksPanel">${editableLinks(stream, canEditLinks)}</div></section>
 <section><h2>Live comments</h2><div id="comments" class="comments">${comments.map((comment) => renderComment(comment, messaging.reactionsEnabled)).join('')}</div>
-${canComment ? `<form id="commentForm"><label>Name<input name="authorName" ${user ? `value="${escapeHtml(user.displayName || user.username)}" readonly` : 'required'}></label><label>Message type<select name="messageType"><option value="comment">Comment</option><option value="question">Question</option><option value="support">Support message</option></select></label><label>Comment<textarea name="message" required rows="3" maxlength="${escapeHtml(messaging.maxMessageLength || 1000)}"></textarea></label><button type="submit">Post comment</button></form>` : '<p>Comments are disabled for this stream or account type.</p>'}</section>
+${canComment ? `${!user ? '<p class="notice" role="note">Guest messages include moderation metadata such as approximate network address, browser/device information, and the host used to reach this stream. Broadcasters and moderators may use that information to keep chat safe.</p>' : ''}<form id="commentForm"><label>Name<input name="authorName" ${user ? `value="${escapeHtml(user.displayName || user.username)}" readonly` : 'required'}></label><label>Message type<select name="messageType"><option value="comment">Comment</option><option value="question">Question</option><option value="support">Support message</option></select></label><label>Comment<textarea name="message" required rows="3" maxlength="${escapeHtml(messaging.maxMessageLength || 1000)}"></textarea></label><button type="submit">Post comment</button></form>` : '<p>Comments are disabled for this stream or account type.</p>'}</section>
 ${supportAfter}
 <script>
 const streamId=${JSON.stringify(stream.id)};
@@ -2797,13 +2869,11 @@ app.post('/signup', (req, res) => {
     displayName: String(req.body.displayName || username).trim().slice(0, 80) || username,
     role: 'user',
     passwordHash: hashPassword(password),
-    streamKey: id('sk'),
     active: true,
     createdAt,
     updatedAt: createdAt
   };
   store.users.push(user);
-  ensureStreamForUser(store, user);
   store.events.push({ id: id('evt'), type: 'user_signup', payload: { username, role: user.role }, createdAt });
   writeStore(store);
   const token = id('sess');
@@ -2877,14 +2947,20 @@ app.get('/dashboard', (req, res) => {
     return;
   }
   const store = readStore();
-  const stream = ensureStreamForUser(store, user);
   const paymentSettings = store.settings.paymentIntegration || defaultPaymentIntegrationSettings();
-  stream.support = effectiveSupportSettings(stream, user, store.settings);
-  const shareLink = ensureShareLink(store, stream, user.id);
   const reminderHtml = notificationEmailReminder(user);
   if (reminderHtml) {
     user.notificationEmailReminder.lastShownAt = nowIso();
   }
+  if (!canBroadcast(user)) {
+    writeStore(store);
+    const body = `<h1>User panel</h1>${reminderHtml}<section><h2>Account status</h2><p>Signed in as <strong>${escapeHtml(user.displayName || user.username)}</strong>.</p><p>Current role: <strong>${escapeHtml(accountRoles.find((role) => role.value === user.role)?.label || user.role)}</strong>.</p><p class="muted">Standard user accounts can comment, manage account security, and use member features. Broadcast and stream-key tools are added only after you enable broadcaster access.</p><form method="post" action="/dashboard/broadcast-access"><button type="submit">Get broadcast access and generate stream key</button></form></section><section><h2>Account links</h2><p><a class="button" href="/dashboard?tab=account">Account settings</a></p></section>`;
+    res.send(page('User panel', body, user));
+    return;
+  }
+  const stream = ensureStreamForUser(store, user);
+  stream.support = effectiveSupportSettings(stream, user, store.settings);
+  const shareLink = ensureShareLink(store, stream, user.id);
   writeStore(store);
   const activeTab = ['overview', 'media', 'encoders', 'destinations', 'schedule', 'profile', 'support', 'account', 'advanced'].includes(req.query.tab) ? req.query.tab : 'overview';
   const serverUrl = rtmpUrlFor(stream.streamKey);
@@ -3028,7 +3104,24 @@ ${behavior.autoRefreshMedia && activeTab === 'media' ? `let mediaCount=document.
   res.send(page('Dashboard', body, user));
 });
 
-app.post('/dashboard/stream', requireUser, (req, res) => {
+app.post('/dashboard/broadcast-access', requireUser, (req, res) => {
+  const store = readStore();
+  const user = userById(store, req.user.id);
+  if (!user) {
+    res.status(404).send(page('Account not found', '<h1>Account not found</h1><p>Your account could not be found.</p>', req.user));
+    return;
+  }
+  if (!canBroadcast(user)) {
+    user.role = 'broadcaster';
+    user.updatedAt = nowIso();
+  }
+  const stream = ensureStreamForUser(store, user);
+  store.events.push({ id: id('evt'), type: 'broadcast_access_enabled', payload: { username: user.username, streamId: stream.id, role: user.role }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/dashboard?tab=overview');
+});
+
+app.post('/dashboard/stream', requireBroadcaster, (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
   const stream = ensureStreamForUser(store, user, req.body);
@@ -3048,7 +3141,7 @@ app.post('/dashboard/stream', requireUser, (req, res) => {
   res.redirect('/dashboard?tab=profile');
 });
 
-app.post('/dashboard/encoders', requireUser, (req, res) => {
+app.post('/dashboard/encoders', requireBroadcaster, (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
   const stream = ensureStreamForUser(store, user);
@@ -3069,7 +3162,7 @@ app.post('/dashboard/encoders', requireUser, (req, res) => {
   res.redirect('/dashboard?tab=encoders');
 });
 
-app.post('/dashboard/destinations', requireUser, (req, res) => {
+app.post('/dashboard/destinations', requireBroadcaster, (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
   const stream = ensureStreamForUser(store, user);
@@ -3097,7 +3190,7 @@ app.post('/dashboard/destinations', requireUser, (req, res) => {
   res.redirect('/dashboard?tab=destinations');
 });
 
-app.post('/dashboard/destinations/enabled', requireUser, (req, res) => {
+app.post('/dashboard/destinations/enabled', requireBroadcaster, (req, res) => {
   const store = readStore();
   const stream = store.streams.find((item) => item.ownerId === req.user.id);
   if (stream) {
@@ -3117,7 +3210,7 @@ app.post('/dashboard/destinations/enabled', requireUser, (req, res) => {
   res.redirect('/dashboard?tab=destinations');
 });
 
-app.post('/dashboard/destinations/:destinationId/delete', requireUser, (req, res) => {
+app.post('/dashboard/destinations/:destinationId/delete', requireBroadcaster, (req, res) => {
   const store = readStore();
   const stream = store.streams.find((item) => item.ownerId === req.user.id);
   if (stream) {
@@ -3129,7 +3222,7 @@ app.post('/dashboard/destinations/:destinationId/delete', requireUser, (req, res
   res.redirect('/dashboard?tab=destinations');
 });
 
-app.post('/dashboard/sources/select', requireUser, (req, res) => {
+app.post('/dashboard/sources/select', requireBroadcaster, (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
   const stream = ensureStreamForUser(store, user);
@@ -3149,7 +3242,7 @@ app.post('/dashboard/sources/select', requireUser, (req, res) => {
   res.redirect('/dashboard?tab=media');
 });
 
-app.post('/dashboard/sources/url', requireUser, (req, res) => {
+app.post('/dashboard/sources/url', requireBroadcaster, (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
   const stream = ensureStreamForUser(store, user);
@@ -3167,7 +3260,7 @@ app.post('/dashboard/sources/url', requireUser, (req, res) => {
   res.redirect('/dashboard?tab=media');
 });
 
-app.post('/dashboard/sources/upload', requireUser, (req, res) => {
+app.post('/dashboard/sources/upload', requireBroadcaster, (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
   const stream = ensureStreamForUser(store, user);
@@ -3199,7 +3292,7 @@ app.post('/dashboard/sources/upload', requireUser, (req, res) => {
   res.redirect('/dashboard?tab=media');
 });
 
-app.post('/dashboard/sources/queue/clear', requireUser, (req, res) => {
+app.post('/dashboard/sources/queue/clear', requireBroadcaster, (req, res) => {
   const store = readStore();
   const stream = store.streams.find((item) => item.ownerId === req.user.id);
   if (stream) {
@@ -3211,7 +3304,7 @@ app.post('/dashboard/sources/queue/clear', requireUser, (req, res) => {
   res.redirect('/dashboard?tab=media');
 });
 
-app.post('/dashboard/sources/queue/:sourceId/select', requireUser, (req, res) => {
+app.post('/dashboard/sources/queue/:sourceId/select', requireBroadcaster, (req, res) => {
   const store = readStore();
   const stream = store.streams.find((item) => item.ownerId === req.user.id);
   if (stream) {
@@ -3237,7 +3330,7 @@ app.post('/dashboard/sources/queue/:sourceId/select', requireUser, (req, res) =>
   res.redirect('/dashboard?tab=media');
 });
 
-app.post('/dashboard/sources/queue/:sourceId/remove', requireUser, (req, res) => {
+app.post('/dashboard/sources/queue/:sourceId/remove', requireBroadcaster, (req, res) => {
   const store = readStore();
   const stream = store.streams.find((item) => item.ownerId === req.user.id);
   if (stream && removeQueuedSource(stream, req.params.sourceId)) {
@@ -3248,7 +3341,7 @@ app.post('/dashboard/sources/queue/:sourceId/remove', requireUser, (req, res) =>
   res.redirect('/dashboard?tab=media');
 });
 
-app.post('/dashboard/sources/:sourceId/select', requireUser, (req, res) => {
+app.post('/dashboard/sources/:sourceId/select', requireBroadcaster, (req, res) => {
   const store = readStore();
   const stream = store.streams.find((item) => item.ownerId === req.user.id);
   const source = stream?.relaySources?.find((item) => item.id === req.params.sourceId);
@@ -3264,7 +3357,7 @@ app.post('/dashboard/sources/:sourceId/select', requireUser, (req, res) => {
   res.redirect('/dashboard?tab=media');
 });
 
-app.post('/dashboard/sources/:sourceId/delete', requireUser, (req, res) => {
+app.post('/dashboard/sources/:sourceId/delete', requireBroadcaster, (req, res) => {
   const store = readStore();
   const stream = store.streams.find((item) => item.ownerId === req.user.id);
   if (stream) {
@@ -3278,7 +3371,7 @@ app.post('/dashboard/sources/:sourceId/delete', requireUser, (req, res) => {
   res.redirect('/dashboard?tab=media');
 });
 
-app.post('/dashboard/sources/ondemand', requireUser, (req, res) => {
+app.post('/dashboard/sources/ondemand', requireBroadcaster, (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
   const stream = ensureStreamForUser(store, user);
@@ -3293,7 +3386,7 @@ app.post('/dashboard/sources/ondemand', requireUser, (req, res) => {
   res.redirect('/dashboard?tab=media');
 });
 
-app.post('/dashboard/sources/start', requireUser, (req, res) => {
+app.post('/dashboard/sources/start', requireBroadcaster, (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
   const stream = ensureStreamForUser(store, user);
@@ -3320,7 +3413,7 @@ app.post('/dashboard/sources/start', requireUser, (req, res) => {
   res.redirect('/dashboard?tab=media');
 });
 
-app.post('/dashboard/sources/stop', requireUser, (req, res) => {
+app.post('/dashboard/sources/stop', requireBroadcaster, (req, res) => {
   const store = readStore();
   const stream = store.streams.find((item) => item.ownerId === req.user.id);
   if (stream) {
@@ -3331,7 +3424,7 @@ app.post('/dashboard/sources/stop', requireUser, (req, res) => {
   res.redirect('/dashboard?tab=media');
 });
 
-app.post('/dashboard/sources/action', requireUser, (req, res) => {
+app.post('/dashboard/sources/action', requireBroadcaster, (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
   const stream = ensureStreamForUser(store, user);
@@ -3376,7 +3469,7 @@ app.post('/dashboard/sources/action', requireUser, (req, res) => {
   res.redirect('/dashboard?tab=media');
 });
 
-app.post('/dashboard/latency', requireUser, (req, res) => {
+app.post('/dashboard/latency', requireBroadcaster, (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
   const stream = ensureStreamForUser(store, user);
@@ -3393,7 +3486,7 @@ app.post('/dashboard/latency', requireUser, (req, res) => {
   res.redirect('/dashboard?tab=encoders');
 });
 
-app.post('/dashboard/encoder-settings', requireUser, (req, res) => {
+app.post('/dashboard/encoder-settings', requireBroadcaster, (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
   const stream = ensureStreamForUser(store, user);
@@ -3415,7 +3508,7 @@ app.post('/dashboard/encoder-settings', requireUser, (req, res) => {
   res.redirect('/dashboard?tab=encoders');
 });
 
-app.post('/dashboard/support', requireUser, async (req, res) => {
+app.post('/dashboard/support', requireBroadcaster, async (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
   const stream = ensureStreamForUser(store, user);
@@ -3690,7 +3783,7 @@ app.post('/api/passkeys/authenticate/verify', async (req, res) => {
   }
 });
 
-app.post('/dashboard/media-settings', requireUser, (req, res) => {
+app.post('/dashboard/media-settings', requireBroadcaster, (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
   const stream = ensureStreamForUser(store, user);
@@ -3711,7 +3804,7 @@ app.post('/dashboard/media-settings', requireUser, (req, res) => {
   res.redirect('/dashboard?tab=media');
 });
 
-app.post('/dashboard/share/mastodon', requireUser, async (req, res) => {
+app.post('/dashboard/share/mastodon', requireBroadcaster, async (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
   const stream = ensureStreamForUser(store, user);
@@ -3734,7 +3827,7 @@ app.post('/dashboard/share/mastodon', requireUser, async (req, res) => {
   }
 });
 
-app.post('/dashboard/schedule', requireUser, (req, res) => {
+app.post('/dashboard/schedule', requireBroadcaster, (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
   const stream = ensureStreamForUser(store, user);
@@ -3771,7 +3864,7 @@ app.post('/dashboard/schedule', requireUser, (req, res) => {
   res.redirect('/dashboard?tab=schedule');
 });
 
-app.post('/dashboard/schedule/:showId/toggle', requireUser, (req, res) => {
+app.post('/dashboard/schedule/:showId/toggle', requireBroadcaster, (req, res) => {
   const store = readStore();
   const show = (store.scheduledShows || []).find((item) => item.id === req.params.showId && item.ownerId === req.user.id);
   if (show) {
@@ -3783,7 +3876,7 @@ app.post('/dashboard/schedule/:showId/toggle', requireUser, (req, res) => {
   res.redirect('/dashboard?tab=schedule');
 });
 
-app.post('/dashboard/schedule/:showId/cancel', requireUser, (req, res) => {
+app.post('/dashboard/schedule/:showId/cancel', requireBroadcaster, (req, res) => {
   const store = readStore();
   const show = (store.scheduledShows || []).find((item) => item.id === req.params.showId && item.ownerId === req.user.id);
   if (show) {
@@ -3796,7 +3889,7 @@ app.post('/dashboard/schedule/:showId/cancel', requireUser, (req, res) => {
   res.redirect('/dashboard?tab=schedule');
 });
 
-app.post('/dashboard/extra-content', requireUser, (req, res) => {
+app.post('/dashboard/extra-content', requireBroadcaster, (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
   const stream = ensureStreamForUser(store, user);
@@ -3813,7 +3906,7 @@ app.post('/dashboard/extra-content', requireUser, (req, res) => {
   res.redirect('/dashboard?tab=profile');
 });
 
-app.post('/dashboard/stream/key', requireUser, (req, res) => {
+app.post('/dashboard/stream/key', requireBroadcaster, (req, res) => {
   const action = String(req.body.action || '').toLowerCase();
   if (action !== 'revoke') {
     res.status(400).send(page('Invalid stream key action', '<h1>Invalid stream key action</h1><p>The requested key action is not supported.</p><a class="button" href="/dashboard">Back to dashboard</a>', req.user));
@@ -3931,7 +4024,8 @@ app.get('/admin/messaging', requireModeratorOrAdmin, (req, res) => {
     const identity = [
       comment.ipVersion && comment.ipAddress ? `${comment.ipVersion}: ${comment.ipAddress}` : '',
       comment.requestHost ? `host: ${comment.requestHost}` : '',
-      comment.reverseDnsHost ? `dns: ${comment.reverseDnsHost}` : ''
+      comment.reverseDnsHost ? `dns: ${comment.reverseDnsHost}` : '',
+      comment.userAgent ? `device: ${comment.userAgent}` : ''
     ].filter(Boolean).join('<br>') || '<span class="muted">No network identity saved</span>';
     const quickValue = comment.authorName || comment.ipAddress || comment.requestHost || '';
     return `<tr><td>${escapeHtml(comment.createdAt || '')}</td><td>${escapeHtml(stream?.title || 'Unknown stream')}</td><td>${escapeHtml(comment.authorName || '')}<br><span class="muted">${escapeHtml(comment.authorType || '')}</span></td><td>${identity}</td><td>${escapeHtml(status)}</td><td>${escapeHtml(comment.message || '')}</td><td><form class="inline-form" method="post" action="/admin/comments/${escapeHtml(comment.id)}/moderate"><button name="action" value="approve" type="submit">Approve</button><button name="action" value="hide" type="submit">Hide</button><button name="action" value="delete" type="submit" class="danger">Delete</button></form><form class="inline-form" method="post" action="/admin/comment-rules"><input type="hidden" name="targetValue" value="${escapeHtml(quickValue)}"><label>Rule target<select name="targetType"><option value="user">User/name</option><option value="ip">IP address</option><option value="ipv4">IPv4 only</option><option value="ipv6">IPv6 only</option><option value="host">Host</option><option value="dns">Reverse DNS</option></select></label><label>Action<select name="action"><option value="review">Review first</option><option value="hide">Auto-hide</option><option value="block">Block</option><option value="allow">Allow</option></select></label><button type="submit">Add rule from this comment</button></form></td></tr>`;
@@ -3954,7 +4048,7 @@ app.get('/admin/messaging', requireModeratorOrAdmin, (req, res) => {
     : '';
   const body = `<h1>Admin panel</h1>${adminTabs('messaging')}<nav class="tabs" role="tablist" aria-label="Messaging subsections"><a class="tab-button" role="tab" href="#message-settings">Message settings</a><a class="tab-button" role="tab" href="#moderation">Moderation queue</a><a class="tab-button" role="tab" href="#comment-rules">Comment access rules</a>${isAdmin ? '<a class="tab-button" role="tab" href="#support-defaults">Support defaults</a>' : ''}</nav>
 ${messageSettingsSection}
-<section id="moderation"><h2>Message moderation</h2><p class="muted">Approve pending messages, hide messages from stream pages, delete messages, or create access rules tied to users, IPv4, IPv6, host, or reverse DNS identity.</p><table><tr><th>Time</th><th>Stream</th><th>Author</th><th>Network identity</th><th>Status</th><th>Message</th><th>Actions</th></tr>${messageRows || '<tr><td colspan="7">No messages have been posted yet.</td></tr>'}</table><form method="post" action="/admin/comments/prune"><button type="submit">Run message cleanup now</button></form></section>
+<section id="moderation"><h2>Message moderation</h2><p class="muted">Approve pending messages, hide messages from stream pages, delete messages, or create access rules tied to users, IPv4, IPv6, host, reverse DNS identity, or browser/device metadata. Guests are warned before posting that broadcasters may see this moderation metadata.</p><table><tr><th>Time</th><th>Stream</th><th>Author</th><th>Network and device identity</th><th>Status</th><th>Message</th><th>Actions</th></tr>${messageRows || '<tr><td colspan="7">No messages have been posted yet.</td></tr>'}</table><form method="post" action="/admin/comments/prune"><button type="submit">Run message cleanup now</button></form></section>
 <section id="comment-rules"><h2>Comment access rules</h2><p class="muted">Rules are checked from top to bottom when a comment is posted. Targets support exact values or wildcard patterns such as <code>*.example.net</code>.</p><table><tr><th>Target type</th><th>Target value</th><th>Action</th><th>Notes</th><th>Remove</th></tr>${ruleRows || '<tr><td colspan="5">No comment access rules are configured yet.</td></tr>'}</table><form method="post" action="/admin/comment-rules"><label>Target type<select name="targetType"><option value="user">User/name</option><option value="ip">Any IP</option><option value="ipv4">IPv4 only</option><option value="ipv6">IPv6 only</option><option value="host">Host header</option><option value="dns">Reverse DNS hostname</option></select></label><label>Target value<input name="targetValue" placeholder="username, 203.0.113.10, 2001:db8::1, or *.example.net" required></label><label>Action<select name="action"><option value="review">Review first</option><option value="hide">Auto-hide</option><option value="block">Block posting</option><option value="allow">Allow</option></select></label><label>Notes<input name="notes" placeholder="Why this rule exists"></label><button type="submit">Add comment access rule</button></form></section>
 ${supportDefaultsSection}`;
   res.send(page('Admin messaging', body, req.user));
@@ -4068,12 +4162,14 @@ app.get('/admin/install', requireAdmin, (req, res) => {
   const license = store.settings.license || defaultLicenseSettings();
   const dns = store.settings.dns || defaultDnsSettings();
   const reissueCounts = licenseReissueCounts(license);
+  const tier = licenseTierCatalog.find((item) => item.id === license.deploymentTier) || licenseTierCatalog.find((item) => item.id === license.whmcsProductCode) || licenseTierCatalog[0];
   const canEditLicense = !license.lockClientLinkedSettings || license.edition === 'enterprise' || license.edition === 'hosted';
   const licenseFieldsDisabled = canEditLicense ? '' : ' disabled';
   const body = `<h1>Admin panel</h1>${adminTabs('install')}
-<section><h2>Server install and license</h2><p class="muted">Customer-owned installs use their own local payment links while license, product, invoice, and account continuity stay linked to the Devine Creations client portal. Client-linked installs can display license details without allowing protected settings to be changed locally.</p><form method="post" action="/admin/install/license"><label><input type="checkbox" name="licensingEnabled" value="true" ${license.licensingEnabled ? 'checked' : ''}${licenseFieldsDisabled}> Enable license validation for this install</label><label><input type="checkbox" name="clientLinked" value="true" ${license.clientLinked ? 'checked' : ''}${licenseFieldsDisabled}> Linked to a client account</label><label><input type="checkbox" name="lockClientLinkedSettings" value="true" ${license.lockClientLinkedSettings ? 'checked' : ''}> Lock client-linked license settings on this install</label><label>License server URL<input name="licenseServerUrl" value="${escapeHtml(license.licenseServerUrl || '')}"${licenseFieldsDisabled}></label><label>Product ID<input name="whmcsProductId" value="${escapeHtml(license.whmcsProductId || '')}"${licenseFieldsDisabled}></label><label>Generated license key<input readonly value="${escapeHtml(license.licenseKey || 'Not generated')}"></label><input type="hidden" name="licenseKey" value="${escapeHtml(license.licenseKey || '')}"><label>Install ID<input name="installId" value="${escapeHtml(license.installId || '')}"${licenseFieldsDisabled}></label><label>Install domain<input name="installDomain" value="${escapeHtml(license.installDomain || '')}"${licenseFieldsDisabled}></label><label>Edition<select name="edition"${licenseFieldsDisabled}><option value="hosted" ${license.edition === 'hosted' ? 'selected' : ''}>Hosted</option><option value="self-hosted" ${license.edition === 'self-hosted' ? 'selected' : ''}>Self-hosted licensed</option><option value="managed" ${license.edition === 'managed' ? 'selected' : ''}>Managed deployment</option><option value="enterprise" ${license.edition === 'enterprise' ? 'selected' : ''}>Enterprise or internal</option></select></label><button type="submit">Save license settings</button></form><form method="post" action="/admin/install/license/reissue"><button type="submit" ${canReissueLicense(license) ? '' : 'disabled'}>Reissue generated license key</button></form><p>Reissues used: ${escapeHtml(reissueCounts.monthly)}/${escapeHtml(license.reissueLimits?.monthly ?? 2)} this month, ${escapeHtml(reissueCounts.quarterly)}/${escapeHtml(license.reissueLimits?.quarterly ?? 4)} this quarter, ${escapeHtml(reissueCounts.yearly)}/${escapeHtml(license.reissueLimits?.yearly ?? 8)} this year.</p><p>Validation status: <strong>${escapeHtml(license.validationStatus || 'unknown')}</strong>. Last checked: ${escapeHtml(license.lastValidationAt || 'Never')}.</p></section>
+<section><h2>Server install and license</h2><p class="muted">Customer-owned installs use their own local payment links while license, product, invoice, and account continuity stay linked to the Devine Creations client portal. Client-linked installs can display license details without allowing protected settings to be changed locally.</p><form method="post" action="/admin/install/license"><label><input type="checkbox" name="licensingEnabled" value="true" ${license.licensingEnabled ? 'checked' : ''}${licenseFieldsDisabled}> Enable license validation for this install</label><label><input type="checkbox" name="clientLinked" value="true" ${license.clientLinked ? 'checked' : ''}${licenseFieldsDisabled}> Linked to a client account</label><label><input type="checkbox" name="lockClientLinkedSettings" value="true" ${license.lockClientLinkedSettings ? 'checked' : ''}> Lock client-linked license settings on this install</label><label><input type="checkbox" name="internalUse" value="true" ${license.internalUse ? 'checked' : ''}${licenseFieldsDisabled}> Internal Devine Creations enterprise install</label><label>License server URL<input name="licenseServerUrl" value="${escapeHtml(license.licenseServerUrl || '')}"${licenseFieldsDisabled}></label><label>Product ID<input name="whmcsProductId" value="${escapeHtml(license.whmcsProductId || '')}"${licenseFieldsDisabled}></label><label>Product code<input name="whmcsProductCode" value="${escapeHtml(license.whmcsProductCode || tier?.id || '')}"${licenseFieldsDisabled}></label><label>WHMCS admin username<input name="whmcsAdminUsername" value="${escapeHtml(license.whmcsAdminUsername || '')}"${licenseFieldsDisabled}></label><label>Deployment tier<select name="deploymentTier"${licenseFieldsDisabled}>${licenseTierOptions(license.deploymentTier || license.whmcsProductCode)}</select></label><label>Install auth mode<select name="installAuthMode"${licenseFieldsDisabled}><option value="license-token" ${license.installAuthMode === 'license-token' ? 'selected' : ''}>License token</option><option value="whmcs-client-link" ${license.installAuthMode === 'whmcs-client-link' ? 'selected' : ''}>WHMCS client link</option><option value="internal-enterprise-token" ${license.installAuthMode === 'internal-enterprise-token' ? 'selected' : ''}>Internal enterprise token</option></select></label><label>Client ID<input name="whmcsClientId" value="${escapeHtml(license.whmcsClientId || '')}"${licenseFieldsDisabled}></label><label>Client Email<input name="whmcsClientEmail" value="${escapeHtml(license.whmcsClientEmail || '')}"${licenseFieldsDisabled}></label><label>Generated license key<input readonly value="${escapeHtml(license.licenseKey || 'Not generated')}"></label><input type="hidden" name="licenseKey" value="${escapeHtml(license.licenseKey || '')}"><label>Install ID<input name="installId" value="${escapeHtml(license.installId || '')}"${licenseFieldsDisabled}></label><label>Install domain<input name="installDomain" value="${escapeHtml(license.installDomain || '')}"${licenseFieldsDisabled}></label><label>Edition<select name="edition"${licenseFieldsDisabled}><option value="hosted" ${license.edition === 'hosted' ? 'selected' : ''}>Hosted</option><option value="self-hosted" ${license.edition === 'self-hosted' ? 'selected' : ''}>Self-hosted licensed</option><option value="managed" ${license.edition === 'managed' ? 'selected' : ''}>Managed deployment</option><option value="enterprise" ${license.edition === 'enterprise' ? 'selected' : ''}>Enterprise or internal</option></select></label><button type="submit">Save license settings</button></form><form method="post" action="/admin/install/license/reissue" onsubmit="return confirm('Revoke the current license key and generate a new one for this install?')"><button type="submit" ${canReissueLicense(license) ? '' : 'disabled'}>Revoke and generate new license key</button></form><p>Reissues used: ${escapeHtml(reissueCounts.monthly)}/${escapeHtml(formatReissueLimit(license.reissueLimits?.monthly ?? 2))} this month, ${escapeHtml(reissueCounts.quarterly)}/${escapeHtml(formatReissueLimit(license.reissueLimits?.quarterly ?? 4))} this quarter, ${escapeHtml(reissueCounts.yearly)}/${escapeHtml(formatReissueLimit(license.reissueLimits?.yearly ?? 8))} this year.</p><p>Validation status: <strong>${escapeHtml(license.validationStatus || 'unknown')}</strong>. Last checked: ${escapeHtml(license.lastValidationAt || 'Never')}.</p></section>
+<section><h2>Commercial tiers</h2><p class="muted">These tiers mirror the approved AAAStreamer commercial strategy. WHMCS owns billing and customer invoices; this install stores non-secret product and license linkage.</p><table><tr><th>Tier</th><th>Model</th><th>Setup</th><th>Monthly</th><th>Notes</th></tr>${licenseTierRows()}</table></section>
 <section><h2>DNS and domain automation</h2><p class="muted">DNS changes are only performed when a supported provider token is configured on the server. Cloudflare is supported in this build. Existing nameservers and domain ownership must already allow this install to manage records. Approved auth domains let passkeys and browser notifications follow additional domains for this install.</p><form method="post" action="/admin/install/dns-settings"><label>DNS provider<select name="provider"><option value="">Not configured</option><option value="cloudflare" ${dns.provider === 'cloudflare' ? 'selected' : ''}>Cloudflare</option></select></label><label>Zone ID<input name="zoneId" value="${escapeHtml(dns.zoneId || '')}"></label><label>Default DNS target<input name="defaultTarget" value="${escapeHtml(dns.defaultTarget || '')}" placeholder="live.tappedin.fm or server hostname"></label><label>Default nameservers<input name="defaultNameservers" value="${escapeHtml(dns.defaultNameservers || '')}"></label><label>Approved auth domains, one per line<textarea name="authDomains" rows="4" placeholder="live.tappedin.fm&#10;aaastreamer.devinecreations.net">${escapeHtml(dns.authDomains || '')}</textarea></label><button type="submit">Save DNS settings</button></form><form method="post" action="/admin/install/dns-record"><label>Record name<input name="name" placeholder="live"></label><label>Record type<select name="type"><option value="CNAME">CNAME</option><option value="A">A</option><option value="AAAA">AAAA</option></select></label><label>Record target<input name="content" value="${escapeHtml(dns.defaultTarget || '')}"></label><label><input type="checkbox" name="proxied" value="true"> Proxy through provider when supported</label><button type="submit">Create DNS record</button></form><p>Last DNS action: <strong>${escapeHtml(dns.lastActionStatus || 'not configured')}</strong> ${escapeHtml(dns.lastActionMessage || '')}</p></section>
-<section><h2>Server installer</h2><p>Installer script path in this release: <code>scripts/install-aaastreamer-server.sh</code>.</p><p class="muted">The installer creates a service, env file, optional nginx vhost, and the licensing/DNS configuration hooks needed for production setup.</p></section>`;
+<section><h2>Server installer</h2><p>Installer script path in this release: <code>scripts/install-aaastreamer-server.sh</code>. Web installer helper: <code>scripts/webinstall-aaastreamer.sh</code>.</p><p class="muted">The installer creates a service, env file, optional nginx vhost, and the licensing/DNS configuration hooks needed for production setup. The web installer connects to a customer-owned server over SSH, installs into the chosen domain directory, and writes the license/product values supplied by WHMCS.</p></section>`;
   res.send(page('Admin install and licensing', body, req.user));
 });
 
@@ -4096,13 +4192,26 @@ app.post('/admin/install/license', requireAdmin, (req, res) => {
     licensingEnabled: req.body.licensingEnabled === 'true',
     clientLinked: req.body.clientLinked === 'true',
     lockClientLinkedSettings: req.body.lockClientLinkedSettings === 'true',
+    internalUse: req.body.internalUse === 'true',
     licenseServerUrl: safeUrl(req.body.licenseServerUrl) || 'https://devine-creations.com',
     whmcsProductId: String(req.body.whmcsProductId || '').trim().replace(/[^0-9]/g, '').slice(0, 20),
+    whmcsProductCode: String(req.body.whmcsProductCode || '').trim().replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 80),
+    whmcsAdminUsername: String(req.body.whmcsAdminUsername || '').trim().replace(/[^a-zA-Z0-9_.@-]/g, '').slice(0, 80),
+    whmcsClientId: String(req.body.whmcsClientId || '').trim().replace(/[^0-9]/g, '').slice(0, 20),
+    whmcsClientEmail: String(req.body.whmcsClientEmail || '').trim().toLowerCase().slice(0, 180),
     licenseKey: String(req.body.licenseKey || '').trim().slice(0, 160),
     installId: String(req.body.installId || '').trim().slice(0, 160),
     installDomain: String(req.body.installDomain || '').trim().replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 180),
-    edition: ['hosted', 'self-hosted', 'managed', 'enterprise'].includes(req.body.edition) ? req.body.edition : 'self-hosted'
+    edition: ['hosted', 'self-hosted', 'managed', 'enterprise'].includes(req.body.edition) ? req.body.edition : 'self-hosted',
+    deploymentTier: licenseTierCatalog.some((tier) => tier.id === req.body.deploymentTier) ? req.body.deploymentTier : 'self-hosted-starter',
+    installAuthMode: ['license-token', 'whmcs-client-link', 'internal-enterprise-token'].includes(req.body.installAuthMode) ? req.body.installAuthMode : 'license-token'
   };
+  if (store.settings.license.internalUse || store.settings.license.deploymentTier === 'internal-enterprise') {
+    store.settings.license.edition = 'enterprise';
+    store.settings.license.internalUse = true;
+    store.settings.license.installAuthMode = 'internal-enterprise-token';
+    store.settings.license.reissueLimits = { unlimited: true, monthly: null, quarterly: null, yearly: null };
+  }
   store.events.push({ id: id('evt'), type: 'license_settings_updated', payload: { edition: store.settings.license.edition, licensingEnabled: store.settings.license.licensingEnabled }, createdAt: nowIso() });
   writeStore(store);
   res.redirect('/admin/install');
@@ -4350,13 +4459,12 @@ app.post('/admin/users', requireAdmin, (req, res) => {
     displayName: req.body.displayName || username,
     role: normalizeRole(req.body.role, 'user'),
     passwordHash: hashPassword(password),
-    streamKey: id('sk'),
     active: true,
     createdAt,
     updatedAt: createdAt
   };
   store.users.push(user);
-  ensureStreamForUser(store, user);
+  if (canBroadcast(user)) ensureStreamForUser(store, user);
   store.events.push({ id: id('evt'), type: 'user_created', payload: { username, role: user.role }, createdAt });
   writeStore(store);
   res.redirect('/admin/accounts');
@@ -4391,6 +4499,7 @@ app.post('/admin/users/:userId', requireAdmin, async (req, res) => {
     store.sessions = (store.sessions || []).filter((session) => session.userId !== user.id || user.id === req.user.id);
   }
   user.updatedAt = nowIso();
+  if (canBroadcast(user)) ensureStreamForUser(store, user);
   store.events.push({ id: id('evt'), type: 'admin_account_updated', payload: { username: user.username, role: user.role, active: user.active, clientLinked: Boolean(linkedWhmcs) }, createdAt: nowIso() });
   writeStore(store);
   res.redirect('/admin/accounts');
@@ -4801,7 +4910,7 @@ app.post('/api/voicelink/on_done', (req, res) => {
   res.json({ success: true, streamId: stream?.id || null });
 });
 
-app.post('/api/streams/:streamId/restream/start', requireUser, (req, res) => {
+app.post('/api/streams/:streamId/restream/start', requireBroadcaster, (req, res) => {
   if (!allowRestream) {
     res.status(403).json({ success: false, error: 'Restreaming is disabled' });
     return;
@@ -4810,7 +4919,7 @@ app.post('/api/streams/:streamId/restream/start', requireUser, (req, res) => {
   res.json({ success: true, streamId: req.params.streamId, state: 'starting' });
 });
 
-app.post('/api/streams/:streamId/restream/stop', requireUser, (req, res) => {
+app.post('/api/streams/:streamId/restream/stop', requireBroadcaster, (req, res) => {
   if (!allowRestream) {
     res.status(403).json({ success: false, error: 'Restreaming is disabled' });
     return;

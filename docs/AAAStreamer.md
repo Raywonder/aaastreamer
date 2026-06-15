@@ -178,18 +178,54 @@ configured Mastodon identity, such as a TappedIn bot or user on `md.tappedin.fm`
 
 ## Installer, licensing, and DNS
 
-`scripts/install-aaastreamer-server.sh` is the first Linux server installer. It
+`scripts/install-aaastreamer-server.sh` is the Linux server installer. It
 installs dependencies, creates a service user, pulls the app, creates owned
 data, media, and upload folders under `/var/lib/aaastreamer` by default, writes
 the env file, creates a systemd service, and optionally writes an nginx vhost.
 Self-hosted installs should use those owned folders unless an administrator
 explicitly grants the service account access to mounted media paths.
 
+`scripts/webinstall-aaastreamer.sh` is the guarded web/agent installer wrapper
+for customer-owned servers. It connects over SSH only after
+`CONFIRM_OWNED_SERVER=true` is supplied, uploads the normal installer, and passes
+the WHMCS product, license token, install ID, domain, edition, and deployment
+tier into the target server environment.
+
 Self-hosted and managed installs keep their own local creator payment methods,
 but license and invoice tracking remain linked to the Devine Creations WHMCS
-portal using license key, install ID, domain, edition, product ID, and
-validation status. DNS automation is provider-backed; Cloudflare record creation
-is supported when the API token and zone ID are configured.
+portal using license key, install ID, domain, edition, product ID, product code,
+client ID or client email, deployment tier, auth mode, and validation status.
+DNS automation is provider-backed; Cloudflare record creation is supported when
+the API token and zone ID are configured.
+
+Commercial tiers currently configured for WHMCS/product-linking are:
+
+- AAAStreamer Hosted Starter: $14.99/month.
+- AAAStreamer Hosted Professional: $49.99/month.
+- AAAStreamer Hosted Network: $99/month.
+- AAAStreamer Self-Hosted Starter: $99 setup plus $9.99/month.
+- AAAStreamer Self-Hosted Professional: $99 setup plus $49.99/month.
+- AAAStreamer Managed Starter: $149/month.
+- AAAStreamer Managed Professional: $299/month.
+- AAAStreamer Managed Network: $499/month.
+- AAAStreamer Enterprise / Networks: custom pricing.
+- AAAStreamer Internal Enterprise: internal Devine Creations/TappedIn use with
+  unlimited stations, users, administrators, bandwidth, storage, integrations,
+  and license reissues.
+
+Installer testing rule:
+
+- Test server installers in disposable virtual machines whenever possible.
+- Use different supported Linux OS families over time, such as Debian/Ubuntu and
+  Rocky/Alma/RHEL-compatible systems, so package-manager and service behavior is
+  covered.
+- WSL may be used for Linux-side script syntax, repository, and partial behavior
+  checks when a full VM is not reachable, but WSL does not replace a full
+  systemd/nginx installer smoke test.
+- Store test VM disks on secondary storage such as `/mnt/backup` when available
+  instead of consuming the main host drive.
+- Existing production service VMs are not disposable test targets unless the
+  owner explicitly approves that use for the test.
 
 ## Encoder and destination setup
 
