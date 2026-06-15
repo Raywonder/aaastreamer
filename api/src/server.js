@@ -772,6 +772,12 @@ function defaultMediaSettings() {
     .map((item) => item.trim())
     .filter(Boolean);
   const folderSpecs = envFolders.length ? envFolders : [
+    'Audio described content|/mnt/backup/home/dom/media/AudioDescribedContent|enabled|visible|audio|video',
+    'Audio described movies|/mnt/backup/home/dom/media/AudioDescribedContent/Movies|enabled|visible|audio|video',
+    'Audio described TV|/mnt/backup/home/dom/media/AudioDescribedContent/TV|enabled|visible|audio|video',
+    'Audio described misc|/mnt/backup/home/dom/media/AudioDescribedContent/Misc|enabled|visible|audio|video',
+    'Dom podcasts|/mnt/backup/home/dom/media/podcasts|enabled|visible|audio|no-video',
+    'Hosted account media|/mnt/backup/home/*/media|enabled|hidden|audio|video',
     'Backup media|/mnt/backup/media|enabled|visible|audio|video',
     'Audio description|/mnt/backup/audio-description|enabled|visible|audio|video',
     'Music|/mnt/backup/music|enabled|visible|audio|video',
