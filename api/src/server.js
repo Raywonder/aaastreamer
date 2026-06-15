@@ -802,12 +802,21 @@ function streamHasOnDemand(stream, store) {
   return Boolean(firstPlayableSource(stream, store));
 }
 
+function shouldRunContinuousOnDemandRelay(stream, store) {
+  if (!streamHasOnDemand(stream, store)) return false;
+  const behavior = normalizeStreamMediaBehavior(stream.mediaBehavior);
+  return behavior.continuousPlayback !== false && behavior.playbackMode !== 'disabled';
+}
+
 function streamIsPubliclyListable(stream, store) {
   return stream.visibility === 'public' && (isLive(stream) || streamHasOnDemand(stream, store));
 }
 
 function streamPlaybackUrl(stream, store) {
   if (isLive(stream)) return stream.hlsUrl || hlsUrlFor(stream.activeEncoderKey || stream.streamKey);
+  if (shouldRunContinuousOnDemandRelay(stream, store) && sourceProcesses.has(stream.id)) {
+    return hlsUrlFor(stream.streamKey);
+  }
   if (streamHasOnDemand(stream, store)) return playableSourceUrl(firstPlayableSource(stream, store), store);
   return '';
 }
@@ -1732,6 +1741,43 @@ function runSchedulerTick() {
       }
       store.events.push({ id: id('evt'), type: 'scheduled_show_ended', payload: { showId: show.id, streamId: stream.id }, createdAt: nowIso() });
       broadcast({ type: 'scheduled_show_ended', payload: { showId: show.id, streamId: stream.id, title: show.title } });
+      changed = true;
+    }
+  }
+  if (changed) writeStore(store);
+}
+
+function ensureContinuousOnDemandRelays() {
+  let store;
+  try {
+    store = readStore();
+  } catch (error) {
+    appendEvent('ondemand_relay_check_failed', { message: error.message });
+    return;
+  }
+  let changed = false;
+  for (const stream of store.streams || []) {
+    normalizeStream(stream);
+    if (!shouldRunContinuousOnDemandRelay(stream, store)) continue;
+    if (sourceProcesses.has(stream.id)) continue;
+    const source = firstPlayableSource(stream, store);
+    if (!source) continue;
+    if (stream.currentSource?.id !== source.id) {
+      const previousSource = stream.currentSource;
+      removeQueuedSource(stream, source.id);
+      stream.currentSource = source;
+      addSourcesToQueue(stream, [previousSource]);
+      stream.sourceMode = source.type === 'urlRelay' ? 'url' : 'media';
+      changed = true;
+    }
+    try {
+      startSourceProcess(stream, source, store);
+      stream.hlsUrl = hlsUrlFor(stream.streamKey);
+      stream.updatedAt = nowIso();
+      store.events.push({ id: id('evt'), type: 'ondemand_relay_warmed', payload: { streamId: stream.id, sourceId: source.id, label: source.label }, createdAt: nowIso() });
+      changed = true;
+    } catch (error) {
+      store.events.push({ id: id('evt'), type: 'ondemand_relay_warm_failed', payload: { streamId: stream.id, message: error.message }, createdAt: nowIso() });
       changed = true;
     }
   }
@@ -3392,6 +3438,10 @@ app.post('/api/streams/:streamId/restream/stop', requireUser, (req, res) => {
 
 app.listen(port, () => {
   ensureDataStore();
-  setInterval(runSchedulerTick, 30000).unref();
+  ensureContinuousOnDemandRelays();
+  setInterval(() => {
+    runSchedulerTick();
+    ensureContinuousOnDemandRelays();
+  }, 30000).unref();
   console.log(`AAAStreamer listening on ${port}`);
 });
