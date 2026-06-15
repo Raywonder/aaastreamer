@@ -1833,7 +1833,7 @@ function startSourceProcess(stream, source, store) {
   const outputKey = stream.streamKey;
   const output = `rtmp://127.0.0.1:1935/${rtmpAppName}/${outputKey}`;
   stopSourceProcess(stream.id);
-  const hasQueue = (stream.sourceQueue || []).some((queuedSource) => playableSourceUrl(queuedSource, store));
+  const hasQueue = behavior.playbackMode !== 'loop' && (stream.sourceQueue || []).some((queuedSource) => playableSourceUrl(queuedSource, store));
   const args = [
     '-hide_banner',
     '-loglevel', 'warning',
