@@ -67,7 +67,9 @@ rtmp://HOSTNAME:1935/live
 
 By default, unknown stream keys are rejected. Set `AAASTREAMER_ALLOW_AD_HOC_STREAMS=true` only for open testing environments.
 
-Users can copy the server URL, stream key, tracked token share URL, direct watch page, and HLS playback URL from the dashboard. The dashboard can also open the platform share sheet for the token share URL when the browser supports it. Regenerating or revoking a stream key immediately replaces the stored key for that user and stream; the old key will no longer be accepted for future publishes.
+Users can copy the server URL, stream key, tracked token share URL, direct watch page, and HLS playback URL from the dashboard. The dashboard can also open the platform share sheet for the token share URL when the browser supports it. The stream-key rotation button revokes the current key and generates a replacement in one confirmed action; the old key will no longer be accepted for future publishes.
+
+Account security is managed from the Account tab. Users can set a notification email, configure reminders when no notification email is present, enable self-service recovery with a private recovery code, turn on built-in authenticator-app two-factor authentication, and register passkeys. Passkeys are domain-scoped by browser rules; when an install adds or moves to a new domain, admins should add that domain under the install DNS/auth-domain settings and users should register a passkey from the new domain.
 
 The dashboard also provides an iframe embed code for the public stream page and
 lets streamers add an optional background image, useful links, and a support or

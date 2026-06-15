@@ -3,8 +3,15 @@ import childProcess from 'child_process';
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
+import {
+  generateAuthenticationOptions,
+  generateRegistrationOptions,
+  verifyAuthenticationResponse,
+  verifyRegistrationResponse
+} from '@simplewebauthn/server';
 
 const app = express();
+app.set('trust proxy', true);
 const uploadLimit = process.env.AAASTREAMER_UPLOAD_LIMIT || '75mb';
 app.use(express.json({
   limit: uploadLimit,
@@ -148,6 +155,103 @@ function verifyPassword(password, stored) {
   const [, salt, expected] = stored.split(':');
   const actual = crypto.scryptSync(String(password), salt, 64);
   return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), actual);
+}
+
+function createLoginSession(store, user, res) {
+  const token = id('sess');
+  store.sessions.push({ token, userId: user.id, createdAt: nowIso(), expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 14).toISOString() });
+  writeStore(store);
+  res.setHeader('Set-Cookie', `${sessionCookieName}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax`);
+}
+
+function base32Encode(buffer) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let bits = 0;
+  let value = 0;
+  let output = '';
+  for (const byte of buffer) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      output += alphabet[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) output += alphabet[(value << (5 - bits)) & 31];
+  return output;
+}
+
+function base32Decode(input) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let bits = 0;
+  let value = 0;
+  const bytes = [];
+  for (const char of String(input || '').toUpperCase().replace(/[^A-Z2-7]/g, '')) {
+    const index = alphabet.indexOf(char);
+    if (index < 0) continue;
+    value = (value << 5) | index;
+    bits += 5;
+    if (bits >= 8) {
+      bytes.push((value >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(bytes);
+}
+
+function generateTotpSecret() {
+  return base32Encode(crypto.randomBytes(20));
+}
+
+function totpCode(secret, step = Math.floor(Date.now() / 30000)) {
+  const key = base32Decode(secret);
+  const counter = Buffer.alloc(8);
+  counter.writeUInt32BE(Math.floor(step / 0x100000000), 0);
+  counter.writeUInt32BE(step >>> 0, 4);
+  const hmac = crypto.createHmac('sha1', key).update(counter).digest();
+  const offset = hmac[hmac.length - 1] & 0x0f;
+  const binary = ((hmac[offset] & 0x7f) << 24) | ((hmac[offset + 1] & 0xff) << 16) | ((hmac[offset + 2] & 0xff) << 8) | (hmac[offset + 3] & 0xff);
+  return String(binary % 1000000).padStart(6, '0');
+}
+
+function verifyTotp(secret, provided) {
+  const code = String(provided || '').replace(/\s+/g, '');
+  if (!/^\d{6}$/.test(code) || !secret) return false;
+  const step = Math.floor(Date.now() / 30000);
+  return [-1, 0, 1].some((offset) => crypto.timingSafeEqual(Buffer.from(totpCode(secret, step + offset)), Buffer.from(code)));
+}
+
+function passkeyContext(req) {
+  const host = String(req.get('x-forwarded-host') || req.get('host') || 'localhost').split(',')[0].trim();
+  const rpID = host.replace(/:\d+$/, '');
+  const proto = String(req.get('x-forwarded-proto') || req.protocol || 'https').split(',')[0].trim();
+  return { rpID, origin: `${proto}://${host}` };
+}
+
+function configuredAuthDomains(store, req) {
+  const current = passkeyContext(req).rpID;
+  const dns = store.settings?.dns || {};
+  return Array.from(new Set([
+    current,
+    ...String(dns.authDomains || '')
+      .split(/\r?\n|,|;/)
+      .map((item) => item.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/:\d+$/, ''))
+      .filter(Boolean)
+  ]));
+}
+
+function configuredOrigins(store, req) {
+  const proto = String(req.get('x-forwarded-proto') || req.protocol || 'https').split(',')[0].trim();
+  return configuredAuthDomains(store, req).map((domain) => `${proto}://${domain}`);
+}
+
+function passkeyCredentialForVerify(passkey) {
+  return {
+    id: passkey.id,
+    publicKey: Buffer.from(passkey.publicKey, 'base64url'),
+    counter: Number(passkey.counter || 0),
+    transports: passkey.transports || []
+  };
 }
 
 function ensureDataStore() {
@@ -311,6 +415,7 @@ function defaultDnsSettings() {
     zoneId: process.env.AAASTREAMER_DNS_ZONE_ID || '',
     defaultTarget: process.env.AAASTREAMER_DNS_DEFAULT_TARGET || '',
     defaultNameservers: process.env.AAASTREAMER_DNS_DEFAULT_NAMESERVERS || '',
+    authDomains: process.env.AAASTREAMER_AUTH_DOMAINS || '',
     lastActionAt: '',
     lastActionStatus: 'not configured',
     lastActionMessage: ''
@@ -408,7 +513,38 @@ function normalizeUser(user) {
   if (!user || typeof user !== 'object') return user;
   user.whmcsClientId = String(user.whmcsClientId || '').replace(/[^0-9]/g, '').slice(0, 20);
   user.whmcsPortalEmail = String(user.whmcsPortalEmail || '').trim().slice(0, 180);
+  user.recoveryEmail = String(user.recoveryEmail || user.whmcsPortalEmail || '').trim().slice(0, 180);
+  user.recoveryHint = String(user.recoveryHint || '').trim().slice(0, 240);
+  user.recoveryEnabled = user.recoveryEnabled === true;
+  user.notificationEmail = String(user.notificationEmail || user.recoveryEmail || user.whmcsPortalEmail || '').trim().slice(0, 180);
+  user.notificationEmailReminder = {
+    enabled: user.notificationEmailReminder?.enabled !== false,
+    everyLogins: clampNumber(user.notificationEmailReminder?.everyLogins, 1, 30, 3),
+    everyDays: clampNumber(user.notificationEmailReminder?.everyDays, 1, 180, 14),
+    loginCount: clampNumber(user.notificationEmailReminder?.loginCount, 0, 1000000, 0),
+    lastShownAt: user.notificationEmailReminder?.lastShownAt || ''
+  };
+  user.totpEnabled = user.totpEnabled === true;
+  user.passkeys = Array.isArray(user.passkeys) ? user.passkeys : [];
   return user;
+}
+
+function userById(store, userId) {
+  return store.users.find((user) => user.id === userId) || null;
+}
+
+function userByLogin(store, login) {
+  const value = String(login || '').trim().toLowerCase();
+  if (!value) return null;
+  return store.users.find((user) =>
+    user.username.toLowerCase() === value ||
+    String(user.recoveryEmail || '').toLowerCase() === value ||
+    String(user.whmcsPortalEmail || '').toLowerCase() === value
+  ) || null;
+}
+
+function recoveryCodeMatches(user, code) {
+  return Boolean(user?.recoveryEnabled && user?.recoveryCodeHash && verifyPassword(code || '', user.recoveryCodeHash));
 }
 
 function defaultScheduledShow() {
@@ -558,6 +694,8 @@ function normalizeStore(store) {
   store.events ||= [];
   store.payments ||= [];
   store.sessions ||= [];
+  store.pendingLogins ||= [];
+  store.passkeyChallenges ||= [];
   store.scheduledShows ||= [];
   store.shareLinks ||= [];
   store.settings ||= {};
@@ -584,6 +722,9 @@ function normalizeStore(store) {
   store.users = (store.users || []).map(normalizeUser).filter(Boolean);
   store.scheduledShows = (store.scheduledShows || []).map(normalizeScheduledShow).filter(Boolean);
   store.shareLinks = (store.shareLinks || []).filter((link) => link?.token && link?.streamId);
+  const now = Date.now();
+  store.pendingLogins = (store.pendingLogins || []).filter((item) => item?.token && Date.parse(item.expiresAt || '') > now);
+  store.passkeyChallenges = (store.passkeyChallenges || []).filter((item) => item?.challenge && Date.parse(item.expiresAt || '') > now);
   for (const stream of store.streams) normalizeStream(stream);
   pruneComments(store);
   return store;
@@ -781,6 +922,16 @@ function currentUser(req) {
   const session = store.sessions.find((item) => item.token === token && new Date(item.expiresAt) > new Date());
   if (!session) return null;
   return store.users.find((user) => user.id === session.userId && user.active) || null;
+}
+
+function notificationEmailReminder(user) {
+  if (!user || user.notificationEmail || user.notificationEmailReminder?.enabled === false) return '';
+  const reminder = user.notificationEmailReminder || {};
+  const loginDue = Number(reminder.loginCount || 0) > 0 && Number(reminder.loginCount || 0) % Number(reminder.everyLogins || 3) === 0;
+  const last = Date.parse(reminder.lastShownAt || '');
+  const dayDue = !Number.isFinite(last) || Date.now() - last > Number(reminder.everyDays || 14) * 24 * 60 * 60 * 1000;
+  if (!loginDue && !dayDue) return '';
+  return `<section class="notice" role="status"><h2>Notification email reminder</h2><p>Add a notification email so AAAStreamer can contact you about account recovery, scheduled shows, stream events, and payment or moderation notices.</p><p><a class="button" href="/dashboard?tab=account">Set notification email</a></p></section>`;
 }
 
 function requireUser(req, res, next) {
@@ -1594,6 +1745,7 @@ function sourcePresetCards(stream, serverUrl) {
 function dashboardTabs(active) {
   const tabs = [
     ['overview', 'Overview'],
+    ['account', 'Account'],
     ['media', 'Media management'],
     ['schedule', 'Calendar'],
     ['profile', 'Stream profile'],
@@ -2240,7 +2392,34 @@ app.get('/login', (req, res) => {
     res.redirect('/dashboard');
     return;
   }
-  res.send(page('Log in', `<h1>Log in</h1><form method="post" action="/login"><label>Username<input name="username" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button type="submit">Log in</button></form>`, null));
+  res.send(page('Log in', `<h1>Log in</h1><form method="post" action="/login"><label>Username<input id="loginUsername" name="username" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button type="submit">Log in</button></form><p><button type="button" id="passkeyLogin">Log in with passkey</button></p><p id="passkeyLoginStatus" class="notice" role="status" aria-live="polite"></p><p><a href="/forgot-password">Forgot your login details?</a></p><script>
+function b64uToBuffer(value){const b64=String(value).replace(/-/g,'+').replace(/_/g,'/');const bin=atob(b64.padEnd(Math.ceil(b64.length/4)*4,'='));return Uint8Array.from(bin,c=>c.charCodeAt(0)).buffer;}
+function bufferToB64u(buffer){const bytes=new Uint8Array(buffer);let bin='';bytes.forEach(b=>bin+=String.fromCharCode(b));return btoa(bin).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');}
+function publicKeyRequestFromJSON(options){options.challenge=b64uToBuffer(options.challenge);if(options.allowCredentials){options.allowCredentials=options.allowCredentials.map(c=>({...c,id:b64uToBuffer(c.id)}));}return options;}
+function credentialToJSON(credential){return {id:credential.id,rawId:bufferToB64u(credential.rawId),type:credential.type,response:{authenticatorData:bufferToB64u(credential.response.authenticatorData),clientDataJSON:bufferToB64u(credential.response.clientDataJSON),signature:bufferToB64u(credential.response.signature),userHandle:credential.response.userHandle?bufferToB64u(credential.response.userHandle):null}};}
+const passkeyLogin=document.getElementById('passkeyLogin');const passkeyLoginStatus=document.getElementById('passkeyLoginStatus');
+if(passkeyLogin){passkeyLogin.addEventListener('click',async()=>{try{if(!window.PublicKeyCredential)throw new Error('This browser does not support passkeys.');const username=document.getElementById('loginUsername').value;if(!username){passkeyLoginStatus.textContent='Enter your username or recovery email first.';return;}const optionsResponse=await fetch('/api/passkeys/authenticate/options',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username})});const options=await optionsResponse.json();if(!optionsResponse.ok)throw new Error(options.error||'Passkey login is not available for this account.');const credential=await navigator.credentials.get({publicKey:publicKeyRequestFromJSON(options)});const verifyResponse=await fetch('/api/passkeys/authenticate/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(credentialToJSON(credential))});const result=await verifyResponse.json();if(!verifyResponse.ok||!result.success)throw new Error(result.error||'Passkey login failed.');location.href=result.redirect||'/dashboard';}catch(error){passkeyLoginStatus.textContent=error.message||'Passkey login failed.';}});}
+</script>`, null));
+});
+
+app.get('/forgot-password', (req, res) => {
+  res.send(page('Reset login details', `<h1>Reset login details</h1><p>Enter your username or recovery email, your private recovery code, and a new password.</p><form method="post" action="/forgot-password"><label>Username or recovery email<input name="login" autocomplete="username" required></label><label>Recovery code<input name="recoveryCode" type="password" autocomplete="one-time-code" required></label><label>New password<input name="password" type="password" autocomplete="new-password" required minlength="8"></label><button type="submit">Reset password</button></form>`, null));
+});
+
+app.post('/forgot-password', (req, res) => {
+  const store = readStore();
+  const user = userByLogin(store, req.body.login);
+  const password = String(req.body.password || '');
+  if (!user || !user.active || password.length < 8 || !recoveryCodeMatches(user, req.body.recoveryCode)) {
+    res.status(403).send(page('Reset not accepted', '<h1>Reset not accepted</h1><p>The account, recovery code, or new password was not accepted.</p><a class="button" href="/forgot-password">Try again</a>', null));
+    return;
+  }
+  user.passwordHash = hashPassword(password);
+  user.updatedAt = nowIso();
+  store.sessions = (store.sessions || []).filter((session) => session.userId !== user.id);
+  store.events.push({ id: id('evt'), type: 'password_reset_self_service', payload: { username: user.username }, createdAt: nowIso() });
+  writeStore(store);
+  res.send(page('Password reset', '<h1>Password reset</h1><p>Your password has been updated. You can now log in with the new password.</p><p><a class="button" href="/login">Log in</a></p>', null));
 });
 
 app.get('/signup', (req, res) => {
@@ -2294,15 +2473,48 @@ app.post('/signup', (req, res) => {
 
 app.post('/login', (req, res) => {
   const store = readStore();
-  const user = store.users.find((item) => item.username.toLowerCase() === String(req.body.username || '').toLowerCase() && item.active);
+  const user = userByLogin(store, req.body.username);
   if (!user || !verifyPassword(req.body.password || '', user.passwordHash)) {
     res.status(403).send(page('Login failed', '<h1>Login failed</h1><p>Username or password was not accepted.</p><a class="button" href="/login">Try again</a>', null));
     return;
   }
-  const token = id('sess');
-  store.sessions.push({ token, userId: user.id, createdAt: nowIso(), expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 14).toISOString() });
-  writeStore(store);
-  res.setHeader('Set-Cookie', `${sessionCookieName}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax`);
+  user.notificationEmailReminder ||= { enabled: true, everyLogins: 3, everyDays: 14, loginCount: 0, lastShownAt: '' };
+  user.notificationEmailReminder.loginCount = Number(user.notificationEmailReminder.loginCount || 0) + 1;
+  user.updatedAt = nowIso();
+  if (user.totpEnabled) {
+    const token = id('login');
+    store.pendingLogins.push({ token, userId: user.id, createdAt: nowIso(), expiresAt: new Date(Date.now() + 1000 * 60 * 10).toISOString() });
+    writeStore(store);
+    res.redirect(`/login/2fa?token=${encodeURIComponent(token)}`);
+    return;
+  }
+  createLoginSession(store, user, res);
+  res.redirect('/dashboard');
+});
+
+app.get('/login/2fa', (req, res) => {
+  const token = String(req.query.token || '');
+  const store = readStore();
+  const pending = store.pendingLogins.find((item) => item.token === token && Date.parse(item.expiresAt || '') > Date.now());
+  if (!pending) {
+    res.status(403).send(page('Two-factor login expired', '<h1>Two-factor login expired</h1><p>Start login again.</p><p><a class="button" href="/login">Back to login</a></p>', null));
+    return;
+  }
+  res.send(page('Two-factor verification', `<h1>Two-factor verification</h1><form method="post" action="/login/2fa"><input type="hidden" name="token" value="${escapeHtml(token)}"><label>Authentication code<input name="code" inputmode="numeric" autocomplete="one-time-code" required></label><button type="submit">Continue</button></form>`, null));
+});
+
+app.post('/login/2fa', (req, res) => {
+  const store = readStore();
+  const token = String(req.body.token || '');
+  const pending = store.pendingLogins.find((item) => item.token === token && Date.parse(item.expiresAt || '') > Date.now());
+  const user = pending ? userById(store, pending.userId) : null;
+  if (!user || !verifyTotp(user.totpSecret, req.body.code)) {
+    res.status(403).send(page('Two-factor verification failed', '<h1>Two-factor verification failed</h1><p>The code was not accepted.</p><p><a class="button" href="/login">Back to login</a></p>', null));
+    return;
+  }
+  store.pendingLogins = store.pendingLogins.filter((item) => item.token !== token);
+  user.updatedAt = nowIso();
+  createLoginSession(store, user, res);
   res.redirect('/dashboard');
 });
 
@@ -2326,8 +2538,12 @@ app.get('/dashboard', (req, res) => {
   const paymentSettings = store.settings.paymentIntegration || defaultPaymentIntegrationSettings();
   stream.support = effectiveSupportSettings(stream, user, store.settings);
   const shareLink = ensureShareLink(store, stream, user.id);
+  const reminderHtml = notificationEmailReminder(user);
+  if (reminderHtml) {
+    user.notificationEmailReminder.lastShownAt = nowIso();
+  }
   writeStore(store);
-  const activeTab = ['overview', 'media', 'schedule', 'profile', 'support', 'advanced'].includes(req.query.tab) ? req.query.tab : 'overview';
+  const activeTab = ['overview', 'account', 'media', 'schedule', 'profile', 'support', 'advanced'].includes(req.query.tab) ? req.query.tab : 'overview';
   const serverUrl = rtmpUrlFor(stream.streamKey);
   const watchUrl = watchUrlFor(stream);
   const shareUrl = tokenUrlFor(shareLink.token);
@@ -2347,6 +2563,9 @@ app.get('/dashboard', (req, res) => {
   const quickSourceCards = sourcePresetCards(stream, serverUrl);
   const behavior = normalizeStreamMediaBehavior(stream.mediaBehavior);
   const scheduleRows = scheduledShowsForStream(store, stream).map((show) => `<tr><td>${escapeHtml(show.title)}</td><td>${escapeHtml(show.startAt || '')}</td><td>${escapeHtml(show.mode)}</td><td>${escapeHtml(show.status)}</td><td><form method="post" action="/dashboard/schedule/${escapeHtml(show.id)}/toggle" class="inline-form"><button type="submit">${show.enabled ? 'Disable' : 'Enable'}</button></form><form method="post" action="/dashboard/schedule/${escapeHtml(show.id)}/cancel" class="inline-form"><button type="submit" class="danger">Cancel</button></form></td></tr>`).join('');
+  const authDomains = configuredAuthDomains(store, req).join(', ');
+  const passkeyRows = (user.passkeys || []).map((passkey) => `<tr><td>${escapeHtml(passkey.name || 'Passkey')}</td><td>${escapeHtml(passkey.rpID || '')}</td><td>${escapeHtml(passkey.createdAt || '')}</td><td>${escapeHtml(passkey.lastUsedAt || 'Never')}</td></tr>`).join('');
+  const totpUri = user.totpPendingSecret ? `otpauth://totp/${encodeURIComponent(store.settings.siteName || 'AAAStreamer')}:${encodeURIComponent(user.username)}?secret=${encodeURIComponent(user.totpPendingSecret)}&issuer=${encodeURIComponent(store.settings.siteName || 'AAAStreamer')}` : '';
   const tabs = dashboardTabs(activeTab);
   const overviewTab = `<section><h2>User streaming details</h2>
 <p class="muted">Use these connection details in OBS, Ecamm Live, Audio Hijack, Streamlabs, vMix, Larix Broadcaster, or any app that can publish RTMP.</p>
@@ -2358,12 +2577,16 @@ app.get('/dashboard', (req, res) => {
 <div class="field-row"><label>Web embed code<input id="embedCode" readonly value="${escapeHtml(embedCode)}"></label><button type="button" data-copy-target="embedCode">Copy embed code</button></div>
 <p><button type="button" id="shareStream">Share stream link</button></p><p id="copyStatus" class="notice" role="status" aria-live="polite"></p>
 <form method="post" action="/dashboard/share/mastodon"><label>Optional Mastodon share text<textarea name="status" rows="3">${escapeHtml(`${stream.title}\n${shareUrl}`)}</textarea></label><button type="submit">Share on Mastodon</button></form>
-<form class="inline-form" method="post" action="/dashboard/stream/key"><input type="hidden" name="action" value="regenerate"><button type="submit">Regenerate stream key</button></form>
-<form class="inline-form" method="post" action="/dashboard/stream/key"><input type="hidden" name="action" value="revoke"><button type="submit" class="danger">Revoke current stream key</button></form></section>
+<form class="inline-form" method="post" action="/dashboard/stream/key"><input type="hidden" name="action" value="revoke"><button type="submit" class="danger" onclick="return confirm('This will revoke the current stream key and generate a new one. Existing encoder settings using the old key will stop working until you update them. Continue?')">Revoke and generate new key</button></form></section>
 <section><h2>Encoder keys</h2><table><tr><th>Name</th><th>Key</th><th>Audio bitrate</th><th>Status</th><th>HLS output</th></tr>${encoderRows}</table>
 <form method="post" action="/dashboard/encoders"><label>Encoder name<input name="name" placeholder="OBS Windows, Ecamm Mac, Audio Hijack"></label><label>Audio bitrate<select name="audioBitrate">${audioBitrates.map((rate) => `<option ${rate === stream.encoderSettings.audioBitrate ? 'selected' : ''}>${rate}</option>`).join('')}</select></label><button type="submit">Add encoder key</button></form></section>
 <section><h2>Destinations</h2><p class="muted">Use the provider setup link first when available. Manual RTMP fields are for custom destinations or services that do not expose a connected setup path yet.</p><form id="destinationStateForm" method="post" action="/dashboard/destinations/enabled"><table><tr><th>Live</th><th>Name</th><th>Platform</th><th>Connection</th><th>Manual RTMP</th><th>Action</th></tr>${destinationRows || '<tr><td colspan="6">No destinations configured yet.</td></tr>'}</table><button type="submit">Save live destination choices</button></form>
 <form method="post" action="/dashboard/destinations"><label>Platform<select id="platformPreset" name="platform">${presetOptions}</select></label><p id="destinationServices" class="muted"></p><p><a id="destinationConnectLink" class="button" href="#" target="_blank" rel="noopener noreferrer">Open service setup</a></p><label>Name<input name="name" placeholder="Main YouTube channel"></label><label>RTMP or RTMPS URL, manual destinations only<input id="destinationRtmpUrl" name="rtmpUrl"></label><label>Stream key, manual destinations only<input name="streamKey"></label><label><input type="checkbox" name="enabled" value="true" checked> Enable destination</label><button type="submit">Add destination</button></form></section>`;
+  const accountTab = `<section><h2>Account details</h2><form method="post" action="/dashboard/account"><label>Display name<input name="displayName" value="${escapeHtml(user.displayName || '')}"></label><label>WHMCS portal email<input name="whmcsPortalEmail" type="email" value="${escapeHtml(user.whmcsPortalEmail || '')}"></label><label>WHMCS client ID<input name="whmcsClientId" inputmode="numeric" value="${escapeHtml(user.whmcsClientId || '')}"></label><button type="submit">Save account details</button></form></section>
+<section><h2>Notification email</h2><p class="muted">This email is used for account recovery reminders, stream notices, payment notices, and browser notification enrollment. Browser notifications follow the current domain in your browser.</p><form method="post" action="/dashboard/notification-settings"><label>Notification email<input name="notificationEmail" type="email" value="${escapeHtml(user.notificationEmail || '')}"></label><label><input type="checkbox" name="reminderEnabled" value="true" ${user.notificationEmailReminder?.enabled !== false ? 'checked' : ''}> Remind me if no notification email is configured</label><label>Reminder every number of logins<input name="everyLogins" type="number" min="1" max="30" value="${escapeHtml(user.notificationEmailReminder?.everyLogins || 3)}"></label><label>Reminder every number of days<input name="everyDays" type="number" min="1" max="180" value="${escapeHtml(user.notificationEmailReminder?.everyDays || 14)}"></label><button type="submit">Save notification settings</button></form></section>
+<section><h2>Login recovery</h2><p class="muted">Use a recovery email and a private recovery code so you can reset your password if you forget your login details. Keep the recovery code somewhere only you can access.</p><form method="post" action="/dashboard/recovery-settings"><label><input type="checkbox" name="recoveryEnabled" value="true" ${user.recoveryEnabled ? 'checked' : ''}> Enable self-service password reset</label><label>Recovery email<input name="recoveryEmail" type="email" value="${escapeHtml(user.recoveryEmail || '')}"></label><label>Recovery hint, optional<input name="recoveryHint" value="${escapeHtml(user.recoveryHint || '')}" maxlength="240"></label><label>New recovery code<input name="recoveryCode" type="password" autocomplete="new-password" minlength="8" placeholder="${user.recoveryCodeHash ? 'Leave blank to keep existing code' : 'Set a private code, at least 8 characters'}"></label><button type="submit">Save recovery settings</button></form></section>
+<section><h2>Two-factor authentication</h2><p>Status: <strong>${user.totpEnabled ? 'enabled' : 'not enabled'}</strong>.</p>${user.totpPendingSecret ? `<p>Add this setup key to your authenticator app, then enter the current 6 digit code. Setup URI: <code>${escapeHtml(totpUri)}</code></p><form method="post" action="/dashboard/security/totp/confirm"><label>Authentication code<input name="code" inputmode="numeric" autocomplete="one-time-code" required></label><button type="submit">Enable two-factor authentication</button></form>` : user.totpEnabled ? `<form method="post" action="/dashboard/security/totp/disable"><label>Current password<input name="password" type="password" autocomplete="current-password" required></label><button type="submit" class="danger">Disable two-factor authentication</button></form>` : `<form method="post" action="/dashboard/security/totp/setup"><button type="submit">Set up two-factor authentication</button></form>`}</section>
+<section><h2>Passkeys</h2><p class="muted">Passkeys can sign in to this account on approved domains for this install: ${escapeHtml(authDomains)}. If an admin adds or changes domains, register a passkey from the new domain as well so your device syncs it under that site.</p><p><button type="button" id="registerPasskey">Add passkey</button></p><p id="passkeyStatus" class="notice" role="status" aria-live="polite"></p><table><tr><th>Name</th><th>Domain</th><th>Created</th><th>Last used</th></tr>${passkeyRows || '<tr><td colspan="4">No passkeys registered yet.</td></tr>'}</table></section>`;
   const mediaTab = `<section><h2>Media management</h2><p>Current source: <strong>${escapeHtml(sourceSummary(selectedSource))}</strong>. Relay process: <strong>${activeSourceRunning ? 'running' : 'stopped'}</strong>.</p>
 <form method="post" action="/dashboard/media-settings"><div class="grid"><label><input type="checkbox" name="autoEnableUploads" value="true" ${behavior.autoEnableUploads ? 'checked' : ''}> Auto-enable new uploads</label><label><input type="checkbox" name="autoQueueUploads" value="true" ${behavior.autoQueueUploads ? 'checked' : ''}> Auto-add uploads to queue</label><label><input type="checkbox" name="autoRefreshMedia" value="true" ${behavior.autoRefreshMedia ? 'checked' : ''}> Auto-refresh media list</label><label>Enable delay after upload, seconds<input type="number" min="0" max="86400" name="uploadEnableDelaySeconds" value="${escapeHtml(behavior.uploadEnableDelaySeconds)}"></label><label>Playback action<select name="playbackMode"><option value="loop" ${behavior.playbackMode === 'loop' ? 'selected' : ''}>Auto loop continuously</option><option value="sequential" ${behavior.playbackMode === 'sequential' ? 'selected' : ''}>Play queue in order</option><option value="random" ${behavior.playbackMode === 'random' ? 'selected' : ''}>Random queue playback</option><option value="disabled" ${behavior.playbackMode === 'disabled' ? 'selected' : ''}>Stop or disable source relay</option></select></label><label>Fade in seconds<input type="range" min="0" max="30" step="1" name="fadeInSeconds" value="${escapeHtml(behavior.fadeInSeconds)}"></label><label>Fade out seconds<input type="range" min="0" max="30" step="1" name="fadeOutSeconds" value="${escapeHtml(behavior.fadeOutSeconds)}"></label><label>Crossfade target seconds<input type="range" min="0" max="30" step="1" name="crossfadeSeconds" value="${escapeHtml(behavior.crossfadeSeconds)}"></label></div><button type="submit">Save media settings</button></form>
 <section class="subsection"><h3>Quick source setup</h3><div class="preset-grid">${quickSourceCards}</div></section>
@@ -2378,9 +2601,13 @@ app.get('/dashboard', (req, res) => {
   const support = effectiveSupportSettings(stream, user, store.settings);
   const supportTab = `<section><h2>Support and payment box</h2><p class="muted">Admin streams use the configured WHMCS default client when the stream field is blank. Linked user accounts use their stored WHMCS client ID.</p><form method="post" action="/dashboard/support"><label><input type="checkbox" name="enabled" value="true" ${support.enabled ? 'checked' : ''}> Enable support box for this stream</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${support.showOnWatchPage ? 'checked' : ''}> Show support box on the visitor watch page</label><label>Placement<select name="placement"><option value="before" ${support.placement === 'before' ? 'selected' : ''}>Before stream player</option><option value="during" ${support.placement === 'during' ? 'selected' : ''}>Beside stream player area</option><option value="after" ${!['before', 'during'].includes(support.placement) ? 'selected' : ''}>After comments and stream details</option></select></label><label>Heading<input name="title" value="${escapeHtml(support.title || 'Support this stream')}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(support.description || '')}</textarea></label><label>PayPal URL<input name="paypalUrl" value="${escapeHtml(support.paypalUrl || '')}" placeholder="https://paypal.me/example"></label><label>Stripe payment link<input name="stripeUrl" value="${escapeHtml(support.stripeUrl || '')}" placeholder="https://buy.stripe.com/..."></label><label>Stripe Connect account ID<input name="stripeConnectAccountId" value="${escapeHtml(support.stripeConnectAccountId || '')}" placeholder="acct_..."></label><label>WHMCS client ID for invoice payments<input name="whmcsClientId" value="${escapeHtml(support.whmcsClientId || '')}" inputmode="numeric" placeholder="${escapeHtml(user.role === 'admin' ? paymentSettings.whmcsDefaultClientId || 'Admin default not set' : user.whmcsClientId || 'Linked client ID')}"></label><label>Cash App URL<input name="cashAppUrl" value="${escapeHtml(support.cashAppUrl || '')}" placeholder="https://cash.app/$name"></label><label>Apple Pay or payment URL<input name="applePayUrl" value="${escapeHtml(support.applePayUrl || '')}" placeholder="https://example.com/apple-pay"></label><label>Payment notes<textarea name="paymentNotes" rows="3">${escapeHtml(support.paymentNotes || '')}</textarea></label><label>Payment or donation embed HTML<textarea name="embedHtml" rows="6">${escapeHtml(support.embedHtml || '')}</textarea></label><button type="submit">Save support settings</button></form>${renderSupportBox({ ...stream, support }, 'dashboard')}</section>`;
   const advancedTab = `<section><h2>Latency and buffer</h2><form method="post" action="/dashboard/latency"><label>Stream latency mode<select name="mode"><option value="low" ${stream.latencySettings.mode === 'low' ? 'selected' : ''}>Low latency</option><option value="balanced" ${stream.latencySettings.mode === 'balanced' ? 'selected' : ''}>Balanced</option><option value="stable" ${stream.latencySettings.mode === 'stable' ? 'selected' : ''}>Most stable</option></select></label><label>Target live latency, seconds<input name="targetLatencySeconds" type="number" min="2" max="30" step="0.5" value="${escapeHtml(stream.latencySettings.targetLatencySeconds)}"></label><label>Player buffer, seconds<input name="playerBufferSeconds" type="number" min="4" max="60" step="0.5" value="${escapeHtml(stream.latencySettings.playerBufferSeconds)}"></label><label>Reconnect buffer, seconds<input name="reconnectBufferSeconds" type="number" min="4" max="120" step="1" value="${escapeHtml(stream.latencySettings.reconnectBufferSeconds)}"></label><button type="submit">Save latency settings</button></form></section><section><h2>On-demand display</h2><form method="post" action="/dashboard/sources/ondemand"><label><input type="checkbox" name="enabled" value="true" ${stream.onDemand?.enabled ? 'checked' : ''}> Enable on-demand playback</label><label><input type="checkbox" name="showWhenOffline" value="true" ${stream.onDemand?.showWhenOffline ? 'checked' : ''}> Show to visitors when offline and selected media is available</label><label>On-demand title<input name="title" value="${escapeHtml(stream.onDemand?.title || '')}"></label><button type="submit">Save on-demand settings</button></form></section>`;
-  const selectedBody = { overview: overviewTab, media: mediaTab, schedule: scheduleTab, profile: profileTab, support: supportTab, advanced: advancedTab }[activeTab];
-  const body = `<h1>User panel</h1>${tabs}${selectedBody}<script>
+  const selectedBody = { overview: overviewTab, account: accountTab, media: mediaTab, schedule: scheduleTab, profile: profileTab, support: supportTab, advanced: advancedTab }[activeTab];
+  const body = `<h1>User panel</h1>${reminderHtml}${tabs}${selectedBody}<script>
 const copyStatus=document.getElementById('copyStatus');
+function b64uToBuffer(value){const b64=String(value).replace(/-/g,'+').replace(/_/g,'/');const bin=atob(b64.padEnd(Math.ceil(b64.length/4)*4,'='));return Uint8Array.from(bin,c=>c.charCodeAt(0)).buffer;}
+function bufferToB64u(buffer){const bytes=new Uint8Array(buffer);let bin='';bytes.forEach(b=>bin+=String.fromCharCode(b));return btoa(bin).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');}
+function publicKeyCreateFromJSON(options){options.challenge=b64uToBuffer(options.challenge);options.user.id=b64uToBuffer(options.user.id);if(options.excludeCredentials){options.excludeCredentials=options.excludeCredentials.map(c=>({...c,id:b64uToBuffer(c.id)}));}return options;}
+function attestationToJSON(credential){return {id:credential.id,rawId:bufferToB64u(credential.rawId),type:credential.type,response:{attestationObject:bufferToB64u(credential.response.attestationObject),clientDataJSON:bufferToB64u(credential.response.clientDataJSON),transports:credential.response.getTransports?credential.response.getTransports():[]},clientExtensionResults:credential.getClientExtensionResults?credential.getClientExtensionResults():{}};}
 function setCopyStatus(message){if(copyStatus) copyStatus.textContent=message;}
 async function copyText(value,label){
   if(navigator.clipboard && window.isSecureContext){await navigator.clipboard.writeText(value);}
@@ -2390,6 +2617,9 @@ async function copyText(value,label){
 document.querySelectorAll('[data-copy-target]').forEach((button)=>button.addEventListener('click',async()=>{const field=document.getElementById(button.dataset.copyTarget);try{await copyText(field.value,button.textContent.replace(/^Copy /,''));}catch{setCopyStatus('Copy failed. Select the field and copy it manually.');}}));
 const shareStream=document.getElementById('shareStream');
 if(shareStream){shareStream.addEventListener('click',async()=>{const url=document.getElementById('watchUrl').value;const title=${JSON.stringify(stream.title)};try{if(navigator.share){await navigator.share({title,url});setCopyStatus('Share sheet opened.');}else{await copyText(url,'Stream link');}}catch(error){if(error && error.name==='AbortError')return;try{await copyText(url,'Stream link');}catch{setCopyStatus('Sharing failed. Select the watch page field and copy it manually.');}}});}
+const passkeyStatus=document.getElementById('passkeyStatus');
+const registerPasskey=document.getElementById('registerPasskey');
+if(registerPasskey){registerPasskey.addEventListener('click',async()=>{try{if(!window.PublicKeyCredential)throw new Error('This browser does not support passkeys.');const optionsResponse=await fetch('/api/passkeys/register/options',{method:'POST'});const options=await optionsResponse.json();if(!optionsResponse.ok)throw new Error(options.error||'Could not start passkey registration.');const credential=await navigator.credentials.create({publicKey:publicKeyCreateFromJSON(options)});const verifyResponse=await fetch('/api/passkeys/register/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(attestationToJSON(credential))});const result=await verifyResponse.json();if(!verifyResponse.ok||!result.success)throw new Error(result.error||'Passkey registration failed.');passkeyStatus.textContent='Passkey added. Reloading account details.';setTimeout(()=>location.href='/dashboard?tab=account',700);}catch(error){passkeyStatus.textContent=error.message||'Passkey registration failed.';}});}
 const platformPreset=document.getElementById('platformPreset');
 const destinationRtmpUrl=document.getElementById('destinationRtmpUrl');
 const destinationConnectLink=document.getElementById('destinationConnectLink');
@@ -2814,6 +3044,218 @@ app.post('/dashboard/support', requireUser, (req, res) => {
   res.redirect('/dashboard');
 });
 
+app.post('/dashboard/account', requireUser, (req, res) => {
+  const store = readStore();
+  const user = userById(store, req.user.id);
+  if (user) {
+    user.displayName = String(req.body.displayName || user.username).trim().slice(0, 80) || user.username;
+    user.whmcsPortalEmail = String(req.body.whmcsPortalEmail || '').trim().slice(0, 180);
+    user.whmcsClientId = String(req.body.whmcsClientId || '').replace(/[^0-9]/g, '').slice(0, 20);
+    user.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'account_details_updated', payload: { username: user.username }, createdAt: nowIso() });
+    writeStore(store);
+  }
+  res.redirect('/dashboard?tab=account');
+});
+
+app.post('/dashboard/recovery-settings', requireUser, (req, res) => {
+  const store = readStore();
+  const user = userById(store, req.user.id);
+  if (user) {
+    user.recoveryEnabled = req.body.recoveryEnabled === 'true';
+    user.recoveryEmail = String(req.body.recoveryEmail || '').trim().slice(0, 180);
+    user.notificationEmail = user.recoveryEmail || user.notificationEmail || '';
+    user.recoveryHint = String(req.body.recoveryHint || '').trim().slice(0, 240);
+    const recoveryCode = String(req.body.recoveryCode || '');
+    if (recoveryCode) {
+      if (recoveryCode.length < 8) {
+        res.status(400).send(page('Recovery settings not saved', '<h1>Recovery settings not saved</h1><p>Recovery codes must be at least 8 characters.</p><p><a class="button" href="/dashboard?tab=account">Back to account</a></p>', req.user));
+        return;
+      }
+      user.recoveryCodeHash = hashPassword(recoveryCode);
+    }
+    user.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'recovery_settings_updated', payload: { username: user.username, enabled: user.recoveryEnabled }, createdAt: nowIso() });
+    writeStore(store);
+  }
+  res.redirect('/dashboard?tab=account');
+});
+
+app.post('/dashboard/notification-settings', requireUser, (req, res) => {
+  const store = readStore();
+  const user = userById(store, req.user.id);
+  if (user) {
+    user.notificationEmail = String(req.body.notificationEmail || '').trim().slice(0, 180);
+    user.notificationEmailReminder = {
+      enabled: req.body.reminderEnabled === 'true',
+      everyLogins: clampNumber(req.body.everyLogins, 1, 30, 3),
+      everyDays: clampNumber(req.body.everyDays, 1, 180, 14),
+      loginCount: Number(user.notificationEmailReminder?.loginCount || 0),
+      lastShownAt: nowIso()
+    };
+    user.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'notification_settings_updated', payload: { username: user.username, hasEmail: Boolean(user.notificationEmail) }, createdAt: nowIso() });
+    writeStore(store);
+  }
+  res.redirect('/dashboard?tab=account');
+});
+
+app.post('/dashboard/security/totp/setup', requireUser, (req, res) => {
+  const store = readStore();
+  const user = userById(store, req.user.id);
+  if (!user) {
+    res.redirect('/login');
+    return;
+  }
+  user.totpPendingSecret = generateTotpSecret();
+  user.updatedAt = nowIso();
+  writeStore(store);
+  res.redirect('/dashboard?tab=account');
+});
+
+app.post('/dashboard/security/totp/confirm', requireUser, (req, res) => {
+  const store = readStore();
+  const user = userById(store, req.user.id);
+  if (!user?.totpPendingSecret || !verifyTotp(user.totpPendingSecret, req.body.code)) {
+    res.status(400).send(page('Two-factor setup failed', '<h1>Two-factor setup failed</h1><p>The code was not accepted.</p><p><a class="button" href="/dashboard?tab=account">Back to account</a></p>', req.user));
+    return;
+  }
+  user.totpSecret = user.totpPendingSecret;
+  user.totpPendingSecret = '';
+  user.totpEnabled = true;
+  user.updatedAt = nowIso();
+  store.events.push({ id: id('evt'), type: 'totp_enabled', payload: { username: user.username }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/dashboard?tab=account');
+});
+
+app.post('/dashboard/security/totp/disable', requireUser, (req, res) => {
+  const store = readStore();
+  const user = userById(store, req.user.id);
+  if (user && verifyPassword(req.body.password || '', user.passwordHash)) {
+    user.totpEnabled = false;
+    user.totpSecret = '';
+    user.totpPendingSecret = '';
+    user.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'totp_disabled', payload: { username: user.username }, createdAt: nowIso() });
+    writeStore(store);
+  }
+  res.redirect('/dashboard?tab=account');
+});
+
+app.post('/api/passkeys/register/options', requireUser, async (req, res) => {
+  const store = readStore();
+  const user = userById(store, req.user.id);
+  const { rpID } = passkeyContext(req);
+  const options = await generateRegistrationOptions({
+    rpName: store.settings.platformBranding?.platformName || store.settings.siteName || 'AAAStreamer',
+    rpID,
+    userName: user.username,
+    userID: Buffer.from(user.id),
+    userDisplayName: user.displayName || user.username,
+    attestationType: 'none',
+    excludeCredentials: (user.passkeys || []).filter((item) => item.rpID === rpID).map((item) => ({ id: item.id, transports: item.transports || [] })),
+    authenticatorSelection: { residentKey: 'preferred', userVerification: 'preferred' }
+  });
+  store.passkeyChallenges.push({ id: id('pkc'), type: 'registration', userId: user.id, challenge: options.challenge, rpID, createdAt: nowIso(), expiresAt: new Date(Date.now() + 1000 * 60 * 5).toISOString() });
+  writeStore(store);
+  res.json(options);
+});
+
+app.post('/api/passkeys/register/verify', requireUser, async (req, res) => {
+  const store = readStore();
+  const user = userById(store, req.user.id);
+  const { rpID } = passkeyContext(req);
+  const challenge = [...(store.passkeyChallenges || [])].reverse().find((item) => item.type === 'registration' && item.userId === user.id && item.rpID === rpID);
+  if (!challenge) {
+    res.status(400).json({ success: false, error: 'Passkey registration expired. Try again.' });
+    return;
+  }
+  try {
+    const verification = await verifyRegistrationResponse({
+      response: req.body,
+      expectedChallenge: challenge.challenge,
+      expectedOrigin: configuredOrigins(store, req),
+      expectedRPID: configuredAuthDomains(store, req),
+      requireUserVerification: false
+    });
+    if (!verification.verified) throw new Error('Passkey was not verified.');
+    const credential = verification.registrationInfo.credential;
+    user.passkeys = (user.passkeys || []).filter((item) => item.id !== credential.id);
+    user.passkeys.push({
+      id: credential.id,
+      publicKey: Buffer.from(credential.publicKey).toString('base64url'),
+      counter: credential.counter,
+      transports: req.body.response?.transports || [],
+      credentialDeviceType: verification.registrationInfo.credentialDeviceType,
+      credentialBackedUp: verification.registrationInfo.credentialBackedUp,
+      rpID: verification.registrationInfo.rpID || rpID,
+      name: `Passkey ${new Date().toLocaleDateString('en-US')}`,
+      createdAt: nowIso(),
+      lastUsedAt: ''
+    });
+    store.passkeyChallenges = (store.passkeyChallenges || []).filter((item) => item.id !== challenge.id);
+    user.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'passkey_registered', payload: { username: user.username, rpID }, createdAt: nowIso() });
+    writeStore(store);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message || 'Passkey registration failed.' });
+  }
+});
+
+app.post('/api/passkeys/authenticate/options', async (req, res) => {
+  const store = readStore();
+  const user = userByLogin(store, req.body.username);
+  if (!user || !user.active || !(user.passkeys || []).length) {
+    res.status(404).json({ success: false, error: 'No passkeys are registered for that account.' });
+    return;
+  }
+  const domains = configuredAuthDomains(store, req);
+  const options = await generateAuthenticationOptions({
+    rpID: passkeyContext(req).rpID,
+    allowCredentials: (user.passkeys || []).filter((item) => domains.includes(item.rpID)).map((item) => ({ id: item.id, transports: item.transports || [] })),
+    userVerification: 'preferred'
+  });
+  store.passkeyChallenges.push({ id: id('pkc'), type: 'authentication', userId: user.id, challenge: options.challenge, createdAt: nowIso(), expiresAt: new Date(Date.now() + 1000 * 60 * 5).toISOString() });
+  writeStore(store);
+  res.json(options);
+});
+
+app.post('/api/passkeys/authenticate/verify', async (req, res) => {
+  const store = readStore();
+  const credentialId = req.body?.id;
+  const user = store.users.find((item) => (item.passkeys || []).some((passkey) => passkey.id === credentialId));
+  const passkey = user?.passkeys?.find((item) => item.id === credentialId);
+  const challenge = user ? [...(store.passkeyChallenges || [])].reverse().find((item) => item.type === 'authentication' && item.userId === user.id) : null;
+  if (!user || !passkey || !challenge) {
+    res.status(400).json({ success: false, error: 'Passkey login expired. Try again.' });
+    return;
+  }
+  try {
+    const verification = await verifyAuthenticationResponse({
+      response: req.body,
+      expectedChallenge: challenge.challenge,
+      expectedOrigin: configuredOrigins(store, req),
+      expectedRPID: configuredAuthDomains(store, req),
+      credential: passkeyCredentialForVerify(passkey),
+      requireUserVerification: false
+    });
+    if (!verification.verified) throw new Error('Passkey was not verified.');
+    passkey.counter = verification.authenticationInfo.newCounter;
+    passkey.lastUsedAt = nowIso();
+    user.notificationEmailReminder ||= { enabled: true, everyLogins: 3, everyDays: 14, loginCount: 0, lastShownAt: '' };
+    user.notificationEmailReminder.loginCount = Number(user.notificationEmailReminder.loginCount || 0) + 1;
+    user.updatedAt = nowIso();
+    store.passkeyChallenges = (store.passkeyChallenges || []).filter((item) => item.id !== challenge.id);
+    store.events.push({ id: id('evt'), type: 'passkey_login', payload: { username: user.username }, createdAt: nowIso() });
+    createLoginSession(store, user, res);
+    res.json({ success: true, redirect: '/dashboard' });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message || 'Passkey login failed.' });
+  }
+});
+
 app.post('/dashboard/media-settings', requireUser, (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
@@ -2939,7 +3381,7 @@ app.post('/dashboard/extra-content', requireUser, (req, res) => {
 
 app.post('/dashboard/stream/key', requireUser, (req, res) => {
   const action = String(req.body.action || '').toLowerCase();
-  if (!['regenerate', 'revoke'].includes(action)) {
+  if (action !== 'revoke') {
     res.status(400).send(page('Invalid stream key action', '<h1>Invalid stream key action</h1><p>The requested key action is not supported.</p><a class="button" href="/dashboard">Back to dashboard</a>', req.user));
     return;
   }
@@ -2963,7 +3405,7 @@ app.post('/dashboard/stream/key', requireUser, (req, res) => {
   stream.updatedAt = nowIso();
   store.events.push({
     id: id('evt'),
-    type: action === 'revoke' ? 'stream_key_revoked' : 'stream_key_regenerated',
+    type: 'stream_key_revoked_and_regenerated',
     payload: {
       streamId: stream.id,
       username: user.username,
@@ -2995,9 +3437,10 @@ app.get('/admin/streams', requireAdmin, (req, res) => {
 
 app.get('/admin/accounts', requireAdmin, (req, res) => {
   const store = readStore();
+  const accountRows = store.users.map((item) => `<tr><td>${escapeHtml(item.username)}</td><td><form method="post" action="/admin/users/${escapeHtml(item.id)}"><label>Display name<input name="displayName" value="${escapeHtml(item.displayName || '')}"></label></td><td><label>Role<select name="role">${roleOptions(item.role, true)}</select></label></td><td><label><input type="checkbox" name="active" value="true" ${item.active ? 'checked' : ''}> Active</label></td><td><label>Notification email<input name="notificationEmail" type="email" value="${escapeHtml(item.notificationEmail || '')}"></label><label>WHMCS client ID<input name="whmcsClientId" inputmode="numeric" value="${escapeHtml(item.whmcsClientId || '')}"></label></td><td><label>New password<input name="password" type="password" autocomplete="new-password" placeholder="Leave blank to keep current password"></label><button type="submit">Save account</button></form></td></tr>`).join('');
   const body = `<h1>Admin panel</h1>${adminTabs('accounts')}
 <section><h2>Create user</h2><form method="post" action="/admin/users"><label>Username<input name="username" required></label><label>Display name<input name="displayName"></label><label>Password<input name="password" type="password" required></label><label>Role<select name="role">${roleOptions('user', true)}</select></label><button type="submit">Create user</button></form></section>
-<section><h2>Users</h2><table><tr><th>Username</th><th>Display name</th><th>Role</th><th>Active</th><th>Primary stream key</th></tr>${store.users.map((item) => `<tr><td>${escapeHtml(item.username)}</td><td>${escapeHtml(item.displayName || '')}</td><td>${escapeHtml(item.role)}</td><td>${item.active ? 'yes' : 'no'}</td><td><code>${escapeHtml(item.streamKey || '')}</code></td></tr>`).join('')}</table></section>`;
+<section><h2>Edit accounts</h2><table><tr><th>Username</th><th>Display name</th><th>Role</th><th>Status</th><th>Linked details</th><th>Password and save</th></tr>${accountRows}</table></section>`;
   res.send(page('Admin accounts', body, req.user));
 });
 
@@ -3151,7 +3594,7 @@ app.get('/admin/install', requireAdmin, (req, res) => {
   const dns = store.settings.dns || defaultDnsSettings();
   const body = `<h1>Admin panel</h1>${adminTabs('install')}
 <section><h2>Server install and license</h2><p class="muted">Customer-owned installs use their own local payment links while license, product, invoice, and account continuity stay linked to the Devine Creations WHMCS portal.</p><form method="post" action="/admin/install/license"><label><input type="checkbox" name="licensingEnabled" value="true" ${license.licensingEnabled ? 'checked' : ''}> Enable license validation for this install</label><label>License server URL<input name="licenseServerUrl" value="${escapeHtml(license.licenseServerUrl || '')}"></label><label>WHMCS product ID<input name="whmcsProductId" value="${escapeHtml(license.whmcsProductId || '')}"></label><label>License key<input name="licenseKey" value="${escapeHtml(license.licenseKey || '')}"></label><label>Install ID<input name="installId" value="${escapeHtml(license.installId || '')}"></label><label>Install domain<input name="installDomain" value="${escapeHtml(license.installDomain || '')}"></label><label>Edition<select name="edition"><option value="hosted" ${license.edition === 'hosted' ? 'selected' : ''}>Hosted</option><option value="self-hosted" ${license.edition === 'self-hosted' ? 'selected' : ''}>Self-hosted licensed</option><option value="managed" ${license.edition === 'managed' ? 'selected' : ''}>Managed deployment</option><option value="enterprise" ${license.edition === 'enterprise' ? 'selected' : ''}>Enterprise or internal</option></select></label><button type="submit">Save license settings</button></form><p>Validation status: <strong>${escapeHtml(license.validationStatus || 'unknown')}</strong>. Last checked: ${escapeHtml(license.lastValidationAt || 'Never')}.</p></section>
-<section><h2>DNS and domain automation</h2><p class="muted">DNS changes are only performed when a supported provider token is configured on the server. Cloudflare is supported in this build. Existing nameservers and domain ownership must already allow this install to manage records.</p><form method="post" action="/admin/install/dns-settings"><label>DNS provider<select name="provider"><option value="">Not configured</option><option value="cloudflare" ${dns.provider === 'cloudflare' ? 'selected' : ''}>Cloudflare</option></select></label><label>Zone ID<input name="zoneId" value="${escapeHtml(dns.zoneId || '')}"></label><label>Default DNS target<input name="defaultTarget" value="${escapeHtml(dns.defaultTarget || '')}" placeholder="live.tappedin.fm or server hostname"></label><label>Default nameservers<input name="defaultNameservers" value="${escapeHtml(dns.defaultNameservers || '')}"></label><button type="submit">Save DNS settings</button></form><form method="post" action="/admin/install/dns-record"><label>Record name<input name="name" placeholder="live"></label><label>Record type<select name="type"><option value="CNAME">CNAME</option><option value="A">A</option><option value="AAAA">AAAA</option></select></label><label>Record target<input name="content" value="${escapeHtml(dns.defaultTarget || '')}"></label><label><input type="checkbox" name="proxied" value="true"> Proxy through provider when supported</label><button type="submit">Create DNS record</button></form><p>Last DNS action: <strong>${escapeHtml(dns.lastActionStatus || 'not configured')}</strong> ${escapeHtml(dns.lastActionMessage || '')}</p></section>
+<section><h2>DNS and domain automation</h2><p class="muted">DNS changes are only performed when a supported provider token is configured on the server. Cloudflare is supported in this build. Existing nameservers and domain ownership must already allow this install to manage records. Approved auth domains let passkeys and browser notifications follow additional domains for this install.</p><form method="post" action="/admin/install/dns-settings"><label>DNS provider<select name="provider"><option value="">Not configured</option><option value="cloudflare" ${dns.provider === 'cloudflare' ? 'selected' : ''}>Cloudflare</option></select></label><label>Zone ID<input name="zoneId" value="${escapeHtml(dns.zoneId || '')}"></label><label>Default DNS target<input name="defaultTarget" value="${escapeHtml(dns.defaultTarget || '')}" placeholder="live.tappedin.fm or server hostname"></label><label>Default nameservers<input name="defaultNameservers" value="${escapeHtml(dns.defaultNameservers || '')}"></label><label>Approved auth domains, one per line<textarea name="authDomains" rows="4" placeholder="live.tappedin.fm&#10;aaastreamer.devinecreations.net">${escapeHtml(dns.authDomains || '')}</textarea></label><button type="submit">Save DNS settings</button></form><form method="post" action="/admin/install/dns-record"><label>Record name<input name="name" placeholder="live"></label><label>Record type<select name="type"><option value="CNAME">CNAME</option><option value="A">A</option><option value="AAAA">AAAA</option></select></label><label>Record target<input name="content" value="${escapeHtml(dns.defaultTarget || '')}"></label><label><input type="checkbox" name="proxied" value="true"> Proxy through provider when supported</label><button type="submit">Create DNS record</button></form><p>Last DNS action: <strong>${escapeHtml(dns.lastActionStatus || 'not configured')}</strong> ${escapeHtml(dns.lastActionMessage || '')}</p></section>
 <section><h2>Server installer</h2><p>Installer script path in this release: <code>scripts/install-aaastreamer-server.sh</code>.</p><p class="muted">The installer creates a service, env file, optional nginx vhost, and the licensing/DNS configuration hooks needed for production setup.</p></section>`;
   res.send(page('Admin install and licensing', body, req.user));
 });
@@ -3182,7 +3625,8 @@ app.post('/admin/install/dns-settings', requireAdmin, (req, res) => {
     provider: req.body.provider === 'cloudflare' ? 'cloudflare' : '',
     zoneId: String(req.body.zoneId || '').trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 120),
     defaultTarget: String(req.body.defaultTarget || '').trim().replace(/[^a-zA-Z0-9_.:-]/g, '').slice(0, 240),
-    defaultNameservers: String(req.body.defaultNameservers || '').trim().slice(0, 500)
+    defaultNameservers: String(req.body.defaultNameservers || '').trim().slice(0, 500),
+    authDomains: String(req.body.authDomains || '').split(/\r?\n|,|;/).map((item) => item.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/:\d+$/, '')).filter(Boolean).join('\n').slice(0, 1000)
   };
   store.events.push({ id: id('evt'), type: 'dns_settings_updated', payload: { provider: store.settings.dns.provider, hasZoneId: Boolean(store.settings.dns.zoneId) }, createdAt: nowIso() });
   writeStore(store);
@@ -3403,6 +3847,33 @@ app.post('/admin/users', requireAdmin, (req, res) => {
   store.users.push(user);
   ensureStreamForUser(store, user);
   store.events.push({ id: id('evt'), type: 'user_created', payload: { username, role: user.role }, createdAt });
+  writeStore(store);
+  res.redirect('/admin/accounts');
+});
+
+app.post('/admin/users/:userId', requireAdmin, (req, res) => {
+  const store = readStore();
+  const user = userById(store, req.params.userId);
+  if (!user) {
+    res.status(404).send(page('Account not found', '<h1>Account not found</h1><p>The selected account was not found.</p><p><a class="button" href="/admin/accounts">Back to accounts</a></p>', req.user));
+    return;
+  }
+  user.displayName = String(req.body.displayName || user.username).trim().slice(0, 80) || user.username;
+  user.role = normalizeRole(req.body.role, user.role);
+  user.notificationEmail = String(req.body.notificationEmail || '').trim().slice(0, 180);
+  user.whmcsClientId = String(req.body.whmcsClientId || '').replace(/[^0-9]/g, '').slice(0, 20);
+  user.active = user.id === req.user.id ? true : req.body.active === 'true';
+  const password = String(req.body.password || '');
+  if (password) {
+    if (password.length < 8) {
+      res.status(400).send(page('Password not changed', '<h1>Password not changed</h1><p>New passwords must be at least 8 characters.</p><p><a class="button" href="/admin/accounts">Back to accounts</a></p>', req.user));
+      return;
+    }
+    user.passwordHash = hashPassword(password);
+    store.sessions = (store.sessions || []).filter((session) => session.userId !== user.id || user.id === req.user.id);
+  }
+  user.updatedAt = nowIso();
+  store.events.push({ id: id('evt'), type: 'admin_account_updated', payload: { username: user.username, role: user.role, active: user.active }, createdAt: nowIso() });
   writeStore(store);
   res.redirect('/admin/accounts');
 });
