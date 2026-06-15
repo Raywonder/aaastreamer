@@ -69,7 +69,13 @@ By default, unknown stream keys are rejected. Set `AAASTREAMER_ALLOW_AD_HOC_STRE
 
 Users can copy the server URL, stream key, tracked token share URL, direct watch page, and HLS playback URL from the dashboard. The dashboard can also open the platform share sheet for the token share URL when the browser supports it. The stream-key rotation button revokes the current key and generates a replacement in one confirmed action; the old key will no longer be accepted for future publishes.
 
+Destinations can be treated as streaming services, channels, or subchannels depending on what the service supports. Streamers can save the live checkbox state directly, enable or disable selected destinations, or enable or disable all destinations with one dropdown action.
+
+Action confirmations can be managed from the Account tab. Confirmations cover adding and removing destinations or media sources, enabling live destinations, starting media relays, disabling relays, and clearing queues. Go-live style actions can show a countdown that is cancellable with Escape before the action is submitted.
+
 Account security is managed from the Account tab. Users can set a notification email, configure reminders when no notification email is present, enable self-service recovery with a private recovery code, turn on built-in authenticator-app two-factor authentication, and register passkeys. Passkeys are domain-scoped by browser rules; when an install adds or moves to a new domain, admins should add that domain under the install DNS/auth-domain settings and users should register a passkey from the new domain.
+
+Client portal linking uses one dashboard field for client ID or client email. When the WHMCS API is configured, AAAStreamer resolves the matching client details automatically and stores the client ID needed for invoice payments.
 
 The dashboard also provides an iframe embed code for the public stream page and
 lets streamers add an optional background image, useful links, and a support or
@@ -224,7 +230,15 @@ services. The destination form shows provider setup links and the services a
 provider can reach, such as Restream's connected channels. Manual RTMP details
 remain available behind a details control for services that require direct
 server/key setup. Streamers can enable or disable each destination with
-checkboxes before saving their live destination choices.
+checkboxes before saving their live destination choices, or use the bulk
+destination action dropdown to enable or disable selected destinations, all
+destinations, or only save the current live checkbox state.
+
+For Safari and iOS playback stability, the server sends explicit HLS playlist
+and segment headers, permits range requests, and relays generated media with
+stable timestamps, keyframes, stereo AAC audio, and conservative muxing
+settings. Users can still raise player buffer values from the dashboard for
+busy mobile networks.
 
 ## VoiceLink API Integration
 

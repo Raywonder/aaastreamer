@@ -123,9 +123,23 @@ const sourcePresets = [
 ];
 
 app.use('/hls', express.static(hlsPath, {
-  setHeaders(res) {
-    res.setHeader('Cache-Control', 'no-cache');
+  setHeaders(res, filePath) {
+    const ext = path.extname(filePath || '').toLowerCase();
+    if (ext === '.m3u8') {
+      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    } else if (ext === '.ts') {
+      res.setHeader('Content-Type', 'video/MP2T');
+      res.setHeader('Cache-Control', 'public, max-age=30');
+    } else if (ext === '.m4s' || ext === '.mp4') {
+      res.setHeader('Content-Type', 'video/mp4');
+      res.setHeader('Cache-Control', 'public, max-age=30');
+    } else {
+      res.setHeader('Cache-Control', 'no-cache');
+    }
     res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'Range, Origin, Accept, Content-Type');
+    res.setHeader('Accept-Ranges', 'bytes');
   }
 }));
 
@@ -405,7 +419,11 @@ function defaultLicenseSettings() {
     validationStatus: 'unknown',
     lastValidationAt: '',
     nextValidationAt: '',
-    graceEndsAt: ''
+    graceEndsAt: '',
+    clientLinked: process.env.AAASTREAMER_CLIENT_LINKED === 'true',
+    lockClientLinkedSettings: process.env.AAASTREAMER_LOCK_CLIENT_LINKED_SETTINGS === 'true',
+    reissueLimits: { monthly: 2, quarterly: 4, yearly: 8 },
+    reissues: []
   };
 }
 
@@ -420,6 +438,23 @@ function defaultDnsSettings() {
     lastActionStatus: 'not configured',
     lastActionMessage: ''
   };
+}
+
+function licenseReissueCounts(license = {}) {
+  const now = Date.now();
+  const reissues = Array.isArray(license.reissues) ? license.reissues : [];
+  const since = {
+    monthly: now - 31 * 24 * 60 * 60 * 1000,
+    quarterly: now - 93 * 24 * 60 * 60 * 1000,
+    yearly: now - 366 * 24 * 60 * 60 * 1000
+  };
+  return Object.fromEntries(Object.entries(since).map(([key, cutoff]) => [key, reissues.filter((item) => Date.parse(item.createdAt || '') >= cutoff).length]));
+}
+
+function canReissueLicense(license = {}) {
+  const limits = { monthly: 2, quarterly: 4, yearly: 8, ...(license.reissueLimits || {}) };
+  const counts = licenseReissueCounts(license);
+  return Object.keys(limits).every((key) => counts[key] < Number(limits[key] || 0));
 }
 
 function defaultSocialSettings() {
@@ -523,6 +558,14 @@ function normalizeUser(user) {
     everyDays: clampNumber(user.notificationEmailReminder?.everyDays, 1, 180, 14),
     loginCount: clampNumber(user.notificationEmailReminder?.loginCount, 0, 1000000, 0),
     lastShownAt: user.notificationEmailReminder?.lastShownAt || ''
+  };
+  user.confirmationPreferences = {
+    enabled: user.confirmationPreferences?.enabled !== false,
+    countdownSeconds: clampNumber(user.confirmationPreferences?.countdownSeconds, 0, 30, 5),
+    confirmAdding: user.confirmationPreferences?.confirmAdding !== false,
+    confirmRemoving: user.confirmationPreferences?.confirmRemoving !== false,
+    confirmGoingLive: user.confirmationPreferences?.confirmGoingLive !== false,
+    confirmDisabling: user.confirmationPreferences?.confirmDisabling !== false
   };
   user.totpEnabled = user.totpEnabled === true;
   user.passkeys = Array.isArray(user.passkeys) ? user.passkeys : [];
@@ -707,6 +750,8 @@ function normalizeStore(store) {
   }
   store.settings.paymentIntegration = { ...defaultPaymentIntegrationSettings(), ...(store.settings.paymentIntegration || {}) };
   store.settings.license = { ...defaultLicenseSettings(), ...(store.settings.license || {}) };
+  store.settings.license.reissueLimits = { ...defaultLicenseSettings().reissueLimits, ...(store.settings.license.reissueLimits || {}) };
+  store.settings.license.reissues = Array.isArray(store.settings.license.reissues) ? store.settings.license.reissues : [];
   store.settings.dns = { ...defaultDnsSettings(), ...(store.settings.dns || {}) };
   store.settings.social = { ...defaultSocialSettings(), ...(store.settings.social || {}) };
   store.settings.siteName = store.settings.platformBranding.platformName || store.settings.siteName;
@@ -1433,6 +1478,42 @@ async function callWhmcsApi(settings, action, params = {}) {
   return result;
 }
 
+async function lookupWhmcsClient(settings, { clientId = '', email = '' } = {}) {
+  if (!settings?.whmcsEnabled || !settings?.whmcsUrl || !whmcsApiIdentifier || !whmcsApiSecret) return null;
+  const cleanedId = String(clientId || '').replace(/[^0-9]/g, '').slice(0, 20);
+  const cleanedEmail = String(email || '').trim().slice(0, 180);
+  try {
+    if (cleanedId) {
+      const result = await callWhmcsApi(settings, 'GetClientsDetails', { clientid: cleanedId, stats: false });
+      return { clientId: String(result.userid || result.client_id || cleanedId), email: String(result.email || cleanedEmail || '') };
+    }
+    if (cleanedEmail) {
+      const result = await callWhmcsApi(settings, 'GetClients', { search: cleanedEmail });
+      const clients = result?.clients?.client || [];
+      const client = clients.find((item) => String(item.email || '').toLowerCase() === cleanedEmail.toLowerCase()) || clients[0];
+      if (client) return { clientId: String(client.id || client.userid || ''), email: String(client.email || cleanedEmail) };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+async function detectUrlTitle(url) {
+  if (!isSafeUrl(url)) return '';
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3500);
+    const response = await fetch(url, { signal: controller.signal, redirect: 'follow' });
+    clearTimeout(timeout);
+    if (!response.ok || !String(response.headers.get('content-type') || '').includes('text/html')) return '';
+    const text = (await response.text()).slice(0, 120000);
+    return (text.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  } catch {
+    return '';
+  }
+}
+
 async function createStripeCheckoutSession({ stream, support, settings, amountCents, description, successUrl, cancelUrl }) {
   if (!stripeSecretKey) throw new Error('Stripe secret key is not configured.');
   const platformSharePercent = clampNumber(support.platformSharePercent, 0, 100, 15);
@@ -1494,6 +1575,14 @@ function parseLinks(raw) {
   }).filter(Boolean).slice(0, 12);
 }
 
+function normalizeLinkEntry(link) {
+  if (!link || !isSafeUrl(link.url)) return null;
+  return {
+    label: String(link.label || link.url).trim().slice(0, 120) || link.url,
+    url: String(link.url).trim()
+  };
+}
+
 function linksText(links) {
   return (links || []).map((link) => `${link.label || link.url}|${link.url}`).join('\n');
 }
@@ -1501,6 +1590,14 @@ function linksText(links) {
 function renderLinks(links) {
   if (!links?.length) return '<p class="muted">No links have been added yet.</p>';
   return `<ul class="link-list">${links.map((link) => `<li><a href="${escapeHtml(link.url)}" rel="noopener noreferrer" target="_blank">${escapeHtml(link.label || link.url)}</a></li>`).join('')}</ul>`;
+}
+
+function editableLinks(stream, canEdit = false) {
+  if (!stream.links?.length && !canEdit) return '<p class="muted">No links have been added yet.</p>';
+  const rows = (stream.links || []).map((link, index) => `<li><a href="${escapeHtml(link.url)}" rel="noopener noreferrer" target="_blank">${escapeHtml(link.label || link.url)}</a>${canEdit ? ` <button type="button" data-link-action="up" data-link-index="${index}">Move up</button><button type="button" data-link-action="down" data-link-index="${index}">Move down</button><button type="button" data-link-action="remove" data-link-index="${index}" class="danger">Remove</button>` : ''}</li>`).join('');
+  const list = rows ? `<ul class="link-list" id="streamLinksList">${rows}</ul>` : '<p class="muted" id="streamLinksList">No links have been added yet.</p>';
+  if (!canEdit) return list;
+  return `${list}<form id="quickLinkForm"><label>Link title<input name="label" placeholder="Leave blank to detect the site title"></label><label>URL<input name="url" type="url" required placeholder="https://example.com"></label><label>Place link<select name="placement"><option value="bottom">At bottom</option><option value="top">At top</option></select></label><button type="submit">Add link</button></form><p id="linkActionStatus" class="notice" role="status" aria-live="polite"></p>`;
 }
 
 function adminTabs(active) {
@@ -1984,11 +2081,15 @@ function startSourceProcess(stream, source, store) {
   }
   const outputKey = stream.streamKey;
   const output = `rtmp://127.0.0.1:1935/${rtmpAppName}/${outputKey}`;
+  const sampleRate = String(stream.encoderSettings?.sampleRate || '48000');
+  const keyframeSeconds = clampNumber(stream.encoderSettings?.keyframeIntervalSeconds, 1, 10, 2);
+  const keyframeFrames = Math.max(24, Math.round(keyframeSeconds * 30));
   stopSourceProcess(stream.id);
   const hasQueue = behavior.playbackMode !== 'loop' && (stream.sourceQueue || []).some((queuedSource) => playableSourceUrl(queuedSource, store));
   const args = [
     '-hide_banner',
     '-loglevel', 'warning',
+    '-fflags', '+genpts',
     '-re'
   ];
   if (!hasQueue) {
@@ -2002,11 +2103,20 @@ function startSourceProcess(stream, source, store) {
     ...(audioFilters.length ? ['-af', audioFilters.join(',')] : []),
     '-c:v', 'libx264',
     '-preset', 'veryfast',
+    '-profile:v', 'main',
+    '-tune', 'zerolatency',
     '-pix_fmt', 'yuv420p',
+    '-g', String(keyframeFrames),
+    '-keyint_min', String(keyframeFrames),
+    '-sc_threshold', '0',
+    '-force_key_frames', `expr:gte(t,n_forced*${keyframeSeconds})`,
     '-c:a', 'aac',
+    '-aac_coder', 'twoloop',
     '-b:a', stream.encoderSettings?.audioBitrate || '160k',
-    '-ar', stream.encoderSettings?.sampleRate || '48000',
+    '-ar', sampleRate,
     '-ac', '2',
+    '-max_muxing_queue_size', '1024',
+    '-flvflags', 'no_duration_filesize',
     '-f', 'flv',
     output
   );
@@ -2201,6 +2311,77 @@ app.get('/api/media/catalog', requireUser, (req, res) => {
   res.json({ success: true, folders: mediaCatalog(store, req.user) });
 });
 
+function canEditStream(user, stream) {
+  return Boolean(user && stream && (user.role === 'admin' || stream.ownerId === user.id));
+}
+
+app.get('/api/streams/:streamId/links', (req, res) => {
+  const store = readStore();
+  const stream = store.streams.find((item) => item.id === req.params.streamId || item.slug === req.params.streamId);
+  const user = currentUser(req);
+  if (!stream || (!streamIsPubliclyListable(stream, store) && !canEditStream(user, stream))) {
+    res.status(404).json({ success: false, error: 'Stream not found' });
+    return;
+  }
+  res.json({ success: true, links: stream.links || [], html: editableLinks(stream, canEditStream(user, stream)) });
+});
+
+app.post('/api/streams/:streamId/links', requireUser, async (req, res) => {
+  const store = readStore();
+  const stream = store.streams.find((item) => item.id === req.params.streamId || item.slug === req.params.streamId);
+  if (!canEditStream(req.user, stream)) {
+    res.status(403).json({ success: false, error: 'You cannot edit links for this stream.' });
+    return;
+  }
+  const url = safeUrl(req.body.url);
+  if (!url) {
+    res.status(400).json({ success: false, error: 'Use a valid HTTP or HTTPS link.' });
+    return;
+  }
+  const detectedTitle = String(req.body.label || '').trim() ? '' : await detectUrlTitle(url);
+  const link = normalizeLinkEntry({ label: req.body.label || detectedTitle || url, url });
+  if (!link) {
+    res.status(400).json({ success: false, error: 'Link could not be saved.' });
+    return;
+  }
+  stream.links ||= [];
+  if (req.body.placement === 'top') stream.links.unshift(link);
+  else stream.links.push(link);
+  stream.links = stream.links.slice(0, 12);
+  stream.updatedAt = nowIso();
+  store.events.push({ id: id('evt'), type: 'stream_link_added', payload: { streamId: stream.id, label: link.label }, createdAt: nowIso() });
+  writeStore(store);
+  broadcast({ type: 'stream_links_updated', payload: { streamId: stream.id } });
+  res.json({ success: true, links: stream.links, html: editableLinks(stream, true) });
+});
+
+app.post('/api/streams/:streamId/links/:index', requireUser, (req, res) => {
+  const store = readStore();
+  const stream = store.streams.find((item) => item.id === req.params.streamId || item.slug === req.params.streamId);
+  if (!canEditStream(req.user, stream)) {
+    res.status(403).json({ success: false, error: 'You cannot edit links for this stream.' });
+    return;
+  }
+  const index = Number(req.params.index);
+  const action = String(req.body.action || '').toLowerCase();
+  if (!Number.isInteger(index) || index < 0 || index >= (stream.links || []).length) {
+    res.status(400).json({ success: false, error: 'Link was not found.' });
+    return;
+  }
+  if (action === 'remove') {
+    stream.links.splice(index, 1);
+  } else if (action === 'up' && index > 0) {
+    [stream.links[index - 1], stream.links[index]] = [stream.links[index], stream.links[index - 1]];
+  } else if (action === 'down' && index < stream.links.length - 1) {
+    [stream.links[index + 1], stream.links[index]] = [stream.links[index], stream.links[index + 1]];
+  }
+  stream.updatedAt = nowIso();
+  store.events.push({ id: id('evt'), type: 'stream_link_changed', payload: { streamId: stream.id, action, index }, createdAt: nowIso() });
+  writeStore(store);
+  broadcast({ type: 'stream_links_updated', payload: { streamId: stream.id } });
+  res.json({ success: true, links: stream.links, html: editableLinks(stream, true) });
+});
+
 app.get('/dashboard/media/preview/:folderId/*', requireUser, (req, res) => {
   const store = readStore();
   const folder = resolveMediaFolder(store, req.params.folderId);
@@ -2334,6 +2515,7 @@ app.get('/s/:slug', (req, res) => {
   const comments = store.comments.filter((comment) => comment.streamId === stream.id && comment.status !== 'hidden' && comment.status !== 'pending').slice(-100);
   const messaging = normalizeMessagingSettings(store.settings.messaging || {});
   const user = currentUser(req);
+  const canEditLinks = canEditStream(user, stream);
   const canComment = stream.allowComments && (
     user ? messaging.loggedInUserMessagesEnabled : messaging.visitorMessagesEnabled
   );
@@ -2345,15 +2527,18 @@ app.get('/s/:slug', (req, res) => {
 <p>Status: <strong class="status-${escapeHtml(stream.status)}">${escapeHtml(playableStatus)}</strong></p>
 ${supportBefore}
 ${renderPlaybackPlayer(playbackUrl, stream)}${supportDuring}</div>
-<section><h2>About this stream</h2><p>${escapeHtml(stream.description || 'No description yet.')}</p>${renderExtraContentBox(stream, 'watch')}<h3>Links</h3>${renderLinks(stream.links)}</section>
+<section><h2>About this stream</h2><p>${escapeHtml(stream.description || 'No description yet.')}</p>${renderExtraContentBox(stream, 'watch')}<h3>Links</h3><div id="streamLinksPanel">${editableLinks(stream, canEditLinks)}</div></section>
 <section><h2>Live comments</h2><div id="comments" class="comments">${comments.map((comment) => renderComment(comment, messaging.reactionsEnabled)).join('')}</div>
 ${canComment ? `<form id="commentForm"><label>Name<input name="authorName" ${user ? `value="${escapeHtml(user.displayName || user.username)}" readonly` : 'required'}></label><label>Message type<select name="messageType"><option value="comment">Comment</option><option value="question">Question</option><option value="support">Support message</option></select></label><label>Comment<textarea name="message" required rows="3" maxlength="${escapeHtml(messaging.maxMessageLength || 1000)}"></textarea></label><button type="submit">Post comment</button></form>` : '<p>Comments are disabled for this stream or account type.</p>'}</section>
 ${supportAfter}
 <script>
 const streamId=${JSON.stringify(stream.id)};
 const comments=document.getElementById('comments');
+const linksPanel=document.getElementById('streamLinksPanel');
+async function refreshLinks(){if(!linksPanel)return;try{const response=await fetch('/api/streams/'+encodeURIComponent(streamId)+'/links');const payload=await response.json();if(payload.success)linksPanel.innerHTML=payload.html;}catch{}}
+if(linksPanel){linksPanel.addEventListener('click',async(event)=>{const button=event.target.closest('button[data-link-action]');if(!button)return;const action=button.dataset.linkAction;const index=button.dataset.linkIndex;if(action==='remove'&&!confirm('Remove this link from the stream page?'))return;await fetch('/api/streams/'+encodeURIComponent(streamId)+'/links/'+encodeURIComponent(index),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});await refreshLinks();});linksPanel.addEventListener('submit',async(event)=>{if(event.target.id!=='quickLinkForm')return;event.preventDefault();const form=new FormData(event.target);await fetch('/api/streams/'+encodeURIComponent(streamId)+'/links',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:form.get('label'),url:form.get('url'),placement:form.get('placement')})});event.target.reset();await refreshLinks();});}
 const events=new EventSource('/events');
-events.onmessage=(event)=>{try{const msg=JSON.parse(event.data); if(msg.type==='comment' && msg.payload.streamId===streamId){comments.insertAdjacentHTML('beforeend', msg.payload.html); comments.scrollTop=comments.scrollHeight;} if(msg.type==='reaction' && msg.payload.streamId===streamId){const target=document.getElementById('reactions-'+msg.payload.commentId); if(target) target.innerHTML=msg.payload.html;} if(['stream_latency_updated','stream_source_selected','source_queue_selected','source_relay_started','source_relay_stopped','ondemand_settings_updated'].includes(msg.type) && msg.payload.streamId===streamId){setTimeout(()=>window.location.reload(),500);}}catch{}};
+events.onmessage=(event)=>{try{const msg=JSON.parse(event.data); if(msg.type==='comment' && msg.payload.streamId===streamId){comments.insertAdjacentHTML('beforeend', msg.payload.html); comments.scrollTop=comments.scrollHeight;} if(msg.type==='reaction' && msg.payload.streamId===streamId){const target=document.getElementById('reactions-'+msg.payload.commentId); if(target) target.innerHTML=msg.payload.html;} if(msg.type==='stream_links_updated' && msg.payload.streamId===streamId){refreshLinks();} if(['stream_latency_updated','stream_source_selected','source_queue_selected','source_relay_started','source_relay_stopped','ondemand_settings_updated','stream_support_updated','stream_extra_content_updated'].includes(msg.type) && msg.payload.streamId===streamId){setTimeout(()=>window.location.reload(),500);}}catch{}};
 const form=document.getElementById('commentForm');
 if(form){form.addEventListener('submit', async (e)=>{e.preventDefault(); const data=Object.fromEntries(new FormData(form)); const res=await fetch('/api/streams/'+streamId+'/comments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}); if(res.ok) form.reset();});}
 document.addEventListener('click', async (event)=>{const button=event.target.closest('[data-reaction]'); if(!button)return; const commentId=button.dataset.commentId; const reaction=button.dataset.reaction; const res=await fetch('/api/comments/'+commentId+'/reactions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({streamId,reaction})}); if(res.ok){const data=await res.json(); const target=document.getElementById('reactions-'+commentId); if(target) target.innerHTML=data.html;}});
@@ -2554,10 +2739,10 @@ app.get('/dashboard', (req, res) => {
     ...stream.encoderKeys
   ];
   const encoderRows = encoders.map((encoder) => `<tr><td>${escapeHtml(encoder.name)}</td><td><code>${escapeHtml(encoder.key)}</code></td><td>${escapeHtml(encoder.audioBitrate || stream.encoderSettings.audioBitrate)}</td><td>${encoder.active === false ? 'disabled' : 'enabled'}</td><td><input readonly value="${escapeHtml(hlsUrlFor(encoder.key))}"></td></tr>`).join('');
-  const destinationRows = (stream.destinations || []).map((destination) => `<tr><td><input type="checkbox" form="destinationStateForm" name="enabledDestinations" value="${escapeHtml(destination.id)}" ${destination.enabled ? 'checked' : ''}></td><td>${escapeHtml(destination.name)}</td><td>${escapeHtml(destination.platform)}</td><td>${destination.connected ? 'connected' : 'manual setup'}</td><td><details><summary>Show manual RTMP</summary><code>${escapeHtml(destination.rtmpUrl)}</code></details></td><td><form method="post" action="/dashboard/destinations/${escapeHtml(destination.id)}/delete"><button type="submit" class="danger">Remove</button></form></td></tr>`).join('');
+  const destinationRows = (stream.destinations || []).map((destination) => `<tr><td><input type="checkbox" form="destinationStateForm" name="destinationIds" value="${escapeHtml(destination.id)}"></td><td><input type="checkbox" form="destinationStateForm" name="enabledDestinations" value="${escapeHtml(destination.id)}" ${destination.enabled ? 'checked' : ''}></td><td>${escapeHtml(destination.name)}</td><td>${escapeHtml(destination.platform)}</td><td>${destination.connected ? 'connected' : 'manual setup'}</td><td><details><summary>Show manual RTMP</summary><code>${escapeHtml(destination.rtmpUrl)}</code></details></td><td><form method="post" action="/dashboard/destinations/${escapeHtml(destination.id)}/delete" data-confirm-kind="remove" data-confirm-message="Remove ${escapeHtml(destination.name)} from your destinations?"><button type="submit" class="danger">Remove</button></form></td></tr>`).join('');
   const presetOptions = platformPresets.map((preset) => `<option value="${escapeHtml(preset.id)}" data-ingest="${escapeHtml(preset.ingest)}" data-connect="${escapeHtml(preset.connectUrl || preset.url || '')}" data-services="${escapeHtml((preset.services || []).join(', '))}">${escapeHtml(preset.name)}</option>`).join('');
   const selectedSource = stream.currentSource || null;
-  const relayRows = (stream.relaySources || []).map((source) => `<tr><td>${escapeHtml(source.label)}</td><td>${escapeHtml(source.mediaType)}</td><td><a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">Open URL</a></td><td><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/select" class="inline-form"><button type="submit">Use</button></form><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/delete" class="inline-form"><button type="submit" class="danger">Remove</button></form></td></tr>`).join('');
+  const relayRows = (stream.relaySources || []).map((source) => `<tr><td>${escapeHtml(source.label)}</td><td>${escapeHtml(source.mediaType)}</td><td><a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">Open URL</a></td><td><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/select" class="inline-form" data-confirm-kind="live" data-confirm-message="Start streaming ${escapeHtml(source.label)} now?"><button type="submit">Use</button></form><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/delete" class="inline-form" data-confirm-kind="remove" data-confirm-message="Remove ${escapeHtml(source.label)} from your media sources?"><button type="submit" class="danger">Remove</button></form></td></tr>`).join('');
   const queueRows = queuedSourceRows(stream, store);
   const activeSourceRunning = sourceProcesses.has(stream.id);
   const quickSourceCards = sourcePresetCards(stream, serverUrl);
@@ -2580,35 +2765,42 @@ app.get('/dashboard', (req, res) => {
 <form class="inline-form" method="post" action="/dashboard/stream/key"><input type="hidden" name="action" value="revoke"><button type="submit" class="danger" onclick="return confirm('This will revoke the current stream key and generate a new one. Existing encoder settings using the old key will stop working until you update them. Continue?')">Revoke and generate new key</button></form></section>
 <section><h2>Encoder keys</h2><table><tr><th>Name</th><th>Key</th><th>Audio bitrate</th><th>Status</th><th>HLS output</th></tr>${encoderRows}</table>
 <form method="post" action="/dashboard/encoders"><label>Encoder name<input name="name" placeholder="OBS Windows, Ecamm Mac, Audio Hijack"></label><label>Audio bitrate<select name="audioBitrate">${audioBitrates.map((rate) => `<option ${rate === stream.encoderSettings.audioBitrate ? 'selected' : ''}>${rate}</option>`).join('')}</select></label><button type="submit">Add encoder key</button></form></section>
-<section><h2>Destinations</h2><p class="muted">Use the provider setup link first when available. Manual RTMP fields are for custom destinations or services that do not expose a connected setup path yet.</p><form id="destinationStateForm" method="post" action="/dashboard/destinations/enabled"><table><tr><th>Live</th><th>Name</th><th>Platform</th><th>Connection</th><th>Manual RTMP</th><th>Action</th></tr>${destinationRows || '<tr><td colspan="6">No destinations configured yet.</td></tr>'}</table><button type="submit">Save live destination choices</button></form>
-<form method="post" action="/dashboard/destinations"><label>Platform<select id="platformPreset" name="platform">${presetOptions}</select></label><p id="destinationServices" class="muted"></p><p><a id="destinationConnectLink" class="button" href="#" target="_blank" rel="noopener noreferrer">Open service setup</a></p><label>Name<input name="name" placeholder="Main YouTube channel"></label><label>RTMP or RTMPS URL, manual destinations only<input id="destinationRtmpUrl" name="rtmpUrl"></label><label>Stream key, manual destinations only<input name="streamKey"></label><label><input type="checkbox" name="enabled" value="true" checked> Enable destination</label><button type="submit">Add destination</button></form></section>`;
-  const accountTab = `<section><h2>Account details</h2><form method="post" action="/dashboard/account"><label>Display name<input name="displayName" value="${escapeHtml(user.displayName || '')}"></label><label>WHMCS portal email<input name="whmcsPortalEmail" type="email" value="${escapeHtml(user.whmcsPortalEmail || '')}"></label><label>WHMCS client ID<input name="whmcsClientId" inputmode="numeric" value="${escapeHtml(user.whmcsClientId || '')}"></label><button type="submit">Save account details</button></form></section>
+<section><h2>Destinations</h2><p class="muted">Use the provider setup link first when available. Manual RTMP fields are for custom destinations or services that do not expose a connected setup path yet. Destination rows can represent a service, a configured channel, or a subchannel supported through that service.</p><form id="destinationStateForm" method="post" action="/dashboard/destinations/enabled"><table><tr><th>Select</th><th>Live</th><th>Name or subchannel</th><th>Platform</th><th>Connection</th><th>Manual RTMP</th><th>Action</th></tr>${destinationRows || '<tr><td colspan="7">No destinations configured yet.</td></tr>'}</table><label>Apply action<select name="bulkAction"><option value="save">Save current live checkboxes</option><option value="enable-selected">Enable selected destinations</option><option value="disable-selected">Disable selected destinations</option><option value="enable-all">Enable all destinations</option><option value="disable-all">Disable all destinations</option></select></label><button type="submit">Apply destination choices</button></form>
+<form method="post" action="/dashboard/destinations" data-confirm-kind="add" data-confirm-message="Add this destination or subchannel to your stream settings?"><label>Platform<select id="platformPreset" name="platform">${presetOptions}</select></label><p id="destinationServices" class="muted"></p><p><a id="destinationConnectLink" class="button" href="#" target="_blank" rel="noopener noreferrer">Open service setup</a></p><label>Name<input name="name" placeholder="Main YouTube channel"></label><label>RTMP or RTMPS URL, manual destinations only<input id="destinationRtmpUrl" name="rtmpUrl"></label><label>Stream key, manual destinations only<input name="streamKey"></label><label><input type="checkbox" name="enabled" value="true" checked> Enable destination</label><button type="submit">Add destination</button></form></section>`;
+  const accountTab = `<section><h2>Account details</h2><form method="post" action="/dashboard/account"><label>Display name<input name="displayName" value="${escapeHtml(user.displayName || '')}"></label><label>Client ID or client email<input name="whmcsLookup" value="${escapeHtml(user.whmcsClientId || user.whmcsPortalEmail || '')}" placeholder="Client ID or email address"></label><p class="muted">When the client portal is configured, AAAStreamer looks up the matching client ID and client email automatically.</p><button type="submit">Save account details</button></form><p>Client ID: <strong>${escapeHtml(user.whmcsClientId || 'None')}</strong>. Client email: <strong>${escapeHtml(user.whmcsPortalEmail || 'None')}</strong>.</p></section>
 <section><h2>Notification email</h2><p class="muted">This email is used for account recovery reminders, stream notices, payment notices, and browser notification enrollment. Browser notifications follow the current domain in your browser.</p><form method="post" action="/dashboard/notification-settings"><label>Notification email<input name="notificationEmail" type="email" value="${escapeHtml(user.notificationEmail || '')}"></label><label><input type="checkbox" name="reminderEnabled" value="true" ${user.notificationEmailReminder?.enabled !== false ? 'checked' : ''}> Remind me if no notification email is configured</label><label>Reminder every number of logins<input name="everyLogins" type="number" min="1" max="30" value="${escapeHtml(user.notificationEmailReminder?.everyLogins || 3)}"></label><label>Reminder every number of days<input name="everyDays" type="number" min="1" max="180" value="${escapeHtml(user.notificationEmailReminder?.everyDays || 14)}"></label><button type="submit">Save notification settings</button></form></section>
+<section><h2>Action confirmations</h2><p class="muted">Confirmations help prevent accidental stream changes. The countdown appears before go-live actions so you can cancel before enabled destinations begin receiving a stream.</p><form method="post" action="/dashboard/confirmation-settings"><label><input type="checkbox" name="enabled" value="true" ${user.confirmationPreferences?.enabled !== false ? 'checked' : ''}> Show confirmations before stream actions</label><label><input type="checkbox" name="confirmGoingLive" value="true" ${user.confirmationPreferences?.confirmGoingLive !== false ? 'checked' : ''}> Confirm go-live or enable actions</label><label><input type="checkbox" name="confirmDisabling" value="true" ${user.confirmationPreferences?.confirmDisabling !== false ? 'checked' : ''}> Confirm disable actions</label><label><input type="checkbox" name="confirmAdding" value="true" ${user.confirmationPreferences?.confirmAdding !== false ? 'checked' : ''}> Confirm adding destinations or media sources</label><label><input type="checkbox" name="confirmRemoving" value="true" ${user.confirmationPreferences?.confirmRemoving !== false ? 'checked' : ''}> Confirm removing destinations or media sources</label><label>Go-live countdown seconds<input name="countdownSeconds" type="number" min="0" max="30" value="${escapeHtml(user.confirmationPreferences?.countdownSeconds ?? 5)}"></label><button type="submit">Save confirmation settings</button></form></section>
 <section><h2>Login recovery</h2><p class="muted">Use a recovery email and a private recovery code so you can reset your password if you forget your login details. Keep the recovery code somewhere only you can access.</p><form method="post" action="/dashboard/recovery-settings"><label><input type="checkbox" name="recoveryEnabled" value="true" ${user.recoveryEnabled ? 'checked' : ''}> Enable self-service password reset</label><label>Recovery email<input name="recoveryEmail" type="email" value="${escapeHtml(user.recoveryEmail || '')}"></label><label>Recovery hint, optional<input name="recoveryHint" value="${escapeHtml(user.recoveryHint || '')}" maxlength="240"></label><label>New recovery code<input name="recoveryCode" type="password" autocomplete="new-password" minlength="8" placeholder="${user.recoveryCodeHash ? 'Leave blank to keep existing code' : 'Set a private code, at least 8 characters'}"></label><button type="submit">Save recovery settings</button></form></section>
 <section><h2>Two-factor authentication</h2><p>Status: <strong>${user.totpEnabled ? 'enabled' : 'not enabled'}</strong>.</p>${user.totpPendingSecret ? `<p>Add this setup key to your authenticator app, then enter the current 6 digit code. Setup URI: <code>${escapeHtml(totpUri)}</code></p><form method="post" action="/dashboard/security/totp/confirm"><label>Authentication code<input name="code" inputmode="numeric" autocomplete="one-time-code" required></label><button type="submit">Enable two-factor authentication</button></form>` : user.totpEnabled ? `<form method="post" action="/dashboard/security/totp/disable"><label>Current password<input name="password" type="password" autocomplete="current-password" required></label><button type="submit" class="danger">Disable two-factor authentication</button></form>` : `<form method="post" action="/dashboard/security/totp/setup"><button type="submit">Set up two-factor authentication</button></form>`}</section>
 <section><h2>Passkeys</h2><p class="muted">Passkeys can sign in to this account on approved domains for this install: ${escapeHtml(authDomains)}. If an admin adds or changes domains, register a passkey from the new domain as well so your device syncs it under that site.</p><p><button type="button" id="registerPasskey">Add passkey</button></p><p id="passkeyStatus" class="notice" role="status" aria-live="polite"></p><table><tr><th>Name</th><th>Domain</th><th>Created</th><th>Last used</th></tr>${passkeyRows || '<tr><td colspan="4">No passkeys registered yet.</td></tr>'}</table></section>`;
   const mediaTab = `<section><h2>Media management</h2><p>Current source: <strong>${escapeHtml(sourceSummary(selectedSource))}</strong>. Relay process: <strong>${activeSourceRunning ? 'running' : 'stopped'}</strong>.</p>
 <form method="post" action="/dashboard/media-settings"><div class="grid"><label><input type="checkbox" name="autoEnableUploads" value="true" ${behavior.autoEnableUploads ? 'checked' : ''}> Auto-enable new uploads</label><label><input type="checkbox" name="autoQueueUploads" value="true" ${behavior.autoQueueUploads ? 'checked' : ''}> Auto-add uploads to queue</label><label><input type="checkbox" name="autoRefreshMedia" value="true" ${behavior.autoRefreshMedia ? 'checked' : ''}> Auto-refresh media list</label><label>Enable delay after upload, seconds<input type="number" min="0" max="86400" name="uploadEnableDelaySeconds" value="${escapeHtml(behavior.uploadEnableDelaySeconds)}"></label><label>Playback action<select name="playbackMode"><option value="loop" ${behavior.playbackMode === 'loop' ? 'selected' : ''}>Auto loop continuously</option><option value="sequential" ${behavior.playbackMode === 'sequential' ? 'selected' : ''}>Play queue in order</option><option value="random" ${behavior.playbackMode === 'random' ? 'selected' : ''}>Random queue playback</option><option value="disabled" ${behavior.playbackMode === 'disabled' ? 'selected' : ''}>Stop or disable source relay</option></select></label><label>Fade in seconds<input type="range" min="0" max="30" step="1" name="fadeInSeconds" value="${escapeHtml(behavior.fadeInSeconds)}"></label><label>Fade out seconds<input type="range" min="0" max="30" step="1" name="fadeOutSeconds" value="${escapeHtml(behavior.fadeOutSeconds)}"></label><label>Crossfade target seconds<input type="range" min="0" max="30" step="1" name="crossfadeSeconds" value="${escapeHtml(behavior.crossfadeSeconds)}"></label></div><button type="submit">Save media settings</button></form>
 <section class="subsection"><h3>Quick source setup</h3><div class="preset-grid">${quickSourceCards}</div></section>
-<form method="post" action="/dashboard/sources/select"><input type="hidden" name="sourceType" value="localMedia"><p><button type="button" id="checkAllMedia">Check all media</button><button type="button" id="uncheckAllMedia" class="secondary">Uncheck all media</button></p><table id="mediaCatalog"><tr><th>Select</th><th>Title</th><th>File name</th><th>Folder</th><th>Type</th><th>Duration</th><th>Size</th><th>Chapters</th><th>Preview</th></tr>${mediaCatalogCheckboxes(store, user, streamSources(stream))}</table><button type="submit">Use selected media</button></form>
-<form method="post" action="/dashboard/sources/upload"><label>Upload audio or video files<input id="mediaUpload" type="file" accept="audio/*,video/*" multiple></label><input type="hidden" id="mediaUploadData" name="uploadData"><label>Upload title<input name="uploadLabel" placeholder="Intro music, event replay, audio described movie"></label><button type="submit">Upload media</button></form>
-<form method="post" action="/dashboard/sources/url"><input type="hidden" name="sourceType" value="urlRelay"><label>Relay label<input id="relayLabel" name="relayLabel" placeholder="Radio relay, remote event, training video"></label><label>Media type<select id="relayMediaType" name="relayMediaType"><option value="video">video</option><option value="audio">audio</option></select></label><label>HTTP or HTTPS media URL<input id="relayUrl" name="relayUrl" placeholder="https://example.com/stream.mp3"></label><button type="submit">Add URL relay source</button></form>
-<section class="subsection"><h3>Source queue</h3><table><tr><th>Name</th><th>Type</th><th>Source</th><th>Actions</th></tr>${queueRows || '<tr><td colspan="4">No queued sources. Upload or check media to build a playlist.</td></tr>'}</table><form method="post" action="/dashboard/sources/queue/clear" class="inline-form"><button type="submit" class="danger">Clear queue</button></form><form method="post" action="/dashboard/sources/action" class="inline-form"><label>Relay action<select name="sourceAction"><option value="start">Start selected or queued media</option><option value="loop">Auto loop current source</option><option value="random">Random playback</option><option value="stop">Stop or disable source relay</option></select></label><button type="submit">Apply action</button></form></section>
+<form method="post" action="/dashboard/sources/select" data-confirm-kind="live" data-confirm-message="Use the selected media for this stream?"><input type="hidden" name="sourceType" value="localMedia"><p><button type="button" id="checkAllMedia">Check all media</button><button type="button" id="uncheckAllMedia" class="secondary">Uncheck all media</button></p><table id="mediaCatalog"><tr><th>Select</th><th>Title</th><th>File name</th><th>Folder</th><th>Type</th><th>Duration</th><th>Size</th><th>Chapters</th><th>Preview</th></tr>${mediaCatalogCheckboxes(store, user, streamSources(stream))}</table><button type="submit">Use selected media</button></form>
+<form method="post" action="/dashboard/sources/upload" data-confirm-kind="add" data-confirm-message="Upload and add the selected media files?"><label>Upload audio or video files<input id="mediaUpload" type="file" accept="audio/*,video/*" multiple></label><input type="hidden" id="mediaUploadData" name="uploadData"><label>Upload title<input name="uploadLabel" placeholder="Intro music, event replay, audio described movie"></label><button type="submit">Upload media</button></form>
+<form method="post" action="/dashboard/sources/url" data-confirm-kind="add" data-confirm-message="Add this URL relay source?"><input type="hidden" name="sourceType" value="urlRelay"><label>Relay label<input id="relayLabel" name="relayLabel" placeholder="Radio relay, remote event, training video"></label><label>Media type<select id="relayMediaType" name="relayMediaType"><option value="video">video</option><option value="audio">audio</option></select></label><label>HTTP or HTTPS media URL<input id="relayUrl" name="relayUrl" placeholder="https://example.com/stream.mp3"></label><button type="submit">Add URL relay source</button></form>
+<section class="subsection"><h3>Source queue</h3><table><tr><th>Name</th><th>Type</th><th>Source</th><th>Actions</th></tr>${queueRows || '<tr><td colspan="4">No queued sources. Upload or check media to build a playlist.</td></tr>'}</table><form method="post" action="/dashboard/sources/queue/clear" class="inline-form" data-confirm-kind="remove" data-confirm-message="Clear all queued media?"><button type="submit" class="danger">Clear queue</button></form><form method="post" action="/dashboard/sources/action" class="inline-form"><label>Relay action<select name="sourceAction"><option value="start">Start selected or queued media</option><option value="loop">Auto loop current source</option><option value="random">Random playback</option><option value="stop">Stop or disable source relay</option></select></label><button type="submit">Apply action</button></form></section>
 <table><tr><th>Name</th><th>Type</th><th>URL</th><th>Actions</th></tr>${relayRows || '<tr><td colspan="4">No URL relay sources configured.</td></tr>'}</table></section>`;
   const scheduleTab = `<section><h2>Calendar and scheduled shows</h2><p class="muted">Schedule a live encoder session or pre-created uploaded media. The internal scheduler checks active entries and starts media playback when the show is due.</p><form method="post" action="/dashboard/schedule"><label>Show title<input name="title" required></label><label>Start time<input type="datetime-local" name="startAt" required></label><label>End time<input type="datetime-local" name="endAt"></label><label>Show type<select name="mode"><option value="live">Live stream from encoder</option><option value="media">Pre-created uploaded or server media</option></select></label><label>Media source for pre-created show<select name="sourceId"><option value="">No media source</option>${streamSources(stream).map((source) => `<option value="${escapeHtml(source.id)}">${escapeHtml(sourceSummary(source))}</option>`).join('')}</select></label><label>Description<textarea name="description" rows="4"></textarea></label><button type="submit">Add scheduled show</button></form><table><tr><th>Show</th><th>Start</th><th>Type</th><th>Status</th><th>Actions</th></tr>${scheduleRows || '<tr><td colspan="5">No shows are scheduled yet.</td></tr>'}</table></section>`;
   const profileTab = `<section><h2>Stream profile</h2><form method="post" action="/dashboard/stream"><label>Title<input name="title" value="${escapeHtml(stream.title)}"></label><label>Description<textarea name="description" rows="4">${escapeHtml(stream.description || '')}</textarea></label><label>Links, one per line. Use Label|https://example.com<textarea name="links" rows="4">${escapeHtml(linksText(stream.links))}</textarea></label><label>Optional photo background<input id="backgroundUpload" type="file" accept="image/png,image/jpeg,image/webp"></label><input type="hidden" id="backgroundImageData" name="backgroundImageData"><label><input type="checkbox" name="removeBackground" value="true"> Remove current background</label><label>Visibility<select name="visibility"><option ${stream.visibility === 'public' ? 'selected' : ''}>public</option><option ${stream.visibility === 'unlisted' ? 'selected' : ''}>unlisted</option></select></label><label><input type="checkbox" name="allowComments" value="true" ${stream.allowComments ? 'checked' : ''}> Allow visitor comments</label><button type="submit">Save stream profile</button></form></section>
 <section><h2>Extra embedded content</h2><form method="post" action="/dashboard/extra-content"><label><input type="checkbox" name="enabled" value="true" ${stream.extraContent?.enabled ? 'checked' : ''}> Enable extra embedded content</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${stream.extraContent?.showOnWatchPage ? 'checked' : ''}> Show on visitor stream page</label><label>Heading<input name="title" value="${escapeHtml(stream.extraContent?.title || 'Additional content')}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(stream.extraContent?.description || '')}</textarea></label><label>Embed HTML<textarea name="embedHtml" rows="8">${escapeHtml(stream.extraContent?.embedHtml || '')}</textarea></label><button type="submit">Save extra content</button></form>${renderExtraContentBox(stream, 'dashboard')}</section>`;
   const support = effectiveSupportSettings(stream, user, store.settings);
-  const supportTab = `<section><h2>Support and payment box</h2><p class="muted">Admin streams use the configured WHMCS default client when the stream field is blank. Linked user accounts use their stored WHMCS client ID.</p><form method="post" action="/dashboard/support"><label><input type="checkbox" name="enabled" value="true" ${support.enabled ? 'checked' : ''}> Enable support box for this stream</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${support.showOnWatchPage ? 'checked' : ''}> Show support box on the visitor watch page</label><label>Placement<select name="placement"><option value="before" ${support.placement === 'before' ? 'selected' : ''}>Before stream player</option><option value="during" ${support.placement === 'during' ? 'selected' : ''}>Beside stream player area</option><option value="after" ${!['before', 'during'].includes(support.placement) ? 'selected' : ''}>After comments and stream details</option></select></label><label>Heading<input name="title" value="${escapeHtml(support.title || 'Support this stream')}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(support.description || '')}</textarea></label><label>PayPal URL<input name="paypalUrl" value="${escapeHtml(support.paypalUrl || '')}" placeholder="https://paypal.me/example"></label><label>Stripe payment link<input name="stripeUrl" value="${escapeHtml(support.stripeUrl || '')}" placeholder="https://buy.stripe.com/..."></label><label>Stripe Connect account ID<input name="stripeConnectAccountId" value="${escapeHtml(support.stripeConnectAccountId || '')}" placeholder="acct_..."></label><label>WHMCS client ID for invoice payments<input name="whmcsClientId" value="${escapeHtml(support.whmcsClientId || '')}" inputmode="numeric" placeholder="${escapeHtml(user.role === 'admin' ? paymentSettings.whmcsDefaultClientId || 'Admin default not set' : user.whmcsClientId || 'Linked client ID')}"></label><label>Cash App URL<input name="cashAppUrl" value="${escapeHtml(support.cashAppUrl || '')}" placeholder="https://cash.app/$name"></label><label>Apple Pay or payment URL<input name="applePayUrl" value="${escapeHtml(support.applePayUrl || '')}" placeholder="https://example.com/apple-pay"></label><label>Payment notes<textarea name="paymentNotes" rows="3">${escapeHtml(support.paymentNotes || '')}</textarea></label><label>Payment or donation embed HTML<textarea name="embedHtml" rows="6">${escapeHtml(support.embedHtml || '')}</textarea></label><button type="submit">Save support settings</button></form>${renderSupportBox({ ...stream, support }, 'dashboard')}</section>`;
+  const supportTab = `<section><h2>Support and payment box</h2><p class="muted">Admin streams use the configured default client when the stream field is blank. Linked user accounts use their stored client ID.</p><form method="post" action="/dashboard/support"><label><input type="checkbox" name="enabled" value="true" ${support.enabled ? 'checked' : ''}> Enable support box for this stream</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${support.showOnWatchPage ? 'checked' : ''}> Show support box on the visitor watch page</label><label>Placement<select name="placement"><option value="before" ${support.placement === 'before' ? 'selected' : ''}>Before stream player</option><option value="during" ${support.placement === 'during' ? 'selected' : ''}>Beside stream player area</option><option value="after" ${!['before', 'during'].includes(support.placement) ? 'selected' : ''}>After comments and stream details</option></select></label><label>Heading<input name="title" value="${escapeHtml(support.title || 'Support this stream')}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(support.description || '')}</textarea></label><label>PayPal URL<input name="paypalUrl" value="${escapeHtml(support.paypalUrl || '')}" placeholder="https://paypal.me/example"></label><label>Stripe payment link<input name="stripeUrl" value="${escapeHtml(support.stripeUrl || '')}" placeholder="https://buy.stripe.com/..."></label><label>Stripe Connect account ID<input name="stripeConnectAccountId" value="${escapeHtml(support.stripeConnectAccountId || '')}" placeholder="acct_..."></label><label>Client ID or client email for invoice payments<input name="whmcsLookup" value="${escapeHtml(support.whmcsClientId || user.whmcsClientId || user.whmcsPortalEmail || '')}" placeholder="${escapeHtml(user.role === 'admin' ? paymentSettings.whmcsDefaultClientId || 'Admin default not set' : user.whmcsClientId || 'Linked client ID or email')}"></label><label>Cash App URL<input name="cashAppUrl" value="${escapeHtml(support.cashAppUrl || '')}" placeholder="https://cash.app/$name"></label><label>Apple Pay or payment URL<input name="applePayUrl" value="${escapeHtml(support.applePayUrl || '')}" placeholder="https://example.com/apple-pay"></label><label>Payment notes<textarea name="paymentNotes" rows="3">${escapeHtml(support.paymentNotes || '')}</textarea></label><label>Payment or donation embed HTML<textarea name="embedHtml" rows="6">${escapeHtml(support.embedHtml || '')}</textarea></label><button type="submit">Save support settings</button></form>${renderSupportBox({ ...stream, support }, 'dashboard')}</section>`;
   const advancedTab = `<section><h2>Latency and buffer</h2><form method="post" action="/dashboard/latency"><label>Stream latency mode<select name="mode"><option value="low" ${stream.latencySettings.mode === 'low' ? 'selected' : ''}>Low latency</option><option value="balanced" ${stream.latencySettings.mode === 'balanced' ? 'selected' : ''}>Balanced</option><option value="stable" ${stream.latencySettings.mode === 'stable' ? 'selected' : ''}>Most stable</option></select></label><label>Target live latency, seconds<input name="targetLatencySeconds" type="number" min="2" max="30" step="0.5" value="${escapeHtml(stream.latencySettings.targetLatencySeconds)}"></label><label>Player buffer, seconds<input name="playerBufferSeconds" type="number" min="4" max="60" step="0.5" value="${escapeHtml(stream.latencySettings.playerBufferSeconds)}"></label><label>Reconnect buffer, seconds<input name="reconnectBufferSeconds" type="number" min="4" max="120" step="1" value="${escapeHtml(stream.latencySettings.reconnectBufferSeconds)}"></label><button type="submit">Save latency settings</button></form></section><section><h2>On-demand display</h2><form method="post" action="/dashboard/sources/ondemand"><label><input type="checkbox" name="enabled" value="true" ${stream.onDemand?.enabled ? 'checked' : ''}> Enable on-demand playback</label><label><input type="checkbox" name="showWhenOffline" value="true" ${stream.onDemand?.showWhenOffline ? 'checked' : ''}> Show to visitors when offline and selected media is available</label><label>On-demand title<input name="title" value="${escapeHtml(stream.onDemand?.title || '')}"></label><button type="submit">Save on-demand settings</button></form></section>`;
   const selectedBody = { overview: overviewTab, account: accountTab, media: mediaTab, schedule: scheduleTab, profile: profileTab, support: supportTab, advanced: advancedTab }[activeTab];
   const body = `<h1>User panel</h1>${reminderHtml}${tabs}${selectedBody}<script>
 const copyStatus=document.getElementById('copyStatus');
+const confirmationPreferences=${JSON.stringify(user.confirmationPreferences || {})};
 function b64uToBuffer(value){const b64=String(value).replace(/-/g,'+').replace(/_/g,'/');const bin=atob(b64.padEnd(Math.ceil(b64.length/4)*4,'='));return Uint8Array.from(bin,c=>c.charCodeAt(0)).buffer;}
 function bufferToB64u(buffer){const bytes=new Uint8Array(buffer);let bin='';bytes.forEach(b=>bin+=String.fromCharCode(b));return btoa(bin).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');}
 function publicKeyCreateFromJSON(options){options.challenge=b64uToBuffer(options.challenge);options.user.id=b64uToBuffer(options.user.id);if(options.excludeCredentials){options.excludeCredentials=options.excludeCredentials.map(c=>({...c,id:b64uToBuffer(c.id)}));}return options;}
 function attestationToJSON(credential){return {id:credential.id,rawId:bufferToB64u(credential.rawId),type:credential.type,response:{attestationObject:bufferToB64u(credential.response.attestationObject),clientDataJSON:bufferToB64u(credential.response.clientDataJSON),transports:credential.response.getTransports?credential.response.getTransports():[]},clientExtensionResults:credential.getClientExtensionResults?credential.getClientExtensionResults():{}};}
 function setCopyStatus(message){if(copyStatus) copyStatus.textContent=message;}
+function shouldConfirm(kind){if(confirmationPreferences.enabled===false)return false;if(kind==='add')return confirmationPreferences.confirmAdding!==false;if(kind==='remove')return confirmationPreferences.confirmRemoving!==false;if(kind==='live')return confirmationPreferences.confirmGoingLive!==false;if(kind==='disable')return confirmationPreferences.confirmDisabling!==false;return true;}
+function actionKindForForm(form){const explicit=form.dataset.confirmKind;if(explicit)return explicit;const bulk=form.querySelector('[name="bulkAction"]')?.value||'';if(bulk.includes('enable'))return 'live';if(bulk.includes('disable'))return 'disable';const sourceAction=form.querySelector('[name="sourceAction"]')?.value||'';if(['start','loop','random'].includes(sourceAction))return 'live';if(sourceAction==='stop')return 'disable';return '';}
+function actionMessageForForm(form,kind){return form.dataset.confirmMessage|| (kind==='live'?'Enable selected destinations or go live with the current choices?':kind==='disable'?'Disable selected destinations or streaming choices?':kind==='remove'?'Remove this item?':'Apply this stream change?');}
+async function confirmAction(form){const kind=actionKindForForm(form);if(!kind||!shouldConfirm(kind))return true;const message=actionMessageForForm(form,kind);if(!confirm(message))return false;const seconds=Math.max(0,Number(confirmationPreferences.countdownSeconds||0));if(kind==='live'&&seconds>0){let cancelled=false;const cancel=(event)=>{if(event.key==='Escape')cancelled=true;};document.addEventListener('keydown',cancel);for(let remaining=seconds;remaining>0;remaining--){if(cancelled){document.removeEventListener('keydown',cancel);setCopyStatus('Go-live action cancelled.');return false;}setCopyStatus('Going live in '+remaining+' seconds. Press Escape to cancel.');await new Promise(resolve=>setTimeout(resolve,1000));}document.removeEventListener('keydown',cancel);setCopyStatus('Starting live action now.');}return true;}
+document.addEventListener('submit',async(event)=>{const form=event.target.closest('form');if(!form||form.dataset.confirmBound==='done')return;const kind=actionKindForForm(form);if(!kind)return;event.preventDefault();const ok=await confirmAction(form);if(ok){form.dataset.confirmBound='done';form.submit();}});
 async function copyText(value,label){
   if(navigator.clipboard && window.isSecureContext){await navigator.clipboard.writeText(value);}
   else{const area=document.createElement('textarea');area.value=value;area.setAttribute('readonly','');area.style.position='fixed';area.style.left='-9999px';document.body.appendChild(area);area.select();document.execCommand('copy');area.remove();}
@@ -2726,12 +2918,19 @@ app.post('/dashboard/destinations/enabled', requireUser, (req, res) => {
   const store = readStore();
   const stream = store.streams.find((item) => item.ownerId === req.user.id);
   if (stream) {
+    const bulkAction = String(req.body.bulkAction || 'save');
     const enabledIds = new Set(bodyValues(req.body.enabledDestinations));
+    const selectedIds = new Set(bodyValues(req.body.destinationIds));
     for (const destination of stream.destinations || []) {
-      destination.enabled = enabledIds.has(destination.id);
+      if (bulkAction === 'enable-all') destination.enabled = true;
+      else if (bulkAction === 'disable-all') destination.enabled = false;
+      else if (bulkAction === 'enable-selected' && selectedIds.has(destination.id)) destination.enabled = true;
+      else if (bulkAction === 'disable-selected' && selectedIds.has(destination.id)) destination.enabled = false;
+      else if (bulkAction === 'save') destination.enabled = enabledIds.has(destination.id);
     }
     stream.updatedAt = nowIso();
-    store.events.push({ id: id('evt'), type: 'destination_enabled_state_updated', payload: { streamId: stream.id, enabledCount: enabledIds.size }, createdAt: nowIso() });
+    const enabledCount = (stream.destinations || []).filter((destination) => destination.enabled).length;
+    store.events.push({ id: id('evt'), type: 'destination_enabled_state_updated', payload: { streamId: stream.id, action: bulkAction, selectedCount: selectedIds.size, enabledCount }, createdAt: nowIso() });
     writeStore(store);
   }
   res.redirect('/dashboard');
@@ -3013,11 +3212,17 @@ app.post('/dashboard/latency', requireUser, (req, res) => {
   res.redirect('/dashboard');
 });
 
-app.post('/dashboard/support', requireUser, (req, res) => {
+app.post('/dashboard/support', requireUser, async (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
   const stream = ensureStreamForUser(store, user);
   const existingSupport = { ...defaultSupportSettings(), ...(stream.support || {}) };
+  const paymentSettings = store.settings.paymentIntegration || defaultPaymentIntegrationSettings();
+  const lookup = String(req.body.whmcsLookup || '').trim();
+  const linkedWhmcs = await lookupWhmcsClient(paymentSettings, {
+    clientId: /^\d+$/.test(lookup) ? lookup : '',
+    email: lookup.includes('@') ? lookup : ''
+  });
   stream.support = {
     enabled: req.body.enabled === 'true',
     showOnWatchPage: req.body.showOnWatchPage === 'true',
@@ -3035,7 +3240,7 @@ app.post('/dashboard/support', requireUser, (req, res) => {
     cashAppUrl: safeUrl(req.body.cashAppUrl),
     applePayUrl: safeUrl(req.body.applePayUrl),
     stripeConnectAccountId: String(req.body.stripeConnectAccountId || '').trim().slice(0, 120),
-    whmcsClientId: String(req.body.whmcsClientId || '').trim().replace(/[^0-9]/g, '').slice(0, 20),
+    whmcsClientId: linkedWhmcs?.clientId || (/^\d+$/.test(lookup) ? lookup.replace(/[^0-9]/g, '').slice(0, 20) : existingSupport.whmcsClientId || ''),
     paymentNotes: String(req.body.paymentNotes || '').trim().slice(0, 1000)
   };
   stream.updatedAt = nowIso();
@@ -3044,15 +3249,22 @@ app.post('/dashboard/support', requireUser, (req, res) => {
   res.redirect('/dashboard');
 });
 
-app.post('/dashboard/account', requireUser, (req, res) => {
+app.post('/dashboard/account', requireUser, async (req, res) => {
   const store = readStore();
   const user = userById(store, req.user.id);
   if (user) {
+    const paymentSettings = store.settings.paymentIntegration || defaultPaymentIntegrationSettings();
+    const lookup = String(req.body.whmcsLookup || '').trim();
+    const linkedWhmcs = await lookupWhmcsClient(paymentSettings, {
+      clientId: /^\d+$/.test(lookup) ? lookup : '',
+      email: lookup.includes('@') ? lookup : ''
+    });
     user.displayName = String(req.body.displayName || user.username).trim().slice(0, 80) || user.username;
-    user.whmcsPortalEmail = String(req.body.whmcsPortalEmail || '').trim().slice(0, 180);
-    user.whmcsClientId = String(req.body.whmcsClientId || '').replace(/[^0-9]/g, '').slice(0, 20);
+    user.whmcsPortalEmail = linkedWhmcs?.email || (lookup.includes('@') ? lookup.slice(0, 180) : user.whmcsPortalEmail || '');
+    user.whmcsClientId = linkedWhmcs?.clientId || (/^\d+$/.test(lookup) ? lookup.replace(/[^0-9]/g, '').slice(0, 20) : user.whmcsClientId || '');
+    user.whmcsLinkedAt = linkedWhmcs ? nowIso() : user.whmcsLinkedAt || '';
     user.updatedAt = nowIso();
-    store.events.push({ id: id('evt'), type: 'account_details_updated', payload: { username: user.username }, createdAt: nowIso() });
+    store.events.push({ id: id('evt'), type: 'account_details_updated', payload: { username: user.username, whmcsLinked: Boolean(linkedWhmcs) }, createdAt: nowIso() });
     writeStore(store);
   }
   res.redirect('/dashboard?tab=account');
@@ -3095,6 +3307,25 @@ app.post('/dashboard/notification-settings', requireUser, (req, res) => {
     };
     user.updatedAt = nowIso();
     store.events.push({ id: id('evt'), type: 'notification_settings_updated', payload: { username: user.username, hasEmail: Boolean(user.notificationEmail) }, createdAt: nowIso() });
+    writeStore(store);
+  }
+  res.redirect('/dashboard?tab=account');
+});
+
+app.post('/dashboard/confirmation-settings', requireUser, (req, res) => {
+  const store = readStore();
+  const user = userById(store, req.user.id);
+  if (user) {
+    user.confirmationPreferences = {
+      enabled: req.body.enabled === 'true',
+      countdownSeconds: clampNumber(req.body.countdownSeconds, 0, 30, 5),
+      confirmAdding: req.body.confirmAdding === 'true',
+      confirmRemoving: req.body.confirmRemoving === 'true',
+      confirmGoingLive: req.body.confirmGoingLive === 'true',
+      confirmDisabling: req.body.confirmDisabling === 'true'
+    };
+    user.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'confirmation_settings_updated', payload: { username: user.username, enabled: user.confirmationPreferences.enabled, countdownSeconds: user.confirmationPreferences.countdownSeconds }, createdAt: nowIso() });
     writeStore(store);
   }
   res.redirect('/dashboard?tab=account');
@@ -3437,7 +3668,7 @@ app.get('/admin/streams', requireAdmin, (req, res) => {
 
 app.get('/admin/accounts', requireAdmin, (req, res) => {
   const store = readStore();
-  const accountRows = store.users.map((item) => `<tr><td>${escapeHtml(item.username)}</td><td><form method="post" action="/admin/users/${escapeHtml(item.id)}"><label>Display name<input name="displayName" value="${escapeHtml(item.displayName || '')}"></label></td><td><label>Role<select name="role">${roleOptions(item.role, true)}</select></label></td><td><label><input type="checkbox" name="active" value="true" ${item.active ? 'checked' : ''}> Active</label></td><td><label>Notification email<input name="notificationEmail" type="email" value="${escapeHtml(item.notificationEmail || '')}"></label><label>WHMCS client ID<input name="whmcsClientId" inputmode="numeric" value="${escapeHtml(item.whmcsClientId || '')}"></label></td><td><label>New password<input name="password" type="password" autocomplete="new-password" placeholder="Leave blank to keep current password"></label><button type="submit">Save account</button></form></td></tr>`).join('');
+  const accountRows = store.users.map((item) => `<tr><td>${escapeHtml(item.username)}</td><td><form method="post" action="/admin/users/${escapeHtml(item.id)}"><label>Display name<input name="displayName" value="${escapeHtml(item.displayName || '')}"></label></td><td><label>Role<select name="role">${roleOptions(item.role, true)}</select></label></td><td><label><input type="checkbox" name="active" value="true" ${item.active ? 'checked' : ''}> Active</label></td><td><label>Notification email<input name="notificationEmail" type="email" value="${escapeHtml(item.notificationEmail || '')}"></label><label>Client ID or client email<input name="clientLookup" value="${escapeHtml(item.whmcsClientId || item.whmcsPortalEmail || '')}"></label><p class="muted">Current client ID: ${escapeHtml(item.whmcsClientId || 'None')}. Client email: ${escapeHtml(item.whmcsPortalEmail || 'None')}.</p></td><td><label>New password<input name="password" type="password" autocomplete="new-password" placeholder="Leave blank to keep current password"></label><button type="submit">Save account</button></form></td></tr>`).join('');
   const body = `<h1>Admin panel</h1>${adminTabs('accounts')}
 <section><h2>Create user</h2><form method="post" action="/admin/users"><label>Username<input name="username" required></label><label>Display name<input name="displayName"></label><label>Password<input name="password" type="password" required></label><label>Role<select name="role">${roleOptions('user', true)}</select></label><button type="submit">Create user</button></form></section>
 <section><h2>Edit accounts</h2><table><tr><th>Username</th><th>Display name</th><th>Role</th><th>Status</th><th>Linked details</th><th>Password and save</th></tr>${accountRows}</table></section>`;
@@ -3592,8 +3823,11 @@ app.get('/admin/install', requireAdmin, (req, res) => {
   const store = readStore();
   const license = store.settings.license || defaultLicenseSettings();
   const dns = store.settings.dns || defaultDnsSettings();
+  const reissueCounts = licenseReissueCounts(license);
+  const canEditLicense = !license.lockClientLinkedSettings || license.edition === 'enterprise' || license.edition === 'hosted';
+  const licenseFieldsDisabled = canEditLicense ? '' : ' disabled';
   const body = `<h1>Admin panel</h1>${adminTabs('install')}
-<section><h2>Server install and license</h2><p class="muted">Customer-owned installs use their own local payment links while license, product, invoice, and account continuity stay linked to the Devine Creations WHMCS portal.</p><form method="post" action="/admin/install/license"><label><input type="checkbox" name="licensingEnabled" value="true" ${license.licensingEnabled ? 'checked' : ''}> Enable license validation for this install</label><label>License server URL<input name="licenseServerUrl" value="${escapeHtml(license.licenseServerUrl || '')}"></label><label>WHMCS product ID<input name="whmcsProductId" value="${escapeHtml(license.whmcsProductId || '')}"></label><label>License key<input name="licenseKey" value="${escapeHtml(license.licenseKey || '')}"></label><label>Install ID<input name="installId" value="${escapeHtml(license.installId || '')}"></label><label>Install domain<input name="installDomain" value="${escapeHtml(license.installDomain || '')}"></label><label>Edition<select name="edition"><option value="hosted" ${license.edition === 'hosted' ? 'selected' : ''}>Hosted</option><option value="self-hosted" ${license.edition === 'self-hosted' ? 'selected' : ''}>Self-hosted licensed</option><option value="managed" ${license.edition === 'managed' ? 'selected' : ''}>Managed deployment</option><option value="enterprise" ${license.edition === 'enterprise' ? 'selected' : ''}>Enterprise or internal</option></select></label><button type="submit">Save license settings</button></form><p>Validation status: <strong>${escapeHtml(license.validationStatus || 'unknown')}</strong>. Last checked: ${escapeHtml(license.lastValidationAt || 'Never')}.</p></section>
+<section><h2>Server install and license</h2><p class="muted">Customer-owned installs use their own local payment links while license, product, invoice, and account continuity stay linked to the Devine Creations client portal. Client-linked installs can display license details without allowing protected settings to be changed locally.</p><form method="post" action="/admin/install/license"><label><input type="checkbox" name="licensingEnabled" value="true" ${license.licensingEnabled ? 'checked' : ''}${licenseFieldsDisabled}> Enable license validation for this install</label><label><input type="checkbox" name="clientLinked" value="true" ${license.clientLinked ? 'checked' : ''}${licenseFieldsDisabled}> Linked to a client account</label><label><input type="checkbox" name="lockClientLinkedSettings" value="true" ${license.lockClientLinkedSettings ? 'checked' : ''}> Lock client-linked license settings on this install</label><label>License server URL<input name="licenseServerUrl" value="${escapeHtml(license.licenseServerUrl || '')}"${licenseFieldsDisabled}></label><label>Product ID<input name="whmcsProductId" value="${escapeHtml(license.whmcsProductId || '')}"${licenseFieldsDisabled}></label><label>Generated license key<input readonly value="${escapeHtml(license.licenseKey || 'Not generated')}"></label><input type="hidden" name="licenseKey" value="${escapeHtml(license.licenseKey || '')}"><label>Install ID<input name="installId" value="${escapeHtml(license.installId || '')}"${licenseFieldsDisabled}></label><label>Install domain<input name="installDomain" value="${escapeHtml(license.installDomain || '')}"${licenseFieldsDisabled}></label><label>Edition<select name="edition"${licenseFieldsDisabled}><option value="hosted" ${license.edition === 'hosted' ? 'selected' : ''}>Hosted</option><option value="self-hosted" ${license.edition === 'self-hosted' ? 'selected' : ''}>Self-hosted licensed</option><option value="managed" ${license.edition === 'managed' ? 'selected' : ''}>Managed deployment</option><option value="enterprise" ${license.edition === 'enterprise' ? 'selected' : ''}>Enterprise or internal</option></select></label><button type="submit">Save license settings</button></form><form method="post" action="/admin/install/license/reissue"><button type="submit" ${canReissueLicense(license) ? '' : 'disabled'}>Reissue generated license key</button></form><p>Reissues used: ${escapeHtml(reissueCounts.monthly)}/${escapeHtml(license.reissueLimits?.monthly ?? 2)} this month, ${escapeHtml(reissueCounts.quarterly)}/${escapeHtml(license.reissueLimits?.quarterly ?? 4)} this quarter, ${escapeHtml(reissueCounts.yearly)}/${escapeHtml(license.reissueLimits?.yearly ?? 8)} this year.</p><p>Validation status: <strong>${escapeHtml(license.validationStatus || 'unknown')}</strong>. Last checked: ${escapeHtml(license.lastValidationAt || 'Never')}.</p></section>
 <section><h2>DNS and domain automation</h2><p class="muted">DNS changes are only performed when a supported provider token is configured on the server. Cloudflare is supported in this build. Existing nameservers and domain ownership must already allow this install to manage records. Approved auth domains let passkeys and browser notifications follow additional domains for this install.</p><form method="post" action="/admin/install/dns-settings"><label>DNS provider<select name="provider"><option value="">Not configured</option><option value="cloudflare" ${dns.provider === 'cloudflare' ? 'selected' : ''}>Cloudflare</option></select></label><label>Zone ID<input name="zoneId" value="${escapeHtml(dns.zoneId || '')}"></label><label>Default DNS target<input name="defaultTarget" value="${escapeHtml(dns.defaultTarget || '')}" placeholder="live.tappedin.fm or server hostname"></label><label>Default nameservers<input name="defaultNameservers" value="${escapeHtml(dns.defaultNameservers || '')}"></label><label>Approved auth domains, one per line<textarea name="authDomains" rows="4" placeholder="live.tappedin.fm&#10;aaastreamer.devinecreations.net">${escapeHtml(dns.authDomains || '')}</textarea></label><button type="submit">Save DNS settings</button></form><form method="post" action="/admin/install/dns-record"><label>Record name<input name="name" placeholder="live"></label><label>Record type<select name="type"><option value="CNAME">CNAME</option><option value="A">A</option><option value="AAAA">AAAA</option></select></label><label>Record target<input name="content" value="${escapeHtml(dns.defaultTarget || '')}"></label><label><input type="checkbox" name="proxied" value="true"> Proxy through provider when supported</label><button type="submit">Create DNS record</button></form><p>Last DNS action: <strong>${escapeHtml(dns.lastActionStatus || 'not configured')}</strong> ${escapeHtml(dns.lastActionMessage || '')}</p></section>
 <section><h2>Server installer</h2><p>Installer script path in this release: <code>scripts/install-aaastreamer-server.sh</code>.</p><p class="muted">The installer creates a service, env file, optional nginx vhost, and the licensing/DNS configuration hooks needed for production setup.</p></section>`;
   res.send(page('Admin install and licensing', body, req.user));
@@ -3602,9 +3836,22 @@ app.get('/admin/install', requireAdmin, (req, res) => {
 app.post('/admin/install/license', requireAdmin, (req, res) => {
   const store = readStore();
   const existing = store.settings.license || defaultLicenseSettings();
+  const canEditLicense = !existing.lockClientLinkedSettings || existing.edition === 'enterprise' || existing.edition === 'hosted';
+  if (!canEditLicense) {
+    store.settings.license = {
+      ...existing,
+      lockClientLinkedSettings: req.body.lockClientLinkedSettings === 'true'
+    };
+    store.events.push({ id: id('evt'), type: 'license_settings_lock_updated', payload: { locked: store.settings.license.lockClientLinkedSettings }, createdAt: nowIso() });
+    writeStore(store);
+    res.redirect('/admin/install');
+    return;
+  }
   store.settings.license = {
     ...existing,
     licensingEnabled: req.body.licensingEnabled === 'true',
+    clientLinked: req.body.clientLinked === 'true',
+    lockClientLinkedSettings: req.body.lockClientLinkedSettings === 'true',
     licenseServerUrl: safeUrl(req.body.licenseServerUrl) || 'https://devine-creations.com',
     whmcsProductId: String(req.body.whmcsProductId || '').trim().replace(/[^0-9]/g, '').slice(0, 20),
     licenseKey: String(req.body.licenseKey || '').trim().slice(0, 160),
@@ -3613,6 +3860,26 @@ app.post('/admin/install/license', requireAdmin, (req, res) => {
     edition: ['hosted', 'self-hosted', 'managed', 'enterprise'].includes(req.body.edition) ? req.body.edition : 'self-hosted'
   };
   store.events.push({ id: id('evt'), type: 'license_settings_updated', payload: { edition: store.settings.license.edition, licensingEnabled: store.settings.license.licensingEnabled }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/admin/install');
+});
+
+app.post('/admin/install/license/reissue', requireAdmin, (req, res) => {
+  const store = readStore();
+  const license = { ...defaultLicenseSettings(), ...(store.settings.license || {}) };
+  license.reissueLimits = { ...defaultLicenseSettings().reissueLimits, ...(license.reissueLimits || {}) };
+  license.reissues = Array.isArray(license.reissues) ? license.reissues : [];
+  if (!canReissueLicense(license)) {
+    res.status(429).send(page('License reissue limit reached', '<h1>License reissue limit reached</h1><p>This install has used its configured license reissues for the current period.</p><p><a class="button" href="/admin/install">Back to install settings</a></p>', req.user));
+    return;
+  }
+  const previousSuffix = String(license.licenseKey || '').slice(-8);
+  license.licenseKey = `aas_${crypto.randomBytes(24).toString('base64url')}`;
+  license.reissues.push({ id: id('lic'), createdAt: nowIso(), requestedBy: req.user.username, installDomain: license.installDomain || '', previousSuffix, newSuffix: license.licenseKey.slice(-8) });
+  license.validationStatus = 'reissued';
+  license.lastValidationAt = nowIso();
+  store.settings.license = license;
+  store.events.push({ id: id('evt'), type: 'license_key_reissued', payload: { installDomain: license.installDomain || '', newSuffix: license.licenseKey.slice(-8) }, createdAt: nowIso() });
   writeStore(store);
   res.redirect('/admin/install');
 });
@@ -3851,7 +4118,7 @@ app.post('/admin/users', requireAdmin, (req, res) => {
   res.redirect('/admin/accounts');
 });
 
-app.post('/admin/users/:userId', requireAdmin, (req, res) => {
+app.post('/admin/users/:userId', requireAdmin, async (req, res) => {
   const store = readStore();
   const user = userById(store, req.params.userId);
   if (!user) {
@@ -3861,7 +4128,14 @@ app.post('/admin/users/:userId', requireAdmin, (req, res) => {
   user.displayName = String(req.body.displayName || user.username).trim().slice(0, 80) || user.username;
   user.role = normalizeRole(req.body.role, user.role);
   user.notificationEmail = String(req.body.notificationEmail || '').trim().slice(0, 180);
-  user.whmcsClientId = String(req.body.whmcsClientId || '').replace(/[^0-9]/g, '').slice(0, 20);
+  const paymentSettings = store.settings.paymentIntegration || defaultPaymentIntegrationSettings();
+  const lookup = String(req.body.clientLookup || '').trim();
+  const linkedWhmcs = await lookupWhmcsClient(paymentSettings, {
+    clientId: /^\d+$/.test(lookup) ? lookup : '',
+    email: lookup.includes('@') ? lookup : ''
+  });
+  user.whmcsPortalEmail = linkedWhmcs?.email || (lookup.includes('@') ? lookup.slice(0, 180) : user.whmcsPortalEmail || '');
+  user.whmcsClientId = linkedWhmcs?.clientId || (/^\d+$/.test(lookup) ? lookup.replace(/[^0-9]/g, '').slice(0, 20) : user.whmcsClientId || '');
   user.active = user.id === req.user.id ? true : req.body.active === 'true';
   const password = String(req.body.password || '');
   if (password) {
@@ -3873,7 +4147,7 @@ app.post('/admin/users/:userId', requireAdmin, (req, res) => {
     store.sessions = (store.sessions || []).filter((session) => session.userId !== user.id || user.id === req.user.id);
   }
   user.updatedAt = nowIso();
-  store.events.push({ id: id('evt'), type: 'admin_account_updated', payload: { username: user.username, role: user.role, active: user.active }, createdAt: nowIso() });
+  store.events.push({ id: id('evt'), type: 'admin_account_updated', payload: { username: user.username, role: user.role, active: user.active, clientLinked: Boolean(linkedWhmcs) }, createdAt: nowIso() });
   writeStore(store);
   res.redirect('/admin/accounts');
 });
@@ -3935,7 +4209,7 @@ app.post('/api/streams/:streamId/support-payments', async (req, res) => {
     if (provider === 'whmcs') {
       if (!settings.whmcsEnabled) throw new Error('WHMCS payments are not enabled.');
       const userId = support.whmcsClientId || settings.whmcsDefaultClientId;
-      if (!userId) throw new Error('A WHMCS client ID is required for invoice payments.');
+      if (!userId) throw new Error('A client ID is required for invoice payments.');
       const invoice = await callWhmcsApi(settings, 'CreateInvoice', {
         userid: userId,
         status: 'Unpaid',
