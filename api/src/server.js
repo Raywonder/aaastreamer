@@ -814,7 +814,7 @@ function streamIsPubliclyListable(stream, store) {
 
 function streamPlaybackUrl(stream, store) {
   if (isLive(stream)) return stream.hlsUrl || hlsUrlFor(stream.activeEncoderKey || stream.streamKey);
-  if (shouldRunContinuousOnDemandRelay(stream, store) && sourceProcesses.has(stream.id)) {
+  if (shouldRunContinuousOnDemandRelay(stream, store)) {
     return hlsUrlFor(stream.streamKey);
   }
   if (streamHasOnDemand(stream, store)) return playableSourceUrl(firstPlayableSource(stream, store), store);
@@ -823,6 +823,7 @@ function streamPlaybackUrl(stream, store) {
 
 function publicStreamSummary(stream, store, includePrivate = false) {
   const playbackUrl = streamPlaybackUrl(stream, store);
+  const continuousOnDemandRelay = shouldRunContinuousOnDemandRelay(stream, store);
   const safe = {
     id: stream.id,
     ownerId: stream.ownerId,
@@ -836,9 +837,11 @@ function publicStreamSummary(stream, store, includePrivate = false) {
     onDemand: stream.onDemand,
     hasLivePlayback: isLive(stream),
     hasOnDemandPlayback: streamHasOnDemand(stream, store),
+    continuousOnDemandRelay,
+    relayRunning: sourceProcesses.has(stream.id),
     watchUrl: watchUrlFor(stream),
     playbackUrl: playbackUrl || null,
-    hlsUrl: isLive(stream) ? (stream.hlsUrl || hlsUrlFor(stream.activeEncoderKey || stream.streamKey)) : null,
+    hlsUrl: isLive(stream) || continuousOnDemandRelay ? (stream.hlsUrl || hlsUrlFor(stream.activeEncoderKey || stream.streamKey)) : null,
     updatedAt: stream.updatedAt,
     createdAt: stream.createdAt
   };
@@ -1784,6 +1787,33 @@ function ensureContinuousOnDemandRelays() {
   if (changed) writeStore(store);
 }
 
+function ensureContinuousOnDemandRelayForStream(store, stream, reason = 'playback_request') {
+  normalizeStream(stream);
+  if (!shouldRunContinuousOnDemandRelay(stream, store)) return false;
+  if (sourceProcesses.has(stream.id)) return true;
+  const source = firstPlayableSource(stream, store);
+  if (!source) return false;
+  if (stream.currentSource?.id !== source.id) {
+    const previousSource = stream.currentSource;
+    removeQueuedSource(stream, source.id);
+    stream.currentSource = source;
+    addSourcesToQueue(stream, [previousSource]);
+    stream.sourceMode = source.type === 'urlRelay' ? 'url' : 'media';
+  }
+  try {
+    startSourceProcess(stream, source, store);
+    stream.hlsUrl = hlsUrlFor(stream.streamKey);
+    stream.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'ondemand_relay_ensured', payload: { streamId: stream.id, sourceId: source.id, label: source.label, reason }, createdAt: nowIso() });
+    writeStore(store);
+    return true;
+  } catch (error) {
+    store.events.push({ id: id('evt'), type: 'ondemand_relay_ensure_failed', payload: { streamId: stream.id, message: error.message, reason }, createdAt: nowIso() });
+    writeStore(store);
+    return false;
+  }
+}
+
 function getGitRevision() {
   try {
     return childProcess.execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
@@ -1900,6 +1930,7 @@ app.get('/s/:slug', (req, res) => {
     res.status(404).send(page('Stream not found', '<h1>Stream not found</h1>', currentUser(req)));
     return;
   }
+  ensureContinuousOnDemandRelayForStream(store, stream, 'watch_page');
   const playbackUrl = streamPlaybackUrl(stream, store);
   const playableStatus = isLive(stream) ? 'live' : (streamHasOnDemand(stream, store) ? 'on demand' : 'offline');
   const comments = store.comments.filter((comment) => comment.streamId === stream.id).slice(-100);
@@ -1940,6 +1971,7 @@ app.get('/embed/:slug', (req, res) => {
     res.status(404).send('Stream not found');
     return;
   }
+  ensureContinuousOnDemandRelayForStream(store, stream, 'embed_player');
   const playbackUrl = streamPlaybackUrl(stream, store);
   if (!playbackUrl) {
     res.status(404).send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${escapeHtml(stream.title)}</title><style>html,body{margin:0;height:100%;background:#000;color:#fff;font-family:Arial,sans-serif;display:grid;place-items:center;text-align:center}</style></head><body><p>This stream is offline.</p></body></html>`);
@@ -3216,6 +3248,10 @@ app.get('/api/streams', (req, res) => {
   const user = currentUser(req);
   const streams = store.streams
     .filter((stream) => user?.role === 'admin' || stream.ownerId === user?.id || streamIsPubliclyListable(stream, store))
+    .map((stream) => {
+      ensureContinuousOnDemandRelayForStream(store, stream, 'api_streams');
+      return stream;
+    })
     .map((stream) => publicStreamSummary(stream, store, user?.role === 'admin' || stream.ownerId === user?.id));
   res.json({ success: true, streams });
 });
@@ -3232,6 +3268,7 @@ app.get('/api/streams/:streamId', (req, res) => {
     res.status(404).json({ success: false, error: 'Stream is offline' });
     return;
   }
+  ensureContinuousOnDemandRelayForStream(store, stream, 'api_stream');
   res.json({ success: true, stream: publicStreamSummary(stream, store, user?.role === 'admin' || stream.ownerId === user?.id) });
 });
 
