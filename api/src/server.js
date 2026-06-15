@@ -1812,7 +1812,7 @@ function queuedSourceRows(stream, store) {
     const urlCell = sourceUrl
       ? `<a href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">Open source</a>`
       : '<span class="muted">Unavailable</span>';
-    return `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(source.mediaType)}</td><td>${urlCell}</td><td><form method="post" action="/dashboard/sources/queue/${escapeHtml(source.id)}/select" class="inline-form"><button type="submit">Use now</button></form><form method="post" action="/dashboard/sources/queue/${escapeHtml(source.id)}/remove" class="inline-form"><button type="submit" class="danger">Remove</button></form></td></tr>`;
+    return `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(source.mediaType)}</td><td>${urlCell}</td><td><form method="post" action="/dashboard/sources/queue/${escapeHtml(source.id)}/select" class="inline-form" data-confirm-kind="live" data-confirm-message="Start playing ${escapeHtml(sourceSummary(source))} now?"><button type="submit">Start playing this queued item</button></form><p class="muted">Starts this item immediately and makes it the current source.</p><form method="post" action="/dashboard/sources/queue/${escapeHtml(source.id)}/remove" class="inline-form" data-confirm-kind="remove" data-confirm-message="Remove ${escapeHtml(sourceSummary(source))} from the queue?"><button type="submit" class="danger">Remove from queue</button></form><p class="muted">Removes this item from the queue without deleting the media file.</p></td></tr>`;
   }).join('');
 }
 
@@ -1842,14 +1842,16 @@ function sourcePresetCards(stream, serverUrl) {
 function dashboardTabs(active) {
   const tabs = [
     ['overview', 'Overview'],
-    ['account', 'Account'],
     ['media', 'Media management'],
+    ['encoders', 'Encoders'],
+    ['destinations', 'Destinations'],
     ['schedule', 'Calendar'],
     ['profile', 'Stream profile'],
     ['support', 'Support and payments'],
+    ['account', 'Account'],
     ['advanced', 'Advanced']
   ];
-  return `<nav class="tabs" aria-label="Dashboard sections">${tabs.map(([idValue, label]) => `<a href="/dashboard?tab=${escapeHtml(idValue)}" ${active === idValue ? 'aria-current="page"' : ''}>${escapeHtml(label)}</a>`).join('')}</nav>`;
+  return `<nav class="tabs" role="tablist" aria-label="Dashboard sections">${tabs.map(([idValue, label]) => `<a role="tab" class="tab-button" href="/dashboard?tab=${escapeHtml(idValue)}" ${active === idValue ? 'aria-selected="true" aria-current="page"' : 'aria-selected="false"'}>${escapeHtml(label)}</a>`).join('')}</nav>`;
 }
 
 function effectiveSupportSettings(stream, user, settings = {}) {
@@ -1861,8 +1863,10 @@ function effectiveSupportSettings(stream, user, settings = {}) {
   return support;
 }
 
-function mediaCatalogCheckboxes(store, user, selectedSources = []) {
-  const selectedKeys = new Set((selectedSources || []).map(sourceQueueKey));
+function mediaCatalogCheckboxes(store, user, stream) {
+  const queuedKeys = new Set((stream?.sourceQueue || []).map(sourceQueueKey));
+  const currentKey = sourceQueueKey(stream?.currentSource);
+  const relayRunning = stream?.id ? sourceProcesses.has(stream.id) : false;
   const rows = [];
   for (const folder of mediaCatalog(store, user)) {
     for (const file of folder.files) {
@@ -1876,10 +1880,15 @@ function mediaCatalogCheckboxes(store, user, selectedSources = []) {
       const key = sourceQueueKey(source);
       const previewUrl = `/dashboard/media/preview/${encodeURIComponent(file.folderId)}/${file.relativePath.split(/[\\/]+/).map(encodeURIComponent).join('/')}`;
       const chapterText = file.chapters?.length ? `${file.chapters.length} chapters` : 'No chapters detected';
-      rows.push(`<tr><td><input type="checkbox" name="localMedia" value="${escapeHtml(`${file.folderId}|${file.relativePath}`)}" ${selectedKeys.has(key) ? 'checked' : ''}></td><td>${escapeHtml(file.label)}</td><td>${escapeHtml(file.fileName || path.basename(file.relativePath))}</td><td>${escapeHtml(folder.label)}</td><td>${escapeHtml(file.mediaType)}</td><td>${escapeHtml(formatDuration(file.durationSeconds))}</td><td>${escapeHtml(formatBytes(file.size))}</td><td>${escapeHtml(chapterText)}</td><td><a href="${escapeHtml(previewUrl)}" target="_blank" rel="noopener noreferrer">Preview one minute</a></td></tr>`);
+      const usage = key === currentKey
+        ? (relayRunning ? 'Currently playing' : 'Selected current source')
+        : queuedKeys.has(key)
+          ? 'Queued'
+          : 'Not used';
+      rows.push(`<tr><td><input type="checkbox" name="localMedia" value="${escapeHtml(`${file.folderId}|${file.relativePath}`)}" ${queuedKeys.has(key) || key === currentKey ? 'checked' : ''} aria-label="Select ${escapeHtml(file.label)} for the playback queue"></td><td>${escapeHtml(file.label)}</td><td>${escapeHtml(file.fileName || path.basename(file.relativePath))}</td><td>${escapeHtml(folder.label)}</td><td>${escapeHtml(file.mediaType)}</td><td>${escapeHtml(formatDuration(file.durationSeconds))}</td><td>${escapeHtml(formatBytes(file.size))}</td><td>${escapeHtml(chapterText)}</td><td>${escapeHtml(usage)}</td><td><form method="get" action="${escapeHtml(previewUrl)}" target="_blank"><button type="submit">Play one-minute preview</button></form></td></tr>`);
     }
   }
-  return rows.join('') || '<tr><td colspan="9">No media files are available from enabled folders.</td></tr>';
+  return rows.join('') || '<tr><td colspan="10">No media files are available from enabled folders.</td></tr>';
 }
 
 function formatBytes(bytes) {
@@ -2653,7 +2662,7 @@ app.post('/signup', (req, res) => {
   loggedIn.sessions.push({ token, userId: user.id, createdAt: nowIso(), expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 14).toISOString() });
   writeStore(loggedIn);
   res.setHeader('Set-Cookie', `${sessionCookieName}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax`);
-  res.redirect('/dashboard');
+  res.redirect('/dashboard?tab=profile');
 });
 
 app.post('/login', (req, res) => {
@@ -2728,7 +2737,7 @@ app.get('/dashboard', (req, res) => {
     user.notificationEmailReminder.lastShownAt = nowIso();
   }
   writeStore(store);
-  const activeTab = ['overview', 'account', 'media', 'schedule', 'profile', 'support', 'advanced'].includes(req.query.tab) ? req.query.tab : 'overview';
+  const activeTab = ['overview', 'media', 'encoders', 'destinations', 'schedule', 'profile', 'support', 'account', 'advanced'].includes(req.query.tab) ? req.query.tab : 'overview';
   const serverUrl = rtmpUrlFor(stream.streamKey);
   const watchUrl = watchUrlFor(stream);
   const shareUrl = tokenUrlFor(shareLink.token);
@@ -2738,11 +2747,11 @@ app.get('/dashboard', (req, res) => {
     { id: 'primary', name: 'Primary encoder', key: stream.streamKey, audioBitrate: stream.encoderSettings.audioBitrate, active: true },
     ...stream.encoderKeys
   ];
-  const encoderRows = encoders.map((encoder) => `<tr><td>${escapeHtml(encoder.name)}</td><td><code>${escapeHtml(encoder.key)}</code></td><td>${escapeHtml(encoder.audioBitrate || stream.encoderSettings.audioBitrate)}</td><td>${encoder.active === false ? 'disabled' : 'enabled'}</td><td><input readonly value="${escapeHtml(hlsUrlFor(encoder.key))}"></td></tr>`).join('');
-  const destinationRows = (stream.destinations || []).map((destination) => `<tr><td><input type="checkbox" form="destinationStateForm" name="destinationIds" value="${escapeHtml(destination.id)}"></td><td><input type="checkbox" form="destinationStateForm" name="enabledDestinations" value="${escapeHtml(destination.id)}" ${destination.enabled ? 'checked' : ''}></td><td>${escapeHtml(destination.name)}</td><td>${escapeHtml(destination.platform)}</td><td>${destination.connected ? 'connected' : 'manual setup'}</td><td><details><summary>Show manual RTMP</summary><code>${escapeHtml(destination.rtmpUrl)}</code></details></td><td><form method="post" action="/dashboard/destinations/${escapeHtml(destination.id)}/delete" data-confirm-kind="remove" data-confirm-message="Remove ${escapeHtml(destination.name)} from your destinations?"><button type="submit" class="danger">Remove</button></form></td></tr>`).join('');
+  const encoderRows = encoders.map((encoder) => `<tr><td>${escapeHtml(encoder.name)}</td><td><code>${escapeHtml(encoder.key)}</code></td><td>${escapeHtml(encoder.audioBitrate || stream.encoderSettings.audioBitrate)}</td><td>${escapeHtml(encoder.sampleRate || stream.encoderSettings.sampleRate || '48000')}</td><td>${encoder.active === false ? 'disabled' : 'enabled'}</td><td><input readonly value="${escapeHtml(hlsUrlFor(encoder.key))}"></td></tr>`).join('');
+  const destinationRows = (stream.destinations || []).map((destination) => `<tr><td><input type="checkbox" form="destinationStateForm" name="destinationIds" value="${escapeHtml(destination.id)}" aria-label="Select ${escapeHtml(destination.name)} for a bulk action"></td><td>${destination.enabled ? 'Live enabled' : 'Disabled'}</td><td>${escapeHtml(destination.name)}</td><td>${escapeHtml(destination.platform)}</td><td>${destination.connected ? 'connected' : 'manual setup'}</td><td><details><summary>Show manual RTMP</summary><code>${escapeHtml(destination.rtmpUrl)}</code></details></td><td><form method="post" action="/dashboard/destinations/${escapeHtml(destination.id)}/delete" data-confirm-kind="remove" data-confirm-message="Remove ${escapeHtml(destination.name)} from your destinations?"><button type="submit" class="danger">Remove destination</button></form><p class="muted">Removes this destination from your saved streaming targets.</p></td></tr>`).join('');
   const presetOptions = platformPresets.map((preset) => `<option value="${escapeHtml(preset.id)}" data-ingest="${escapeHtml(preset.ingest)}" data-connect="${escapeHtml(preset.connectUrl || preset.url || '')}" data-services="${escapeHtml((preset.services || []).join(', '))}">${escapeHtml(preset.name)}</option>`).join('');
   const selectedSource = stream.currentSource || null;
-  const relayRows = (stream.relaySources || []).map((source) => `<tr><td>${escapeHtml(source.label)}</td><td>${escapeHtml(source.mediaType)}</td><td><a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">Open URL</a></td><td><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/select" class="inline-form" data-confirm-kind="live" data-confirm-message="Start streaming ${escapeHtml(source.label)} now?"><button type="submit">Use</button></form><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/delete" class="inline-form" data-confirm-kind="remove" data-confirm-message="Remove ${escapeHtml(source.label)} from your media sources?"><button type="submit" class="danger">Remove</button></form></td></tr>`).join('');
+  const relayRows = (stream.relaySources || []).map((source) => `<tr><td>${escapeHtml(source.label)}</td><td>${escapeHtml(source.mediaType)}</td><td><a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">Open source URL</a></td><td><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/select" class="inline-form" data-confirm-kind="live" data-confirm-message="Start streaming ${escapeHtml(source.label)} now?"><button type="submit">Start streaming this source</button></form><p class="muted">Starts this URL relay immediately as the current stream source.</p><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/delete" class="inline-form" data-confirm-kind="remove" data-confirm-message="Remove ${escapeHtml(source.label)} from your media sources?"><button type="submit" class="danger">Remove relay source</button></form><p class="muted">Removes this saved URL relay source.</p></td></tr>`).join('');
   const queueRows = queuedSourceRows(stream, store);
   const activeSourceRunning = sourceProcesses.has(stream.id);
   const quickSourceCards = sourcePresetCards(stream, serverUrl);
@@ -2762,11 +2771,11 @@ app.get('/dashboard', (req, res) => {
 <div class="field-row"><label>Web embed code<input id="embedCode" readonly value="${escapeHtml(embedCode)}"></label><button type="button" data-copy-target="embedCode">Copy embed code</button></div>
 <p><button type="button" id="shareStream">Share stream link</button></p><p id="copyStatus" class="notice" role="status" aria-live="polite"></p>
 <form method="post" action="/dashboard/share/mastodon"><label>Optional Mastodon share text<textarea name="status" rows="3">${escapeHtml(`${stream.title}\n${shareUrl}`)}</textarea></label><button type="submit">Share on Mastodon</button></form>
-<form class="inline-form" method="post" action="/dashboard/stream/key"><input type="hidden" name="action" value="revoke"><button type="submit" class="danger" onclick="return confirm('This will revoke the current stream key and generate a new one. Existing encoder settings using the old key will stop working until you update them. Continue?')">Revoke and generate new key</button></form></section>
-<section><h2>Encoder keys</h2><table><tr><th>Name</th><th>Key</th><th>Audio bitrate</th><th>Status</th><th>HLS output</th></tr>${encoderRows}</table>
-<form method="post" action="/dashboard/encoders"><label>Encoder name<input name="name" placeholder="OBS Windows, Ecamm Mac, Audio Hijack"></label><label>Audio bitrate<select name="audioBitrate">${audioBitrates.map((rate) => `<option ${rate === stream.encoderSettings.audioBitrate ? 'selected' : ''}>${rate}</option>`).join('')}</select></label><button type="submit">Add encoder key</button></form></section>
-<section><h2>Destinations</h2><p class="muted">Use the provider setup link first when available. Manual RTMP fields are for custom destinations or services that do not expose a connected setup path yet. Destination rows can represent a service, a configured channel, or a subchannel supported through that service.</p><form id="destinationStateForm" method="post" action="/dashboard/destinations/enabled"><table><tr><th>Select</th><th>Live</th><th>Name or subchannel</th><th>Platform</th><th>Connection</th><th>Manual RTMP</th><th>Action</th></tr>${destinationRows || '<tr><td colspan="7">No destinations configured yet.</td></tr>'}</table><label>Apply action<select name="bulkAction"><option value="save">Save current live checkboxes</option><option value="enable-selected">Enable selected destinations</option><option value="disable-selected">Disable selected destinations</option><option value="enable-all">Enable all destinations</option><option value="disable-all">Disable all destinations</option></select></label><button type="submit">Apply destination choices</button></form>
-<form method="post" action="/dashboard/destinations" data-confirm-kind="add" data-confirm-message="Add this destination or subchannel to your stream settings?"><label>Platform<select id="platformPreset" name="platform">${presetOptions}</select></label><p id="destinationServices" class="muted"></p><p><a id="destinationConnectLink" class="button" href="#" target="_blank" rel="noopener noreferrer">Open service setup</a></p><label>Name<input name="name" placeholder="Main YouTube channel"></label><label>RTMP or RTMPS URL, manual destinations only<input id="destinationRtmpUrl" name="rtmpUrl"></label><label>Stream key, manual destinations only<input name="streamKey"></label><label><input type="checkbox" name="enabled" value="true" checked> Enable destination</label><button type="submit">Add destination</button></form></section>`;
+<form class="inline-form" method="post" action="/dashboard/stream/key"><input type="hidden" name="action" value="revoke"><button type="submit" class="danger" onclick="return confirm('This will revoke the current stream key and generate a new one. Existing encoder settings using the old key will stop working until you update them. Continue?')">Revoke and generate new key</button></form></section>`;
+  const encodersTab = `<section><h2>Encoder keys and settings</h2><p class="muted">Use encoder keys for OBS, Ecamm, Audio Hijack, Streamlabs, vMix, Larix, and other software that publishes to AAAStreamer. Each row shows the key, audio settings, current status, and HLS output created for that encoder.</p><table><tr><th>Name</th><th>Key</th><th>Audio bitrate</th><th>Sample rate</th><th>Status</th><th>HLS output</th></tr>${encoderRows}</table>
+<form method="post" action="/dashboard/encoders"><label>Encoder name<input name="name" placeholder="OBS Windows, Ecamm Mac, Audio Hijack"></label><label>Audio bitrate<select name="audioBitrate">${audioBitrates.map((rate) => `<option ${rate === stream.encoderSettings.audioBitrate ? 'selected' : ''}>${rate}</option>`).join('')}</select></label><button type="submit">Add encoder key for another app</button></form></section>`;
+  const destinationsTab = `<section><h2>Destinations</h2><p class="muted">Destinations are external services or subchannels that may receive your stream, such as YouTube, Restream, Twitch, or a custom RTMP target. Select rows, then choose whether to enable or disable them. Manual RTMP details stay hidden unless you open them.</p><form id="destinationStateForm" method="post" action="/dashboard/destinations/enabled"><table><tr><th>Select for bulk action</th><th>Live status</th><th>Name or subchannel</th><th>Platform</th><th>Connection</th><th>Manual RTMP</th><th>Action</th></tr>${destinationRows || '<tr><td colspan="7">No destinations configured yet.</td></tr>'}</table><label>Destination action<select name="bulkAction"><option value="enable-selected">Enable selected destinations</option><option value="disable-selected">Disable selected destinations</option><option value="enable-all">Enable all destinations</option><option value="disable-all">Disable all destinations</option></select></label><p class="muted">Enable means the destination is allowed to receive stream output. Disable leaves the destination saved but prevents it from going live.</p><button type="submit">Apply destination action</button></form>
+<form method="post" action="/dashboard/destinations" data-confirm-kind="add" data-confirm-message="Add this destination or subchannel to your stream settings?"><label>Platform<select id="platformPreset" name="platform">${presetOptions}</select></label><p id="destinationServices" class="muted"></p><p><a id="destinationConnectLink" class="button" href="#" target="_blank" rel="noopener noreferrer">Open service setup</a></p><label>Name<input name="name" placeholder="Main YouTube channel"></label><label>RTMP or RTMPS URL, manual destinations only<input id="destinationRtmpUrl" name="rtmpUrl"></label><label>Stream key, manual destinations only<input name="streamKey"></label><label><input type="checkbox" name="enabled" value="true" checked> Enable this destination after saving</label><button type="submit">Add destination or subchannel</button></form></section>`;
   const accountTab = `<section><h2>Account details</h2><form method="post" action="/dashboard/account"><label>Display name<input name="displayName" value="${escapeHtml(user.displayName || '')}"></label><label>Client ID or client email<input name="whmcsLookup" value="${escapeHtml(user.whmcsClientId || user.whmcsPortalEmail || '')}" placeholder="Client ID or email address"></label><p class="muted">When the client portal is configured, AAAStreamer looks up the matching client ID and client email automatically.</p><button type="submit">Save account details</button></form><p>Client ID: <strong>${escapeHtml(user.whmcsClientId || 'None')}</strong>. Client email: <strong>${escapeHtml(user.whmcsPortalEmail || 'None')}</strong>.</p></section>
 <section><h2>Notification email</h2><p class="muted">This email is used for account recovery reminders, stream notices, payment notices, and browser notification enrollment. Browser notifications follow the current domain in your browser.</p><form method="post" action="/dashboard/notification-settings"><label>Notification email<input name="notificationEmail" type="email" value="${escapeHtml(user.notificationEmail || '')}"></label><label><input type="checkbox" name="reminderEnabled" value="true" ${user.notificationEmailReminder?.enabled !== false ? 'checked' : ''}> Remind me if no notification email is configured</label><label>Reminder every number of logins<input name="everyLogins" type="number" min="1" max="30" value="${escapeHtml(user.notificationEmailReminder?.everyLogins || 3)}"></label><label>Reminder every number of days<input name="everyDays" type="number" min="1" max="180" value="${escapeHtml(user.notificationEmailReminder?.everyDays || 14)}"></label><button type="submit">Save notification settings</button></form></section>
 <section><h2>Action confirmations</h2><p class="muted">Confirmations help prevent accidental stream changes. The countdown appears before go-live actions so you can cancel before enabled destinations begin receiving a stream.</p><form method="post" action="/dashboard/confirmation-settings"><label><input type="checkbox" name="enabled" value="true" ${user.confirmationPreferences?.enabled !== false ? 'checked' : ''}> Show confirmations before stream actions</label><label><input type="checkbox" name="confirmGoingLive" value="true" ${user.confirmationPreferences?.confirmGoingLive !== false ? 'checked' : ''}> Confirm go-live or enable actions</label><label><input type="checkbox" name="confirmDisabling" value="true" ${user.confirmationPreferences?.confirmDisabling !== false ? 'checked' : ''}> Confirm disable actions</label><label><input type="checkbox" name="confirmAdding" value="true" ${user.confirmationPreferences?.confirmAdding !== false ? 'checked' : ''}> Confirm adding destinations or media sources</label><label><input type="checkbox" name="confirmRemoving" value="true" ${user.confirmationPreferences?.confirmRemoving !== false ? 'checked' : ''}> Confirm removing destinations or media sources</label><label>Go-live countdown seconds<input name="countdownSeconds" type="number" min="0" max="30" value="${escapeHtml(user.confirmationPreferences?.countdownSeconds ?? 5)}"></label><button type="submit">Save confirmation settings</button></form></section>
@@ -2776,10 +2785,10 @@ app.get('/dashboard', (req, res) => {
   const mediaTab = `<section><h2>Media management</h2><p>Current source: <strong>${escapeHtml(sourceSummary(selectedSource))}</strong>. Relay process: <strong>${activeSourceRunning ? 'running' : 'stopped'}</strong>.</p>
 <form method="post" action="/dashboard/media-settings"><div class="grid"><label><input type="checkbox" name="autoEnableUploads" value="true" ${behavior.autoEnableUploads ? 'checked' : ''}> Auto-enable new uploads</label><label><input type="checkbox" name="autoQueueUploads" value="true" ${behavior.autoQueueUploads ? 'checked' : ''}> Auto-add uploads to queue</label><label><input type="checkbox" name="autoRefreshMedia" value="true" ${behavior.autoRefreshMedia ? 'checked' : ''}> Auto-refresh media list</label><label>Enable delay after upload, seconds<input type="number" min="0" max="86400" name="uploadEnableDelaySeconds" value="${escapeHtml(behavior.uploadEnableDelaySeconds)}"></label><label>Playback action<select name="playbackMode"><option value="loop" ${behavior.playbackMode === 'loop' ? 'selected' : ''}>Auto loop continuously</option><option value="sequential" ${behavior.playbackMode === 'sequential' ? 'selected' : ''}>Play queue in order</option><option value="random" ${behavior.playbackMode === 'random' ? 'selected' : ''}>Random queue playback</option><option value="disabled" ${behavior.playbackMode === 'disabled' ? 'selected' : ''}>Stop or disable source relay</option></select></label><label>Fade in seconds<input type="range" min="0" max="30" step="1" name="fadeInSeconds" value="${escapeHtml(behavior.fadeInSeconds)}"></label><label>Fade out seconds<input type="range" min="0" max="30" step="1" name="fadeOutSeconds" value="${escapeHtml(behavior.fadeOutSeconds)}"></label><label>Crossfade target seconds<input type="range" min="0" max="30" step="1" name="crossfadeSeconds" value="${escapeHtml(behavior.crossfadeSeconds)}"></label></div><button type="submit">Save media settings</button></form>
 <section class="subsection"><h3>Quick source setup</h3><div class="preset-grid">${quickSourceCards}</div></section>
-<form method="post" action="/dashboard/sources/select" data-confirm-kind="live" data-confirm-message="Use the selected media for this stream?"><input type="hidden" name="sourceType" value="localMedia"><p><button type="button" id="checkAllMedia">Check all media</button><button type="button" id="uncheckAllMedia" class="secondary">Uncheck all media</button></p><table id="mediaCatalog"><tr><th>Select</th><th>Title</th><th>File name</th><th>Folder</th><th>Type</th><th>Duration</th><th>Size</th><th>Chapters</th><th>Preview</th></tr>${mediaCatalogCheckboxes(store, user, streamSources(stream))}</table><button type="submit">Use selected media</button></form>
+<form method="post" action="/dashboard/sources/select" data-confirm-kind="live" data-confirm-message="Start playing or queue the selected media for this stream?"><input type="hidden" name="sourceType" value="localMedia"><p><button type="button" id="checkAllMedia">Check all media</button><button type="button" id="uncheckAllMedia" class="secondary">Uncheck all media</button></p><table id="mediaCatalog"><tr><th>Select</th><th>Title</th><th>File name</th><th>Folder</th><th>Type</th><th>Duration</th><th>Size</th><th>Chapters</th><th>Use status</th><th>Preview</th></tr>${mediaCatalogCheckboxes(store, user, stream)}</table><p class="muted">Selected media becomes the current source or is added to the playback queue, depending on your media playback settings.</p><button type="submit">Start playing or queue selected media</button></form>
 <form method="post" action="/dashboard/sources/upload" data-confirm-kind="add" data-confirm-message="Upload and add the selected media files?"><label>Upload audio or video files<input id="mediaUpload" type="file" accept="audio/*,video/*" multiple></label><input type="hidden" id="mediaUploadData" name="uploadData"><label>Upload title<input name="uploadLabel" placeholder="Intro music, event replay, audio described movie"></label><button type="submit">Upload media</button></form>
 <form method="post" action="/dashboard/sources/url" data-confirm-kind="add" data-confirm-message="Add this URL relay source?"><input type="hidden" name="sourceType" value="urlRelay"><label>Relay label<input id="relayLabel" name="relayLabel" placeholder="Radio relay, remote event, training video"></label><label>Media type<select id="relayMediaType" name="relayMediaType"><option value="video">video</option><option value="audio">audio</option></select></label><label>HTTP or HTTPS media URL<input id="relayUrl" name="relayUrl" placeholder="https://example.com/stream.mp3"></label><button type="submit">Add URL relay source</button></form>
-<section class="subsection"><h3>Source queue</h3><table><tr><th>Name</th><th>Type</th><th>Source</th><th>Actions</th></tr>${queueRows || '<tr><td colspan="4">No queued sources. Upload or check media to build a playlist.</td></tr>'}</table><form method="post" action="/dashboard/sources/queue/clear" class="inline-form" data-confirm-kind="remove" data-confirm-message="Clear all queued media?"><button type="submit" class="danger">Clear queue</button></form><form method="post" action="/dashboard/sources/action" class="inline-form"><label>Relay action<select name="sourceAction"><option value="start">Start selected or queued media</option><option value="loop">Auto loop current source</option><option value="random">Random playback</option><option value="stop">Stop or disable source relay</option></select></label><button type="submit">Apply action</button></form></section>
+<section class="subsection"><h3>Source queue</h3><table><tr><th>Name</th><th>Type</th><th>Source</th><th>Actions</th></tr>${queueRows || '<tr><td colspan="4">No queued sources. Upload or check media to build a playlist.</td></tr>'}</table><form method="post" action="/dashboard/sources/queue/clear" class="inline-form" data-confirm-kind="remove" data-confirm-message="Clear all queued media?"><button type="submit" class="danger">Clear playback queue</button></form><p class="muted">Clears the queued list without deleting uploaded or server media.</p><form method="post" action="/dashboard/sources/action" class="inline-form"><label>Playback action<select name="sourceAction"><option value="start">Start playing selected or queued media now</option><option value="loop">Loop the current source continuously</option><option value="random">Play queued media in random order</option><option value="stop">Stop playback and disable source relay</option></select></label><button type="submit">Apply playback action</button></form><p class="muted">This changes what the stream plays now; media files stay in your library.</p></section>
 <table><tr><th>Name</th><th>Type</th><th>URL</th><th>Actions</th></tr>${relayRows || '<tr><td colspan="4">No URL relay sources configured.</td></tr>'}</table></section>`;
   const scheduleTab = `<section><h2>Calendar and scheduled shows</h2><p class="muted">Schedule a live encoder session or pre-created uploaded media. The internal scheduler checks active entries and starts media playback when the show is due.</p><form method="post" action="/dashboard/schedule"><label>Show title<input name="title" required></label><label>Start time<input type="datetime-local" name="startAt" required></label><label>End time<input type="datetime-local" name="endAt"></label><label>Show type<select name="mode"><option value="live">Live stream from encoder</option><option value="media">Pre-created uploaded or server media</option></select></label><label>Media source for pre-created show<select name="sourceId"><option value="">No media source</option>${streamSources(stream).map((source) => `<option value="${escapeHtml(source.id)}">${escapeHtml(sourceSummary(source))}</option>`).join('')}</select></label><label>Description<textarea name="description" rows="4"></textarea></label><button type="submit">Add scheduled show</button></form><table><tr><th>Show</th><th>Start</th><th>Type</th><th>Status</th><th>Actions</th></tr>${scheduleRows || '<tr><td colspan="5">No shows are scheduled yet.</td></tr>'}</table></section>`;
   const profileTab = `<section><h2>Stream profile</h2><form method="post" action="/dashboard/stream"><label>Title<input name="title" value="${escapeHtml(stream.title)}"></label><label>Description<textarea name="description" rows="4">${escapeHtml(stream.description || '')}</textarea></label><label>Links, one per line. Use Label|https://example.com<textarea name="links" rows="4">${escapeHtml(linksText(stream.links))}</textarea></label><label>Optional photo background<input id="backgroundUpload" type="file" accept="image/png,image/jpeg,image/webp"></label><input type="hidden" id="backgroundImageData" name="backgroundImageData"><label><input type="checkbox" name="removeBackground" value="true"> Remove current background</label><label>Visibility<select name="visibility"><option ${stream.visibility === 'public' ? 'selected' : ''}>public</option><option ${stream.visibility === 'unlisted' ? 'selected' : ''}>unlisted</option></select></label><label><input type="checkbox" name="allowComments" value="true" ${stream.allowComments ? 'checked' : ''}> Allow visitor comments</label><button type="submit">Save stream profile</button></form></section>
@@ -2787,7 +2796,7 @@ app.get('/dashboard', (req, res) => {
   const support = effectiveSupportSettings(stream, user, store.settings);
   const supportTab = `<section><h2>Support and payment box</h2><p class="muted">Admin streams use the configured default client when the stream field is blank. Linked user accounts use their stored client ID.</p><form method="post" action="/dashboard/support"><label><input type="checkbox" name="enabled" value="true" ${support.enabled ? 'checked' : ''}> Enable support box for this stream</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${support.showOnWatchPage ? 'checked' : ''}> Show support box on the visitor watch page</label><label>Placement<select name="placement"><option value="before" ${support.placement === 'before' ? 'selected' : ''}>Before stream player</option><option value="during" ${support.placement === 'during' ? 'selected' : ''}>Beside stream player area</option><option value="after" ${!['before', 'during'].includes(support.placement) ? 'selected' : ''}>After comments and stream details</option></select></label><label>Heading<input name="title" value="${escapeHtml(support.title || 'Support this stream')}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(support.description || '')}</textarea></label><label>PayPal URL<input name="paypalUrl" value="${escapeHtml(support.paypalUrl || '')}" placeholder="https://paypal.me/example"></label><label>Stripe payment link<input name="stripeUrl" value="${escapeHtml(support.stripeUrl || '')}" placeholder="https://buy.stripe.com/..."></label><label>Stripe Connect account ID<input name="stripeConnectAccountId" value="${escapeHtml(support.stripeConnectAccountId || '')}" placeholder="acct_..."></label><label>Client ID or client email for invoice payments<input name="whmcsLookup" value="${escapeHtml(support.whmcsClientId || user.whmcsClientId || user.whmcsPortalEmail || '')}" placeholder="${escapeHtml(user.role === 'admin' ? paymentSettings.whmcsDefaultClientId || 'Admin default not set' : user.whmcsClientId || 'Linked client ID or email')}"></label><label>Cash App URL<input name="cashAppUrl" value="${escapeHtml(support.cashAppUrl || '')}" placeholder="https://cash.app/$name"></label><label>Apple Pay or payment URL<input name="applePayUrl" value="${escapeHtml(support.applePayUrl || '')}" placeholder="https://example.com/apple-pay"></label><label>Payment notes<textarea name="paymentNotes" rows="3">${escapeHtml(support.paymentNotes || '')}</textarea></label><label>Payment or donation embed HTML<textarea name="embedHtml" rows="6">${escapeHtml(support.embedHtml || '')}</textarea></label><button type="submit">Save support settings</button></form>${renderSupportBox({ ...stream, support }, 'dashboard')}</section>`;
   const advancedTab = `<section><h2>Latency and buffer</h2><form method="post" action="/dashboard/latency"><label>Stream latency mode<select name="mode"><option value="low" ${stream.latencySettings.mode === 'low' ? 'selected' : ''}>Low latency</option><option value="balanced" ${stream.latencySettings.mode === 'balanced' ? 'selected' : ''}>Balanced</option><option value="stable" ${stream.latencySettings.mode === 'stable' ? 'selected' : ''}>Most stable</option></select></label><label>Target live latency, seconds<input name="targetLatencySeconds" type="number" min="2" max="30" step="0.5" value="${escapeHtml(stream.latencySettings.targetLatencySeconds)}"></label><label>Player buffer, seconds<input name="playerBufferSeconds" type="number" min="4" max="60" step="0.5" value="${escapeHtml(stream.latencySettings.playerBufferSeconds)}"></label><label>Reconnect buffer, seconds<input name="reconnectBufferSeconds" type="number" min="4" max="120" step="1" value="${escapeHtml(stream.latencySettings.reconnectBufferSeconds)}"></label><button type="submit">Save latency settings</button></form></section><section><h2>On-demand display</h2><form method="post" action="/dashboard/sources/ondemand"><label><input type="checkbox" name="enabled" value="true" ${stream.onDemand?.enabled ? 'checked' : ''}> Enable on-demand playback</label><label><input type="checkbox" name="showWhenOffline" value="true" ${stream.onDemand?.showWhenOffline ? 'checked' : ''}> Show to visitors when offline and selected media is available</label><label>On-demand title<input name="title" value="${escapeHtml(stream.onDemand?.title || '')}"></label><button type="submit">Save on-demand settings</button></form></section>`;
-  const selectedBody = { overview: overviewTab, account: accountTab, media: mediaTab, schedule: scheduleTab, profile: profileTab, support: supportTab, advanced: advancedTab }[activeTab];
+  const selectedBody = { overview: overviewTab, media: mediaTab, encoders: encodersTab, destinations: destinationsTab, schedule: scheduleTab, profile: profileTab, support: supportTab, account: accountTab, advanced: advancedTab }[activeTab];
   const body = `<h1>User panel</h1>${reminderHtml}${tabs}${selectedBody}<script>
 const copyStatus=document.getElementById('copyStatus');
 const confirmationPreferences=${JSON.stringify(user.confirmationPreferences || {})};
@@ -2862,7 +2871,7 @@ app.post('/dashboard/stream', requireUser, (req, res) => {
   stream.allowComments = req.body.allowComments === 'true';
   stream.updatedAt = nowIso();
   writeStore(store);
-  res.redirect('/dashboard');
+  res.redirect('/dashboard?tab=profile');
 });
 
 app.post('/dashboard/encoders', requireUser, (req, res) => {
@@ -2883,7 +2892,7 @@ app.post('/dashboard/encoders', requireUser, (req, res) => {
   stream.updatedAt = nowIso();
   store.events.push({ id: id('evt'), type: 'encoder_key_created', payload: { streamId: stream.id, encoderId: encoder.id, name: encoder.name }, createdAt: nowIso() });
   writeStore(store);
-  res.redirect('/dashboard');
+  res.redirect('/dashboard?tab=encoders');
 });
 
 app.post('/dashboard/destinations', requireUser, (req, res) => {
@@ -2893,7 +2902,7 @@ app.post('/dashboard/destinations', requireUser, (req, res) => {
   const preset = platformPresets.find((item) => item.id === req.body.platform) || platformPresets.at(-1);
   const rtmpUrl = String(req.body.rtmpUrl || preset.ingest || '').trim();
   if (!/^rtmps?:\/\//i.test(rtmpUrl)) {
-    res.status(400).send(page('Destination not saved', '<h1>Destination not saved</h1><p>Use an RTMP or RTMPS destination URL.</p><a class="button" href="/dashboard">Back to dashboard</a>', req.user));
+    res.status(400).send(page('Destination not saved', '<h1>Destination not saved</h1><p>Use an RTMP or RTMPS destination URL.</p><a class="button" href="/dashboard?tab=destinations">Back to destinations</a>', req.user));
     return;
   }
   stream.destinations.push({
@@ -2911,29 +2920,27 @@ app.post('/dashboard/destinations', requireUser, (req, res) => {
   stream.updatedAt = nowIso();
   store.events.push({ id: id('evt'), type: 'destination_added', payload: { streamId: stream.id, platform: preset.name }, createdAt: nowIso() });
   writeStore(store);
-  res.redirect('/dashboard');
+  res.redirect('/dashboard?tab=destinations');
 });
 
 app.post('/dashboard/destinations/enabled', requireUser, (req, res) => {
   const store = readStore();
   const stream = store.streams.find((item) => item.ownerId === req.user.id);
   if (stream) {
-    const bulkAction = String(req.body.bulkAction || 'save');
-    const enabledIds = new Set(bodyValues(req.body.enabledDestinations));
+    const bulkAction = String(req.body.bulkAction || 'enable-selected');
     const selectedIds = new Set(bodyValues(req.body.destinationIds));
     for (const destination of stream.destinations || []) {
       if (bulkAction === 'enable-all') destination.enabled = true;
       else if (bulkAction === 'disable-all') destination.enabled = false;
       else if (bulkAction === 'enable-selected' && selectedIds.has(destination.id)) destination.enabled = true;
       else if (bulkAction === 'disable-selected' && selectedIds.has(destination.id)) destination.enabled = false;
-      else if (bulkAction === 'save') destination.enabled = enabledIds.has(destination.id);
     }
     stream.updatedAt = nowIso();
     const enabledCount = (stream.destinations || []).filter((destination) => destination.enabled).length;
     store.events.push({ id: id('evt'), type: 'destination_enabled_state_updated', payload: { streamId: stream.id, action: bulkAction, selectedCount: selectedIds.size, enabledCount }, createdAt: nowIso() });
     writeStore(store);
   }
-  res.redirect('/dashboard');
+  res.redirect('/dashboard?tab=destinations');
 });
 
 app.post('/dashboard/destinations/:destinationId/delete', requireUser, (req, res) => {
@@ -2945,7 +2952,7 @@ app.post('/dashboard/destinations/:destinationId/delete', requireUser, (req, res
     store.events.push({ id: id('evt'), type: 'destination_removed', payload: { streamId: stream.id, destinationId: req.params.destinationId }, createdAt: nowIso() });
     writeStore(store);
   }
-  res.redirect('/dashboard');
+  res.redirect('/dashboard?tab=destinations');
 });
 
 app.post('/dashboard/sources/select', requireUser, (req, res) => {
@@ -2956,7 +2963,7 @@ app.post('/dashboard/sources/select', requireUser, (req, res) => {
     .map((localMedia) => sourceFromRequest({ ...req, body: { ...req.body, localMedia, sourceType: 'localMedia' } }, store, req.user))
     .filter(Boolean);
   if (!sources.length) {
-    res.status(400).send(page('Source not saved', '<h1>Source not saved</h1><p>Select a valid media file from an enabled folder.</p><a class="button" href="/dashboard">Back to dashboard</a>', req.user));
+    res.status(400).send(page('Source not saved', '<h1>Source not saved</h1><p>Select a valid media file from an enabled folder.</p><a class="button" href="/dashboard?tab=media">Back to media management</a>', req.user));
     return;
   }
   stream.sourceMode = 'media';
@@ -2965,7 +2972,7 @@ app.post('/dashboard/sources/select', requireUser, (req, res) => {
   stream.updatedAt = nowIso();
   store.events.push({ id: id('evt'), type: 'stream_source_selected', payload: { streamId: stream.id, sourceType: sources[0].type, label: sources[0].label, queued: Math.max(0, sources.length - 1) }, createdAt: nowIso() });
   writeStore(store);
-  res.redirect('/dashboard');
+  res.redirect('/dashboard?tab=media');
 });
 
 app.post('/dashboard/sources/url', requireUser, (req, res) => {
@@ -2974,7 +2981,7 @@ app.post('/dashboard/sources/url', requireUser, (req, res) => {
   const stream = ensureStreamForUser(store, user);
   const source = sourceFromRequest({ ...req, body: { ...req.body, sourceType: 'urlRelay' } }, store, req.user);
   if (!source) {
-    res.status(400).send(page('Relay source not saved', '<h1>Relay source not saved</h1><p>Use a valid HTTP or HTTPS media URL. URL relay must also be enabled by an admin.</p><a class="button" href="/dashboard">Back to dashboard</a>', req.user));
+    res.status(400).send(page('Relay source not saved', '<h1>Relay source not saved</h1><p>Use a valid HTTP or HTTPS media URL. URL relay must also be enabled by an admin.</p><a class="button" href="/dashboard?tab=media">Back to media management</a>', req.user));
     return;
   }
   stream.sourceMode = 'url';
@@ -2983,7 +2990,7 @@ app.post('/dashboard/sources/url', requireUser, (req, res) => {
   stream.updatedAt = nowIso();
   store.events.push({ id: id('evt'), type: 'url_relay_source_added', payload: { streamId: stream.id, label: source.label }, createdAt: nowIso() });
   writeStore(store);
-  res.redirect('/dashboard');
+  res.redirect('/dashboard?tab=media');
 });
 
 app.post('/dashboard/sources/upload', requireUser, (req, res) => {
@@ -3012,10 +3019,10 @@ app.post('/dashboard/sources/upload', requireUser, (req, res) => {
     store.events.push({ id: id('evt'), type: 'media_uploaded', payload: { streamId: stream.id, label: source.label, mediaType: source.mediaType, count: sources.length, queued: Math.max(0, sources.length - 1) }, createdAt: nowIso() });
     writeStore(store);
   } catch (error) {
-    res.status(400).send(page('Media upload failed', `<h1>Media upload failed</h1><p>${escapeHtml(error.message)}</p><a class="button" href="/dashboard">Back to dashboard</a>`, req.user));
+    res.status(400).send(page('Media upload failed', `<h1>Media upload failed</h1><p>${escapeHtml(error.message)}</p><a class="button" href="/dashboard?tab=media">Back to media management</a>`, req.user));
     return;
   }
-  res.redirect('/dashboard');
+  res.redirect('/dashboard?tab=media');
 });
 
 app.post('/dashboard/sources/queue/clear', requireUser, (req, res) => {
@@ -3027,7 +3034,7 @@ app.post('/dashboard/sources/queue/clear', requireUser, (req, res) => {
     store.events.push({ id: id('evt'), type: 'source_queue_cleared', payload: { streamId: stream.id }, createdAt: nowIso() });
     writeStore(store);
   }
-  res.redirect('/dashboard');
+  res.redirect('/dashboard?tab=media');
 });
 
 app.post('/dashboard/sources/queue/:sourceId/select', requireUser, (req, res) => {
@@ -3053,7 +3060,7 @@ app.post('/dashboard/sources/queue/:sourceId/select', requireUser, (req, res) =>
       }
     }
   }
-  res.redirect('/dashboard');
+  res.redirect('/dashboard?tab=media');
 });
 
 app.post('/dashboard/sources/queue/:sourceId/remove', requireUser, (req, res) => {
@@ -3064,7 +3071,7 @@ app.post('/dashboard/sources/queue/:sourceId/remove', requireUser, (req, res) =>
     store.events.push({ id: id('evt'), type: 'source_queue_removed', payload: { streamId: stream.id, sourceId: req.params.sourceId }, createdAt: nowIso() });
     writeStore(store);
   }
-  res.redirect('/dashboard');
+  res.redirect('/dashboard?tab=media');
 });
 
 app.post('/dashboard/sources/:sourceId/select', requireUser, (req, res) => {
@@ -3080,7 +3087,7 @@ app.post('/dashboard/sources/:sourceId/select', requireUser, (req, res) => {
     store.events.push({ id: id('evt'), type: 'url_relay_source_selected', payload: { streamId: stream.id, sourceId: source.id }, createdAt: nowIso() });
     writeStore(store);
   }
-  res.redirect('/dashboard');
+  res.redirect('/dashboard?tab=media');
 });
 
 app.post('/dashboard/sources/:sourceId/delete', requireUser, (req, res) => {
@@ -3094,7 +3101,7 @@ app.post('/dashboard/sources/:sourceId/delete', requireUser, (req, res) => {
     store.events.push({ id: id('evt'), type: 'url_relay_source_removed', payload: { streamId: stream.id, sourceId: req.params.sourceId }, createdAt: nowIso() });
     writeStore(store);
   }
-  res.redirect('/dashboard');
+  res.redirect('/dashboard?tab=media');
 });
 
 app.post('/dashboard/sources/ondemand', requireUser, (req, res) => {
@@ -3109,7 +3116,7 @@ app.post('/dashboard/sources/ondemand', requireUser, (req, res) => {
   stream.updatedAt = nowIso();
   store.events.push({ id: id('evt'), type: 'ondemand_settings_updated', payload: { streamId: stream.id, onDemand: stream.onDemand }, createdAt: nowIso() });
   writeStore(store);
-  res.redirect('/dashboard');
+  res.redirect('/dashboard?tab=media');
 });
 
 app.post('/dashboard/sources/start', requireUser, (req, res) => {
@@ -3131,12 +3138,12 @@ app.post('/dashboard/sources/start', requireUser, (req, res) => {
   try {
     startSourceProcess(stream, source, store);
   } catch (error) {
-    res.status(500).send(page('Source relay not started', `<h1>Source relay not started</h1><p>${escapeHtml(error.message)}</p><a class="button" href="/dashboard">Back to dashboard</a>`, req.user));
+    res.status(500).send(page('Source relay not started', `<h1>Source relay not started</h1><p>${escapeHtml(error.message)}</p><a class="button" href="/dashboard?tab=media">Back to media management</a>`, req.user));
     return;
   }
   store.events.push({ id: id('evt'), type: 'source_relay_started', payload: { streamId: stream.id, sourceType: source.type, label: source.label }, createdAt: nowIso() });
   writeStore(store);
-  res.redirect('/dashboard');
+  res.redirect('/dashboard?tab=media');
 });
 
 app.post('/dashboard/sources/stop', requireUser, (req, res) => {
@@ -3147,7 +3154,7 @@ app.post('/dashboard/sources/stop', requireUser, (req, res) => {
     store.events.push({ id: id('evt'), type: 'source_relay_stopped', payload: { streamId: stream.id, stopped }, createdAt: nowIso() });
     writeStore(store);
   }
-  res.redirect('/dashboard');
+  res.redirect('/dashboard?tab=media');
 });
 
 app.post('/dashboard/sources/action', requireUser, (req, res) => {
@@ -3209,7 +3216,7 @@ app.post('/dashboard/latency', requireUser, (req, res) => {
   stream.updatedAt = nowIso();
   store.events.push({ id: id('evt'), type: 'stream_latency_updated', payload: { streamId: stream.id, latencySettings: stream.latencySettings }, createdAt: nowIso() });
   writeStore(store);
-  res.redirect('/dashboard');
+  res.redirect('/dashboard?tab=advanced');
 });
 
 app.post('/dashboard/support', requireUser, async (req, res) => {
@@ -3246,7 +3253,7 @@ app.post('/dashboard/support', requireUser, async (req, res) => {
   stream.updatedAt = nowIso();
   store.events.push({ id: id('evt'), type: 'stream_support_updated', payload: { streamId: stream.id, enabled: stream.support.enabled, showOnWatchPage: stream.support.showOnWatchPage }, createdAt: nowIso() });
   writeStore(store);
-  res.redirect('/dashboard');
+  res.redirect('/dashboard?tab=support');
 });
 
 app.post('/dashboard/account', requireUser, async (req, res) => {
@@ -3607,7 +3614,7 @@ app.post('/dashboard/extra-content', requireUser, (req, res) => {
   stream.updatedAt = nowIso();
   store.events.push({ id: id('evt'), type: 'stream_extra_content_updated', payload: { streamId: stream.id, enabled: stream.extraContent.enabled, showOnWatchPage: stream.extraContent.showOnWatchPage }, createdAt: nowIso() });
   writeStore(store);
-  res.redirect('/dashboard');
+  res.redirect('/dashboard?tab=profile');
 });
 
 app.post('/dashboard/stream/key', requireUser, (req, res) => {
