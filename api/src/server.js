@@ -864,12 +864,17 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
     setStatus('Stream player ready.');
   } else if (window.Hls && Hls.isSupported()) {
     const hls = new Hls({
+      enableWorker: true,
       lowLatencyMode: false,
       liveSyncDuration: targetLatency,
+      liveMaxLatencyDuration: Math.max(targetLatency + playerBuffer, targetLatency * 2),
       maxLiveSyncPlaybackRate: 1.05,
       maxBufferLength: playerBuffer,
       maxMaxBufferLength: Math.max(playerBuffer * 2, 30),
       backBufferLength: Math.max(playerBuffer, 30),
+      maxBufferHole: 1.5,
+      nudgeOffset: 0.2,
+      nudgeMaxRetry: 5,
       fragLoadingMaxRetry: 8,
       fragLoadingRetryDelay: 1000,
       fragLoadingMaxRetryTimeout: reconnectDelay,
@@ -884,6 +889,7 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
       if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
       else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
     });
+    player.addEventListener('stalled', () => hls.startLoad());
     hls.loadSource(source);
     hls.attachMedia(player);
     player.addEventListener('waiting', () => setStatus('Buffering stream. Holding a little more audio for smooth playback.'));
@@ -1175,8 +1181,8 @@ function getGitRevision() {
   }
 }
 
-app.get('/healthz', (_req, res) => {
-  res.json({
+function healthPayload() {
+  return {
     ok: true,
     service: 'aaastreamer',
     version: appVersion,
@@ -1184,10 +1190,22 @@ app.get('/healthz', (_req, res) => {
     publicUrl: publicUrl || null,
     hlsBaseUrl: hlsBaseUrl || null,
     rtmpUrl: `rtmp://${rtmpHost}:1935/${rtmpAppName}`,
-  restreamEnabled: allowRestream,
+    restreamEnabled: allowRestream,
     adHocStreamsEnabled: allowAdHocStreams,
     voicelinkApiUrl: process.env.VOICELINK_API_URL || null
-  });
+  };
+}
+
+app.get('/healthz', (_req, res) => {
+  res.json(healthPayload());
+});
+
+app.get('/health', (_req, res) => {
+  res.json(healthPayload());
+});
+
+app.get('/api/health', (_req, res) => {
+  res.json(healthPayload());
 });
 
 app.get('/events', (req, res) => {
