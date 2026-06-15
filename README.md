@@ -46,7 +46,17 @@ management.
 
 ## What users can do now
 
-Admins can log in, create users, enable or disable public signups, set platform branding, configure guest and logged-in messaging, set support/payment-box defaults, choose which server media folders are available to streamers, review streams, set encoder defaults, tune latency and buffer defaults, and inspect recent publish, done, comment, and moderation events. Users can log in, copy their RTMP server URL and stream key, add extra encoder keys, bulk upload media, select or multi-select approved server media, queue media for continuous playback, add URL relay sources, save external destination details, tune stream latency and playback buffer, edit the stream profile, add a background image and links, configure an optional support/payment box, copy embed code, and open the public watch page for their stream. Visitors can open a stream page only when the creator is live or on-demand playback is enabled, watch HLS or on-demand playback, post live comments when messaging is enabled, and react to visible messages when reactions are enabled.
+Admins can log in, create users, enable or disable public signups, set platform branding, configure guest and logged-in messaging, set support/payment-box defaults, configure WHMCS and Stripe payment routing, choose which server media folders are available to streamers, review streams, set encoder defaults, tune latency and buffer defaults, and inspect recent publish, done, payment, comment, and moderation events. Users can log in, copy their RTMP server URL and stream key, add extra encoder keys, bulk upload media, select or multi-select approved server media, queue media for continuous playback, add URL relay sources, save external destination details, tune stream latency and playback buffer, edit the stream profile, add a background image and links, configure an optional support/payment box, add general embedded content, link PayPal/Stripe/Cash App/Apple Pay URLs, connect a Stripe account ID or WHMCS client ID, copy embed code, and open the public watch page for their stream. Visitors can open a stream page only when the creator is live or on-demand playback is enabled, watch HLS or on-demand playback, post live comments when messaging is enabled, react to visible messages when reactions are enabled, and start configured WHMCS invoice or Stripe Checkout support payments.
+
+## Payments and platform share
+
+AAAStreamer supports three payment paths:
+
+- Creator links and embeds: stream owners can add PayPal, Stripe Payment Link, Cash App, Apple Pay/payment URLs, notes, or trusted embed HTML.
+- WHMCS invoices: when `AAASTREAMER_WHMCS_*` environment variables are configured, the visitor support form can create a WHMCS invoice for the stream owner's WHMCS client ID or the platform default client ID.
+- Stripe Checkout and Connect: when `AAASTREAMER_STRIPE_SECRET_KEY` is configured, the visitor support form creates a Stripe Checkout Session. If the stream owner sets a Stripe Connect account ID, AAAStreamer creates a destination-charge style Checkout Session and applies the configured platform support share, defaulting to 15 percent, as the application fee. Stripe webhook updates require `AAASTREAMER_STRIPE_WEBHOOK_SECRET` and the callback URL `/api/payments/stripe/webhook`.
+
+Secrets must stay in environment variables or another server-side secret store. Do not store API secrets in the JSON data file or public docs.
 
 OBS settings for a user-created stream:
 

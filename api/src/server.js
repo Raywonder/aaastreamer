@@ -6,7 +6,14 @@ import path from 'path';
 
 const app = express();
 const uploadLimit = process.env.AAASTREAMER_UPLOAD_LIMIT || '75mb';
-app.use(express.json({ limit: uploadLimit }));
+app.use(express.json({
+  limit: uploadLimit,
+  verify(req, _res, buf) {
+    if (req.originalUrl === '/api/payments/stripe/webhook') {
+      req.rawBody = Buffer.from(buf);
+    }
+  }
+}));
 app.use(express.urlencoded({ extended: false, limit: uploadLimit }));
 app.use((err, _req, res, next) => {
   if (err?.type === 'entity.parse.failed' || err instanceof SyntaxError) {
@@ -29,6 +36,11 @@ const rtmpHost = process.env.AAASTREAMER_RTMP_HOST || 'localhost';
 const rtmpAppName = process.env.RTMP_APP_NAME || 'live';
 const requireSecret = process.env.AAASTREAMER_REQUIRE_SECRET === 'true';
 const sharedSecret = process.env.VOICELINK_SHARED_SECRET || '';
+const whmcsApiIdentifier = process.env.AAASTREAMER_WHMCS_API_IDENTIFIER || '';
+const whmcsApiSecret = process.env.AAASTREAMER_WHMCS_API_SECRET || '';
+const whmcsApiAccessKey = process.env.AAASTREAMER_WHMCS_API_ACCESS_KEY || '';
+const stripeSecretKey = process.env.AAASTREAMER_STRIPE_SECRET_KEY || '';
+const stripeWebhookSecret = process.env.AAASTREAMER_STRIPE_WEBHOOK_SECRET || '';
 const allowRestream = process.env.ALLOW_RESTREAM !== 'false';
 const allowAdHocStreams = process.env.AAASTREAMER_ALLOW_AD_HOC_STREAMS === 'true';
 const sessionCookieName = 'aaastreamer_session';
@@ -142,10 +154,12 @@ function ensureDataStore() {
       streams: [],
       comments: [],
       events: [],
+      payments: [],
       sessions: [],
       settings: {
         siteName: process.env.AAASTREAMER_SITE_NAME || 'AAAStreamer',
         platformBranding: defaultPlatformBranding(),
+        paymentIntegration: defaultPaymentIntegrationSettings(),
         visitorCommentsEnabled: true,
         messaging: defaultMessagingSettings(),
         supportDefaults: defaultSupportSettings(),
@@ -207,12 +221,72 @@ function defaultMessagingSettings() {
   };
 }
 
+function defaultPaymentIntegrationSettings() {
+  return {
+    currency: 'usd',
+    whmcsEnabled: Boolean(whmcsApiIdentifier && whmcsApiSecret),
+    whmcsUrl: process.env.AAASTREAMER_WHMCS_URL || 'https://devine-creations.com',
+    whmcsDefaultClientId: process.env.AAASTREAMER_WHMCS_DEFAULT_CLIENT_ID || '',
+    whmcsPaymentMethod: process.env.AAASTREAMER_WHMCS_PAYMENT_METHOD || '',
+    stripeEnabled: Boolean(stripeSecretKey),
+    defaultAmountCents: 500,
+    minimumAmountCents: 100,
+    platformStatement: 'A 15% platform support share helps cover hosting, storage, domains, bandwidth, and support.'
+  };
+}
+
+const accountRoles = [
+  { value: 'viewer', label: 'Viewer' },
+  { value: 'creator', label: 'Creator' },
+  { value: 'broadcaster', label: 'Broadcaster' },
+  { value: 'producer', label: 'Producer' },
+  { value: 'moderator', label: 'Moderator' },
+  { value: 'manager', label: 'Manager' },
+  { value: 'sponsor', label: 'Sponsor' },
+  { value: 'enterprise', label: 'Enterprise' },
+  { value: 'user', label: 'Standard user' },
+  { value: 'admin', label: 'Administrator' }
+];
+
+function normalizeRole(value, fallback = 'user') {
+  return accountRoles.some((role) => role.value === value) ? value : fallback;
+}
+
+function roleOptions(selected, includeAdmin = false) {
+  return accountRoles
+    .filter((role) => includeAdmin || role.value !== 'admin')
+    .map((role) => `<option value="${escapeHtml(role.value)}" ${role.value === selected ? 'selected' : ''}>${escapeHtml(role.label)}</option>`)
+    .join('');
+}
+
 function defaultSupportSettings() {
   return {
     enabled: false,
     showOnWatchPage: false,
     placement: 'after',
     title: 'Support this stream',
+    description: '',
+    embedHtml: '',
+    platformShareEnabled: true,
+    platformSharePercent: 15,
+    platformPaymentTitle: 'Support AAAStreamer hosting',
+    platformPaymentDescription: 'A 15% platform support share helps cover hosting, storage, domains, bandwidth, and support.',
+    platformPaymentEmbedHtml: '',
+    paypalUrl: '',
+    stripeUrl: '',
+    cashAppUrl: '',
+    applePayUrl: '',
+    stripeConnectAccountId: '',
+    whmcsClientId: '',
+    paymentNotes: ''
+  };
+}
+
+function defaultExtraContentSettings() {
+  return {
+    enabled: false,
+    showOnWatchPage: false,
+    title: 'Additional content',
     description: '',
     embedHtml: ''
   };
@@ -254,6 +328,7 @@ function normalizeStore(store) {
   store.streams ||= [];
   store.comments ||= [];
   store.events ||= [];
+  store.payments ||= [];
   store.sessions ||= [];
   store.settings ||= {};
   store.settings.siteName ||= process.env.AAASTREAMER_SITE_NAME || 'AAAStreamer';
@@ -262,13 +337,14 @@ function normalizeStore(store) {
   } else {
     store.settings.platformBranding = { ...defaultPlatformBranding(), ...store.settings.platformBranding };
   }
+  store.settings.paymentIntegration = { ...defaultPaymentIntegrationSettings(), ...(store.settings.paymentIntegration || {}) };
   store.settings.siteName = store.settings.platformBranding.platformName || store.settings.siteName;
   store.settings.visitorCommentsEnabled ??= true;
   store.settings.messaging = { ...defaultMessagingSettings(), ...(store.settings.messaging || {}) };
   store.settings.supportDefaults = { ...defaultSupportSettings(), ...(store.settings.supportDefaults || {}) };
   store.settings.mediaLibrary = normalizeMediaSettings(store.settings.mediaLibrary);
   store.settings.registrationsEnabled ??= process.env.AAASTREAMER_REGISTRATION_ENABLED === 'true';
-  store.settings.registrationDefaultRole ||= 'user';
+  store.settings.registrationDefaultRole = normalizeRole(store.settings.registrationDefaultRole || 'user');
   store.settings.encoderDefaults = { ...defaultEncoderSettings(), ...(store.settings.encoderDefaults || {}) };
   store.settings.updateManifestUrl ||= updateManifestUrl;
   store.settings.maintenanceMode ||= { enabled: false, message: '' };
@@ -284,6 +360,7 @@ function normalizeStream(stream) {
   stream.encoderSettings = { ...defaultEncoderSettings(), ...(stream.encoderSettings || {}) };
   stream.latencySettings = { ...defaultLatencySettings(), ...(stream.latencySettings || {}) };
   stream.support = { ...defaultSupportSettings(), ...(stream.support || {}) };
+  stream.extraContent = { ...defaultExtraContentSettings(), ...(stream.extraContent || {}) };
   stream.onDemand = {
     enabled: false,
     showWhenOffline: false,
@@ -703,6 +780,7 @@ function ensureStreamForUser(store, user, body = {}) {
     links: [],
     backgroundImage: '',
     support: { ...store.settings?.supportDefaults },
+    extraContent: defaultExtraContentSettings(),
     onDemand: { enabled: false, showWhenOffline: false, title: '' },
     sourceMode: 'rtmp',
     currentSource: null,
@@ -747,7 +825,7 @@ button.secondary,.button.secondary{background:#3d4651} button.danger{background:
 table{width:100%;border-collapse:collapse;margin-top:.75rem} th,td{border-bottom:1px solid #303944;text-align:left;padding:.6rem;vertical-align:top}
 video{width:100%;max-height:65vh;background:black}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem}.muted{color:#b8c1ca}.status-live{color:#7dff9b}.status-offline,.status-ended{color:#ffbd7d}
 .comments{max-height:22rem;overflow:auto;border:1px solid #303944;padding:.75rem;background:#0c0f12}.comment{border-bottom:1px solid #28303a;padding:.45rem 0}
-.reaction-list{display:flex;gap:.4rem;flex-wrap:wrap;margin:.35rem 0}.reaction-list button{padding:.3rem .45rem;background:#26313d}.message-meta{font-size:.92rem;color:#b8c1ca}.support-box iframe{max-width:100%;border:0}.support-box form{margin:.5rem 0}
+.reaction-list{display:flex;gap:.4rem;flex-wrap:wrap;margin:.35rem 0}.reaction-list button{padding:.3rem .45rem;background:#26313d}.message-meta{font-size:.92rem;color:#b8c1ca}.support-box iframe,.extra-content-box iframe,.embed-content iframe{max-width:100%;border:0}.support-box form{margin:.5rem 0}.extra-content-box summary{cursor:pointer;font-weight:bold}
 .field-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.5rem;align-items:end;margin:.75rem 0}.field-row label{margin:0}.inline-form{display:inline}.notice{margin:.75rem 0;color:#d7ecff}.link-list{padding-left:1.25rem}.public-hero{background-size:cover;background-position:center;border-radius:6px;padding:1rem;border:1px solid #303944}
 .subsection{background:#121820}.preset-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:.75rem}.preset-card{border:1px solid #3a4654;border-radius:6px;padding:.85rem;background:#0c0f12}.preset-card h3{margin-top:0}
 </style>
@@ -761,13 +839,129 @@ function escapeHtml(value) {
   }[char]));
 }
 
+function isSafeUrl(value) {
+  return /^https?:\/\//i.test(String(value || '').trim());
+}
+
+function safeUrl(value) {
+  const url = String(value || '').trim().slice(0, 800);
+  return isSafeUrl(url) ? url : '';
+}
+
+function centsFromAmount(value, fallback = 500) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.max(50, Math.round(numeric * 100));
+}
+
+function formatMoney(cents, currency = 'usd') {
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: String(currency || 'usd').toUpperCase() }).format(Number(cents || 0) / 100);
+}
+
+function paymentIntegrationReady(settings) {
+  return {
+    stripe: Boolean(settings?.stripeEnabled && stripeSecretKey),
+    stripeWebhook: Boolean(stripeWebhookSecret),
+    whmcs: Boolean(settings?.whmcsEnabled && settings?.whmcsUrl && whmcsApiIdentifier && whmcsApiSecret)
+  };
+}
+
+async function postForm(url, data, headers = {}) {
+  const body = new URLSearchParams();
+  Object.entries(data).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') body.append(key, String(value));
+  });
+  const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...headers }, body });
+  const text = await response.text();
+  let json = null;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    json = null;
+  }
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${text.slice(0, 200)}`);
+  }
+  return json || { raw: text };
+}
+
+async function callWhmcsApi(settings, action, params = {}) {
+  const base = String(settings.whmcsUrl || '').replace(/\/+$/, '');
+  if (!base || !whmcsApiIdentifier || !whmcsApiSecret) {
+    throw new Error('WHMCS API is not configured.');
+  }
+  const payload = {
+    action,
+    identifier: whmcsApiIdentifier,
+    secret: whmcsApiSecret,
+    responsetype: 'json',
+    ...params
+  };
+  if (whmcsApiAccessKey) payload.accesskey = whmcsApiAccessKey;
+  const result = await postForm(`${base}/includes/api.php`, payload);
+  if (String(result.result || '').toLowerCase() !== 'success') {
+    throw new Error(result.message || `WHMCS ${action} failed.`);
+  }
+  return result;
+}
+
+async function createStripeCheckoutSession({ stream, support, settings, amountCents, description, successUrl, cancelUrl }) {
+  if (!stripeSecretKey) throw new Error('Stripe secret key is not configured.');
+  const platformSharePercent = clampNumber(support.platformSharePercent, 0, 100, 15);
+  const applicationFeeAmount = support.platformShareEnabled && support.stripeConnectAccountId
+    ? Math.round(amountCents * platformSharePercent / 100)
+    : 0;
+  const data = {
+    mode: 'payment',
+    success_url: successUrl,
+    cancel_url: cancelUrl,
+    'line_items[0][quantity]': 1,
+    'line_items[0][price_data][currency]': settings.currency || 'usd',
+    'line_items[0][price_data][unit_amount]': amountCents,
+    'line_items[0][price_data][product_data][name]': support.title || `Support ${stream.title}`,
+    'line_items[0][price_data][product_data][description]': description,
+    'metadata[aaastreamer_stream_id]': stream.id,
+    'metadata[aaastreamer_stream_slug]': stream.slug,
+    'metadata[aaastreamer_platform_share_percent]': support.platformShareEnabled ? platformSharePercent : 0
+  };
+  if (support.stripeConnectAccountId) {
+    data['payment_intent_data[transfer_data][destination]'] = support.stripeConnectAccountId;
+    if (applicationFeeAmount > 0) {
+      data['payment_intent_data[application_fee_amount]'] = applicationFeeAmount;
+    }
+  }
+  const result = await postForm('https://api.stripe.com/v1/checkout/sessions', data, {
+    Authorization: `Bearer ${stripeSecretKey}`,
+    'Stripe-Version': '2026-02-25.clover'
+  });
+  if (!result.url || !result.id) throw new Error('Stripe did not return a checkout URL.');
+  return { session: result, platformFeeCents: applicationFeeAmount };
+}
+
+function verifyStripeSignature(req) {
+  if (!stripeWebhookSecret) return false;
+  const header = req.get('stripe-signature') || '';
+  const parts = Object.fromEntries(header.split(',').map((part) => {
+    const [key, value] = part.split('=');
+    return [key, value];
+  }));
+  if (!parts.t || !parts.v1 || !req.rawBody) return false;
+  const signedPayload = `${parts.t}.${req.rawBody.toString('utf8')}`;
+  const expected = crypto.createHmac('sha256', stripeWebhookSecret).update(signedPayload).digest('hex');
+  try {
+    return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(parts.v1));
+  } catch {
+    return false;
+  }
+}
+
 function parseLinks(raw) {
   return String(raw || '').split(/\r?\n/).map((line) => {
     const trimmed = line.trim();
     if (!trimmed) return null;
     const [label, ...urlParts] = trimmed.includes('|') ? trimmed.split('|') : ['', trimmed];
     const url = urlParts.join('|').trim();
-    if (!/^https?:\/\//i.test(url)) return null;
+    if (!isSafeUrl(url)) return null;
     return { id: id('lnk'), label: (label || url).trim().slice(0, 80), url: url.slice(0, 500) };
   }).filter(Boolean).slice(0, 12);
 }
@@ -788,6 +982,7 @@ function adminTabs(active) {
     ['signups', 'Signups'],
     ['branding', 'Branding'],
     ['messaging', 'Messaging'],
+    ['payments', 'Payments'],
     ['media', 'Media sources'],
     ['encoders', 'Encoder settings'],
     ['updater', 'Updater']
@@ -806,8 +1001,43 @@ function renderSupportBox(stream, context = 'watch') {
   const support = { ...defaultSupportSettings(), ...(stream.support || {}) };
   if (!support.enabled) return '';
   if (context === 'watch' && !support.showOnWatchPage) return '';
+  const store = readStore();
+  const paymentSettings = store.settings.paymentIntegration || defaultPaymentIntegrationSettings();
+  const readiness = paymentIntegrationReady(paymentSettings);
   const embed = sanitizeSupportEmbed(support.embedHtml);
-  return `<section class="support-box"><h2>${escapeHtml(support.title || 'Support this stream')}</h2>${support.description ? `<p>${escapeHtml(support.description)}</p>` : ''}${embed ? `<div>${embed}</div>` : '<p class="muted">Support details are not configured yet.</p>'}</section>`;
+  const paymentLinks = [
+    ['PayPal', support.paypalUrl],
+    ['Stripe', support.stripeUrl],
+    ['Cash App', support.cashAppUrl],
+    ['Apple Pay', support.applePayUrl]
+  ].filter(([, url]) => isSafeUrl(url));
+  const paymentLinksHtml = paymentLinks.length
+    ? `<ul class="link-list">${paymentLinks.map(([label, url]) => `<li><a href="${escapeHtml(url)}" rel="noopener noreferrer" target="_blank">${escapeHtml(label)}</a></li>`).join('')}</ul>`
+    : '';
+  const paymentNotes = support.paymentNotes ? `<p>${escapeHtml(support.paymentNotes)}</p>` : '';
+  const platformEmbed = sanitizeSupportEmbed(support.platformPaymentEmbedHtml);
+  const platformSharePercent = clampNumber(support.platformSharePercent, 0, 100, 15);
+  const creatorPayment = embed || paymentLinksHtml || paymentNotes
+    ? `<section class="subsection"><h3>Creator payment method</h3>${paymentNotes}${paymentLinksHtml}${embed ? `<div>${embed}</div>` : ''}</section>`
+    : '<p class="muted">Creator payment details are not configured yet.</p>';
+  const platformPayment = support.platformShareEnabled
+    ? `<section class="subsection"><h3>${escapeHtml(support.platformPaymentTitle || 'Platform support')}</h3><p>${escapeHtml(support.platformPaymentDescription || `A ${platformSharePercent}% platform support share helps cover hosting and service costs.`)}</p><p class="muted">Platform share: ${escapeHtml(platformSharePercent)}%.</p>${platformEmbed ? `<div>${platformEmbed}</div>` : '<p class="muted">Platform payment details are not configured yet.</p>'}</section>`
+    : '';
+  const integratedPayment = context === 'watch' && (readiness.stripe || readiness.whmcs)
+    ? `<form class="integrated-payment" data-support-payment="${escapeHtml(stream.id)}"><h3>Send support payment</h3><label>Amount, ${escapeHtml(String(paymentSettings.currency || 'usd').toUpperCase())}<input name="amount" inputmode="decimal" value="${escapeHtml((Number(paymentSettings.defaultAmountCents || 500) / 100).toFixed(2))}"></label><label>Payment method<select name="provider">${readiness.stripe ? '<option value="stripe">Card, wallet, or Stripe Checkout</option>' : ''}${readiness.whmcs ? '<option value="whmcs">WHMCS invoice or client payment</option>' : ''}</select></label><button type="submit">Continue to payment</button><p class="muted" data-payment-status></p></form>`
+    : '';
+  return `<section class="support-box"><h2>${escapeHtml(support.title || 'Support this stream')}</h2>${support.description ? `<p>${escapeHtml(support.description)}</p>` : ''}${integratedPayment}${creatorPayment}${platformPayment}</section>`;
+}
+
+function renderExtraContentBox(stream, context = 'watch') {
+  const extra = { ...defaultExtraContentSettings(), ...(stream.extraContent || {}) };
+  if (!extra.enabled) return '';
+  if (context === 'watch' && !extra.showOnWatchPage) return '';
+  const embed = sanitizeSupportEmbed(extra.embedHtml);
+  const title = escapeHtml(extra.title || 'Additional content');
+  const description = extra.description ? `<p>${escapeHtml(extra.description)}</p>` : '';
+  const content = embed ? `<div class="embed-content">${embed}</div>` : '<p class="muted">No additional embedded content is configured yet.</p>';
+  return `<details class="extra-content-box"><summary>${title}</summary>${description}${content}</details>`;
 }
 
 function embedCodeFor(stream) {
@@ -1237,7 +1467,7 @@ app.get('/media/:folderId/*', (req, res) => {
 app.use((req, res, next) => {
   const store = readStore();
   const maintenance = store.settings.maintenanceMode || {};
-  const allowedPrefixes = ['/login', '/logout', '/admin', '/events', '/healthz', '/api/admin/update'];
+  const allowedPrefixes = ['/login', '/logout', '/admin', '/events', '/healthz', '/api/admin/update', '/api/payments'];
   if (!maintenance.enabled || allowedPrefixes.some((prefix) => req.path.startsWith(prefix))) {
     next();
     return;
@@ -1285,7 +1515,7 @@ app.get('/s/:slug', (req, res) => {
 <p>Status: <strong class="status-${escapeHtml(stream.status)}">${escapeHtml(playableStatus)}</strong></p>
 ${supportBefore}
 ${renderPlaybackPlayer(playbackUrl, stream)}${supportDuring}</div>
-<section><h2>About this stream</h2><p>${escapeHtml(stream.description || 'No description yet.')}</p><h3>Links</h3>${renderLinks(stream.links)}</section>
+<section><h2>About this stream</h2><p>${escapeHtml(stream.description || 'No description yet.')}</p>${renderExtraContentBox(stream, 'watch')}<h3>Links</h3>${renderLinks(stream.links)}</section>
 <section><h2>Live comments</h2><div id="comments" class="comments">${comments.map((comment) => renderComment(comment, messaging.reactionsEnabled)).join('')}</div>
 ${canComment ? `<form id="commentForm"><label>Name<input name="authorName" ${user ? `value="${escapeHtml(user.displayName || user.username)}" readonly` : 'required'}></label><label>Message type<select name="messageType"><option value="comment">Comment</option><option value="question">Question</option><option value="support">Support message</option></select></label><label>Comment<textarea name="message" required rows="3" maxlength="${escapeHtml(messaging.maxMessageLength || 1000)}"></textarea></label><button type="submit">Post comment</button></form>` : '<p>Comments are disabled for this stream or account type.</p>'}</section>
 ${supportAfter}
@@ -1297,6 +1527,7 @@ events.onmessage=(event)=>{try{const msg=JSON.parse(event.data); if(msg.type==='
 const form=document.getElementById('commentForm');
 if(form){form.addEventListener('submit', async (e)=>{e.preventDefault(); const data=Object.fromEntries(new FormData(form)); const res=await fetch('/api/streams/'+streamId+'/comments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}); if(res.ok) form.reset();});}
 document.addEventListener('click', async (event)=>{const button=event.target.closest('[data-reaction]'); if(!button)return; const commentId=button.dataset.commentId; const reaction=button.dataset.reaction; const res=await fetch('/api/comments/'+commentId+'/reactions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({streamId,reaction})}); if(res.ok){const data=await res.json(); const target=document.getElementById('reactions-'+commentId); if(target) target.innerHTML=data.html;}});
+document.querySelectorAll('[data-support-payment]').forEach((paymentForm)=>paymentForm.addEventListener('submit',async(event)=>{event.preventDefault(); const status=paymentForm.querySelector('[data-payment-status]'); if(status) status.textContent='Creating payment link.'; const data=Object.fromEntries(new FormData(paymentForm)); try{const res=await fetch('/api/streams/'+paymentForm.dataset.supportPayment+'/support-payments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}); const payload=await res.json(); if(!res.ok||!payload.success) throw new Error(payload.error||'Payment could not be started.'); if(status) status.textContent='Opening payment page.'; window.location.href=payload.url;}catch(error){if(status) status.textContent=error.message||'Payment could not be started.';}}));
 </script>`;
   res.send(page(stream.title, body, user));
 });
@@ -1339,7 +1570,7 @@ app.get('/signup', (req, res) => {
     res.status(404).send(page('Signups closed', '<h1>Signups closed</h1><p>New account signups are not enabled on this server.</p>', currentUser(req)));
     return;
   }
-  res.send(page('Sign up', `<h1>Create your AAAStreamer account</h1><form method="post" action="/signup"><label>Username<input name="username" autocomplete="username" required></label><label>Display name<input name="displayName"></label><label>Password<input name="password" type="password" autocomplete="new-password" required minlength="8"></label><button type="submit">Create account</button></form>`, null));
+  res.send(page('Sign up', `<h1>Create your AAAStreamer account</h1><form method="post" action="/signup"><label>Username<input name="username" autocomplete="username" required></label><label>Display name<input name="displayName"></label><label>Account type<select name="role">${roleOptions(store.settings.registrationDefaultRole || 'user', false)}</select></label><label>Password<input name="password" type="password" autocomplete="new-password" required minlength="8"></label><button type="submit">Create account</button></form>`, null));
 });
 
 app.post('/signup', (req, res) => {
@@ -1363,7 +1594,7 @@ app.post('/signup', (req, res) => {
     id: id('usr'),
     username,
     displayName: String(req.body.displayName || username).trim().slice(0, 80) || username,
-    role: store.settings.registrationDefaultRole === 'admin' ? 'admin' : 'user',
+    role: normalizeRole(req.body.role || store.settings.registrationDefaultRole, 'user') === 'admin' ? 'user' : normalizeRole(req.body.role || store.settings.registrationDefaultRole, 'user'),
     passwordHash: hashPassword(password),
     streamKey: id('sk'),
     active: true,
@@ -1466,7 +1697,8 @@ app.get('/dashboard', (req, res) => {
 </section>
 <section><h2>Latency and buffer</h2><form method="post" action="/dashboard/latency"><label>Stream latency mode<select name="mode"><option value="low" ${stream.latencySettings.mode === 'low' ? 'selected' : ''}>Low latency</option><option value="balanced" ${stream.latencySettings.mode === 'balanced' ? 'selected' : ''}>Balanced</option><option value="stable" ${stream.latencySettings.mode === 'stable' ? 'selected' : ''}>Most stable</option></select></label><label>Target live latency, seconds<input name="targetLatencySeconds" type="number" min="2" max="30" step="0.5" value="${escapeHtml(stream.latencySettings.targetLatencySeconds)}"></label><label>Player buffer, seconds<input name="playerBufferSeconds" type="number" min="4" max="60" step="0.5" value="${escapeHtml(stream.latencySettings.playerBufferSeconds)}"></label><label>Reconnect buffer, seconds<input name="reconnectBufferSeconds" type="number" min="4" max="120" step="1" value="${escapeHtml(stream.latencySettings.reconnectBufferSeconds)}"></label><button type="submit">Save latency settings</button></form><p class="muted">Lower latency reacts faster but needs a stable network. Higher buffer values reduce stalls for mobile or busy networks.</p></section>
 <section><h2>Stream profile</h2><form method="post" action="/dashboard/stream"><label>Title<input name="title" value="${escapeHtml(stream.title)}"></label><label>Description<textarea name="description" rows="4">${escapeHtml(stream.description || '')}</textarea></label><label>Links, one per line. Use Label|https://example.com<textarea name="links" rows="4">${escapeHtml(linksText(stream.links))}</textarea></label><label>Optional photo background<input id="backgroundUpload" type="file" accept="image/png,image/jpeg,image/webp"></label><input type="hidden" id="backgroundImageData" name="backgroundImageData"><label><input type="checkbox" name="removeBackground" value="true"> Remove current background</label><label>Visibility<select name="visibility"><option ${stream.visibility === 'public' ? 'selected' : ''}>public</option><option ${stream.visibility === 'unlisted' ? 'selected' : ''}>unlisted</option></select></label><label><input type="checkbox" name="allowComments" value="true" ${stream.allowComments ? 'checked' : ''}> Allow visitor comments</label><button type="submit">Save stream profile</button></form></section>
-<section><h2>Support and payment box</h2><p class="muted">Add trusted donation or payment embed HTML for this stream. It is not shown to visitors unless both enabled and shown on the watch page are checked.</p><form method="post" action="/dashboard/support"><label><input type="checkbox" name="enabled" value="true" ${stream.support?.enabled ? 'checked' : ''}> Enable support box for this stream</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${stream.support?.showOnWatchPage ? 'checked' : ''}> Show support box on the visitor watch page</label><label>Placement<select name="placement"><option value="before" ${stream.support?.placement === 'before' ? 'selected' : ''}>Before stream player</option><option value="during" ${stream.support?.placement === 'during' ? 'selected' : ''}>Beside stream player area</option><option value="after" ${!['before', 'during'].includes(stream.support?.placement) ? 'selected' : ''}>After comments and stream details</option></select></label><label>Heading<input name="title" value="${escapeHtml(stream.support?.title || 'Support this stream')}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(stream.support?.description || '')}</textarea></label><label>Payment or donation embed HTML<textarea name="embedHtml" rows="6">${escapeHtml(stream.support?.embedHtml || '')}</textarea></label><button type="submit">Save support settings</button></form>${renderSupportBox(stream, 'dashboard')}</section>
+<details class="panel"><summary>Extra embedded content</summary><p class="muted">Add general embedded content next to the stream description. This can be WHMCS client login, a calendar, a store widget, a form, sponsor content, or anything else the stream owner needs. Custom installs start blank until configured.</p><form method="post" action="/dashboard/extra-content"><label><input type="checkbox" name="enabled" value="true" ${stream.extraContent?.enabled ? 'checked' : ''}> Enable extra embedded content</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${stream.extraContent?.showOnWatchPage ? 'checked' : ''}> Show on visitor stream page</label><label>Heading<input name="title" value="${escapeHtml(stream.extraContent?.title || 'Additional content')}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(stream.extraContent?.description || '')}</textarea></label><label>Embed HTML<textarea name="embedHtml" rows="8">${escapeHtml(stream.extraContent?.embedHtml || '')}</textarea></label><button type="submit">Save extra content</button></form>${renderExtraContentBox(stream, 'dashboard')}</details>
+<section><h2>Support and payment box</h2><p class="muted">Add creator payment links, trusted payment embed HTML, or connected payment identifiers. Stripe Connect account IDs allow integrated checkout to send the creator portion to the creator and keep the configured platform support share.</p><form method="post" action="/dashboard/support"><label><input type="checkbox" name="enabled" value="true" ${stream.support?.enabled ? 'checked' : ''}> Enable support box for this stream</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${stream.support?.showOnWatchPage ? 'checked' : ''}> Show support box on the visitor watch page</label><label>Placement<select name="placement"><option value="before" ${stream.support?.placement === 'before' ? 'selected' : ''}>Before stream player</option><option value="during" ${stream.support?.placement === 'during' ? 'selected' : ''}>Beside stream player area</option><option value="after" ${!['before', 'during'].includes(stream.support?.placement) ? 'selected' : ''}>After comments and stream details</option></select></label><label>Heading<input name="title" value="${escapeHtml(stream.support?.title || 'Support this stream')}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(stream.support?.description || '')}</textarea></label><label>PayPal URL<input name="paypalUrl" value="${escapeHtml(stream.support?.paypalUrl || '')}" placeholder="https://paypal.me/example"></label><label>Stripe payment link<input name="stripeUrl" value="${escapeHtml(stream.support?.stripeUrl || '')}" placeholder="https://buy.stripe.com/..."></label><label>Stripe Connect account ID<input name="stripeConnectAccountId" value="${escapeHtml(stream.support?.stripeConnectAccountId || '')}" placeholder="acct_..."></label><label>WHMCS client ID for invoice payments<input name="whmcsClientId" value="${escapeHtml(stream.support?.whmcsClientId || '')}" inputmode="numeric"></label><label>Cash App URL<input name="cashAppUrl" value="${escapeHtml(stream.support?.cashAppUrl || '')}" placeholder="https://cash.app/$name"></label><label>Apple Pay or payment URL<input name="applePayUrl" value="${escapeHtml(stream.support?.applePayUrl || '')}" placeholder="https://example.com/apple-pay"></label><label>Payment notes<textarea name="paymentNotes" rows="3">${escapeHtml(stream.support?.paymentNotes || '')}</textarea></label><label>Payment or donation embed HTML<textarea name="embedHtml" rows="6">${escapeHtml(stream.support?.embedHtml || '')}</textarea></label><button type="submit">Save support settings</button></form>${renderSupportBox(stream, 'dashboard')}</section>
 <script>
 const copyStatus=document.getElementById('copyStatus');
 function setCopyStatus(message){copyStatus.textContent=message;}
@@ -1792,16 +2024,46 @@ app.post('/dashboard/support', requireUser, (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
   const stream = ensureStreamForUser(store, user);
+  const existingSupport = { ...defaultSupportSettings(), ...(stream.support || {}) };
   stream.support = {
     enabled: req.body.enabled === 'true',
     showOnWatchPage: req.body.showOnWatchPage === 'true',
     placement: ['before', 'during', 'after'].includes(req.body.placement) ? req.body.placement : 'after',
     title: String(req.body.title || 'Support this stream').trim().slice(0, 120) || 'Support this stream',
     description: String(req.body.description || '').trim().slice(0, 1000),
-    embedHtml: sanitizeSupportEmbed(req.body.embedHtml)
+    embedHtml: sanitizeSupportEmbed(req.body.embedHtml),
+    platformShareEnabled: existingSupport.platformShareEnabled,
+    platformSharePercent: existingSupport.platformSharePercent,
+    platformPaymentTitle: existingSupport.platformPaymentTitle,
+    platformPaymentDescription: existingSupport.platformPaymentDescription,
+    platformPaymentEmbedHtml: existingSupport.platformPaymentEmbedHtml,
+    paypalUrl: safeUrl(req.body.paypalUrl),
+    stripeUrl: safeUrl(req.body.stripeUrl),
+    cashAppUrl: safeUrl(req.body.cashAppUrl),
+    applePayUrl: safeUrl(req.body.applePayUrl),
+    stripeConnectAccountId: String(req.body.stripeConnectAccountId || '').trim().slice(0, 120),
+    whmcsClientId: String(req.body.whmcsClientId || '').trim().replace(/[^0-9]/g, '').slice(0, 20),
+    paymentNotes: String(req.body.paymentNotes || '').trim().slice(0, 1000)
   };
   stream.updatedAt = nowIso();
   store.events.push({ id: id('evt'), type: 'stream_support_updated', payload: { streamId: stream.id, enabled: stream.support.enabled, showOnWatchPage: stream.support.showOnWatchPage }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/dashboard');
+});
+
+app.post('/dashboard/extra-content', requireUser, (req, res) => {
+  const store = readStore();
+  const user = store.users.find((item) => item.id === req.user.id);
+  const stream = ensureStreamForUser(store, user);
+  stream.extraContent = {
+    enabled: req.body.enabled === 'true',
+    showOnWatchPage: req.body.showOnWatchPage === 'true',
+    title: String(req.body.title || 'Additional content').trim().slice(0, 120) || 'Additional content',
+    description: String(req.body.description || '').trim().slice(0, 1000),
+    embedHtml: sanitizeSupportEmbed(req.body.embedHtml)
+  };
+  stream.updatedAt = nowIso();
+  store.events.push({ id: id('evt'), type: 'stream_extra_content_updated', payload: { streamId: stream.id, enabled: stream.extraContent.enabled, showOnWatchPage: stream.extraContent.showOnWatchPage }, createdAt: nowIso() });
   writeStore(store);
   res.redirect('/dashboard');
 });
@@ -1865,7 +2127,7 @@ app.get('/admin/streams', requireAdmin, (req, res) => {
 app.get('/admin/accounts', requireAdmin, (req, res) => {
   const store = readStore();
   const body = `<h1>Admin panel</h1>${adminTabs('accounts')}
-<section><h2>Create user</h2><form method="post" action="/admin/users"><label>Username<input name="username" required></label><label>Display name<input name="displayName"></label><label>Password<input name="password" type="password" required></label><label>Role<select name="role"><option>user</option><option>admin</option></select></label><button type="submit">Create user</button></form></section>
+<section><h2>Create user</h2><form method="post" action="/admin/users"><label>Username<input name="username" required></label><label>Display name<input name="displayName"></label><label>Password<input name="password" type="password" required></label><label>Role<select name="role">${roleOptions('user', true)}</select></label><button type="submit">Create user</button></form></section>
 <section><h2>Users</h2><table><tr><th>Username</th><th>Display name</th><th>Role</th><th>Active</th><th>Primary stream key</th></tr>${store.users.map((item) => `<tr><td>${escapeHtml(item.username)}</td><td>${escapeHtml(item.displayName || '')}</td><td>${escapeHtml(item.role)}</td><td>${item.active ? 'yes' : 'no'}</td><td><code>${escapeHtml(item.streamKey || '')}</code></td></tr>`).join('')}</table></section>`;
   res.send(page('Admin accounts', body, req.user));
 });
@@ -1873,7 +2135,7 @@ app.get('/admin/accounts', requireAdmin, (req, res) => {
 app.get('/admin/signups', requireAdmin, (req, res) => {
   const store = readStore();
   const body = `<h1>Admin panel</h1>${adminTabs('signups')}
-<section><h2>Signup settings</h2><form method="post" action="/admin/signups"><label><input type="checkbox" name="registrationsEnabled" value="true" ${store.settings.registrationsEnabled ? 'checked' : ''}> Enable user signups</label><label>New account role<select name="registrationDefaultRole"><option value="user" ${store.settings.registrationDefaultRole !== 'admin' ? 'selected' : ''}>user</option><option value="admin" ${store.settings.registrationDefaultRole === 'admin' ? 'selected' : ''}>admin</option></select></label><button type="submit">Save signup settings</button></form></section>
+<section><h2>Signup settings</h2><form method="post" action="/admin/signups"><label><input type="checkbox" name="registrationsEnabled" value="true" ${store.settings.registrationsEnabled ? 'checked' : ''}> Enable user signups</label><label>New account role<select name="registrationDefaultRole">${roleOptions(store.settings.registrationDefaultRole, false)}</select></label><p class="muted">Public signup cannot create administrator accounts. Administrators can assign admin access from the account tools.</p><button type="submit">Save signup settings</button></form></section>
 <section><h2>Signup page</h2><p>When enabled, new users can create an account at <a href="/signup">/signup</a>. Each new account receives a stream page, primary stream key, and dashboard access.</p></section>`;
   res.send(page('Admin signups', body, req.user));
 });
@@ -1881,7 +2143,7 @@ app.get('/admin/signups', requireAdmin, (req, res) => {
 app.post('/admin/signups', requireAdmin, (req, res) => {
   const store = readStore();
   store.settings.registrationsEnabled = req.body.registrationsEnabled === 'true';
-  store.settings.registrationDefaultRole = req.body.registrationDefaultRole === 'admin' ? 'admin' : 'user';
+  store.settings.registrationDefaultRole = normalizeRole(req.body.registrationDefaultRole, 'user') === 'admin' ? 'user' : normalizeRole(req.body.registrationDefaultRole, 'user');
   store.events.push({ id: id('evt'), type: 'signup_settings_updated', payload: { enabled: store.settings.registrationsEnabled, defaultRole: store.settings.registrationDefaultRole }, createdAt: nowIso() });
   writeStore(store);
   res.redirect('/admin/signups');
@@ -1917,7 +2179,7 @@ app.get('/admin/messaging', requireAdmin, (req, res) => {
   const support = store.settings.supportDefaults || defaultSupportSettings();
   const body = `<h1>Admin panel</h1>${adminTabs('messaging')}
 <section><h2>Messaging features</h2><form method="post" action="/admin/messaging"><label><input type="checkbox" name="visitorMessagesEnabled" value="true" ${messaging.visitorMessagesEnabled ? 'checked' : ''}> Guests can post stream messages when comments are enabled on the stream</label><label><input type="checkbox" name="loggedInUserMessagesEnabled" value="true" ${messaging.loggedInUserMessagesEnabled ? 'checked' : ''}> Logged-in users can post stream messages</label><label><input type="checkbox" name="reactionsEnabled" value="true" ${messaging.reactionsEnabled ? 'checked' : ''}> Enable reactions on messages</label><label><input type="checkbox" name="requireNameForGuests" value="true" ${messaging.requireNameForGuests ? 'checked' : ''}> Require guests to enter a display name</label><label>Maximum message length<input type="number" min="100" max="5000" step="50" name="maxMessageLength" value="${escapeHtml(messaging.maxMessageLength)}"></label><button type="submit">Save messaging settings</button></form></section>
-<section><h2>Default support and payment box</h2><p class="muted">These defaults are copied into new streams. Existing stream owners can change their own support box from the user dashboard. Visitor pages do not show support boxes unless the stream owner or admin enables visitor display.</p><form method="post" action="/admin/support-defaults"><label><input type="checkbox" name="enabled" value="true" ${support.enabled ? 'checked' : ''}> Enable support box by default for new streams</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${support.showOnWatchPage ? 'checked' : ''}> Show support boxes to visitors by default</label><label>Default placement<select name="placement"><option value="before" ${support.placement === 'before' ? 'selected' : ''}>Before stream player</option><option value="during" ${support.placement === 'during' ? 'selected' : ''}>Beside stream player area</option><option value="after" ${!['before', 'during'].includes(support.placement) ? 'selected' : ''}>After comments and stream details</option></select></label><label>Heading<input name="title" value="${escapeHtml(support.title)}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(support.description)}</textarea></label><label>Payment or donation embed HTML<textarea name="embedHtml" rows="6">${escapeHtml(support.embedHtml)}</textarea></label><button type="submit">Save support defaults</button></form></section>`;
+<section><h2>Default support and payment box</h2><p class="muted">These defaults are copied into new streams. Stream owners can link their own PayPal, Stripe, Cash App, Apple Pay, or payment embed. The platform payment area can hold WHMCS-linked payment methods for Devine Creations or AAAStreamer support.</p><form method="post" action="/admin/support-defaults"><label><input type="checkbox" name="enabled" value="true" ${support.enabled ? 'checked' : ''}> Enable support box by default for new streams</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${support.showOnWatchPage ? 'checked' : ''}> Show support boxes to visitors by default</label><label>Default placement<select name="placement"><option value="before" ${support.placement === 'before' ? 'selected' : ''}>Before stream player</option><option value="during" ${support.placement === 'during' ? 'selected' : ''}>Beside stream player area</option><option value="after" ${!['before', 'during'].includes(support.placement) ? 'selected' : ''}>After comments and stream details</option></select></label><label>Heading<input name="title" value="${escapeHtml(support.title)}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(support.description)}</textarea></label><label>Creator payment or donation embed HTML<textarea name="embedHtml" rows="6">${escapeHtml(support.embedHtml)}</textarea></label><label><input type="checkbox" name="platformShareEnabled" value="true" ${support.platformShareEnabled ? 'checked' : ''}> Enable platform support share notice</label><label>Platform share percent<input type="number" min="0" max="100" step="0.1" name="platformSharePercent" value="${escapeHtml(support.platformSharePercent ?? 15)}"></label><label>Platform payment heading<input name="platformPaymentTitle" value="${escapeHtml(support.platformPaymentTitle || 'Support AAAStreamer hosting')}"></label><label>Platform payment description<textarea name="platformPaymentDescription" rows="3">${escapeHtml(support.platformPaymentDescription || '')}</textarea></label><label>Platform or WHMCS payment embed HTML<textarea name="platformPaymentEmbedHtml" rows="6">${escapeHtml(support.platformPaymentEmbedHtml || '')}</textarea></label><button type="submit">Save support defaults</button></form></section>`;
   res.send(page('Admin messaging', body, req.user));
 });
 
@@ -1935,15 +2197,73 @@ app.post('/admin/messaging', requireAdmin, (req, res) => {
   res.redirect('/admin/messaging');
 });
 
+app.get('/admin/payments', requireAdmin, (req, res) => {
+  const store = readStore();
+  const settings = store.settings.paymentIntegration || defaultPaymentIntegrationSettings();
+  const ready = paymentIntegrationReady(settings);
+  const recentPayments = (store.payments || []).slice(-50).reverse();
+  const body = `<h1>Admin panel</h1>${adminTabs('payments')}
+<section><h2>Payment integrations</h2><p class="muted">API secrets are loaded from the server environment only. This page stores non-secret routing settings, default amounts, and integration enablement.</p><form method="post" action="/admin/payments"><label><input type="checkbox" name="stripeEnabled" value="true" ${settings.stripeEnabled ? 'checked' : ''}> Enable Stripe Checkout</label><p>Stripe secret key configured: <strong>${stripeSecretKey ? 'yes' : 'no'}</strong>. Stripe webhook secret configured: <strong>${stripeWebhookSecret ? 'yes' : 'no'}</strong>.</p><label><input type="checkbox" name="whmcsEnabled" value="true" ${settings.whmcsEnabled ? 'checked' : ''}> Enable WHMCS invoice payments</label><p>WHMCS API identifier and secret configured: <strong>${whmcsApiIdentifier && whmcsApiSecret ? 'yes' : 'no'}</strong>.</p><label>WHMCS URL<input name="whmcsUrl" value="${escapeHtml(settings.whmcsUrl || '')}" placeholder="https://devine-creations.com"></label><label>Default WHMCS client ID<input name="whmcsDefaultClientId" value="${escapeHtml(settings.whmcsDefaultClientId || '')}" inputmode="numeric"></label><label>WHMCS payment method system name<input name="whmcsPaymentMethod" value="${escapeHtml(settings.whmcsPaymentMethod || '')}" placeholder="paypal, stripe, mailin, etc."></label><label>Currency<input name="currency" value="${escapeHtml(settings.currency || 'usd')}" maxlength="3"></label><label>Default amount<input name="defaultAmount" inputmode="decimal" value="${escapeHtml((Number(settings.defaultAmountCents || 500) / 100).toFixed(2))}"></label><label>Minimum amount<input name="minimumAmount" inputmode="decimal" value="${escapeHtml((Number(settings.minimumAmountCents || 100) / 100).toFixed(2))}"></label><label>Platform share statement<textarea name="platformStatement" rows="3">${escapeHtml(settings.platformStatement || '')}</textarea></label><button type="submit">Save payment integration settings</button></form></section>
+<section><h2>Integration health</h2><p>Stripe checkout: <strong>${ready.stripe ? 'ready' : 'not ready'}</strong>.</p><p>Stripe webhook verification: <strong>${ready.stripeWebhook ? 'ready' : 'not ready'}</strong>.</p><p>WHMCS API: <strong>${ready.whmcs ? 'ready' : 'not ready'}</strong>.</p><form method="post" action="/admin/payments/test-whmcs"><button type="submit">Test WHMCS API connection</button></form></section>
+<section><h2>Recent payment records</h2><table><tr><th>Time</th><th>Provider</th><th>Status</th><th>Stream</th><th>Amount</th><th>Platform share</th></tr>${recentPayments.map((payment) => `<tr><td>${escapeHtml(payment.createdAt || '')}</td><td>${escapeHtml(payment.provider || '')}</td><td>${escapeHtml(payment.status || '')}</td><td>${escapeHtml(payment.streamSlug || payment.streamId || '')}</td><td>${escapeHtml(formatMoney(payment.amountCents, payment.currency || settings.currency))}</td><td>${escapeHtml(formatMoney(payment.platformFeeCents || 0, payment.currency || settings.currency))}</td></tr>`).join('') || '<tr><td colspan="6">No payment records yet.</td></tr>'}</table></section>`;
+  res.send(page('Admin payments', body, req.user));
+});
+
+app.post('/admin/payments', requireAdmin, (req, res) => {
+  const store = readStore();
+  store.settings.paymentIntegration = {
+    ...defaultPaymentIntegrationSettings(),
+    ...(store.settings.paymentIntegration || {}),
+    stripeEnabled: req.body.stripeEnabled === 'true',
+    whmcsEnabled: req.body.whmcsEnabled === 'true',
+    whmcsUrl: safeUrl(req.body.whmcsUrl) || 'https://devine-creations.com',
+    whmcsDefaultClientId: String(req.body.whmcsDefaultClientId || '').trim().replace(/[^0-9]/g, '').slice(0, 20),
+    whmcsPaymentMethod: String(req.body.whmcsPaymentMethod || '').trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 60),
+    currency: String(req.body.currency || 'usd').trim().toLowerCase().replace(/[^a-z]/g, '').slice(0, 3) || 'usd',
+    defaultAmountCents: centsFromAmount(req.body.defaultAmount, 500),
+    minimumAmountCents: centsFromAmount(req.body.minimumAmount, 100),
+    platformStatement: String(req.body.platformStatement || '').trim().slice(0, 1000)
+  };
+  store.events.push({ id: id('evt'), type: 'payment_settings_updated', payload: { stripeEnabled: store.settings.paymentIntegration.stripeEnabled, whmcsEnabled: store.settings.paymentIntegration.whmcsEnabled }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/admin/payments');
+});
+
+app.post('/admin/payments/test-whmcs', requireAdmin, async (req, res) => {
+  const store = readStore();
+  const settings = store.settings.paymentIntegration || defaultPaymentIntegrationSettings();
+  try {
+    const result = await callWhmcsApi(settings, 'GetStats');
+    store.events.push({ id: id('evt'), type: 'whmcs_api_test_success', payload: { status: result.result }, createdAt: nowIso() });
+    writeStore(store);
+    res.send(page('WHMCS API test', `<h1>WHMCS API test</h1><p>WHMCS API connection succeeded.</p><p><a class="button" href="/admin/payments">Back to payments</a></p>`, req.user));
+  } catch (error) {
+    store.events.push({ id: id('evt'), type: 'whmcs_api_test_failed', payload: { message: error.message }, createdAt: nowIso() });
+    writeStore(store);
+    res.status(502).send(page('WHMCS API test failed', `<h1>WHMCS API test failed</h1><p>${escapeHtml(error.message)}</p><p><a class="button" href="/admin/payments">Back to payments</a></p>`, req.user));
+  }
+});
+
 app.post('/admin/support-defaults', requireAdmin, (req, res) => {
   const store = readStore();
+  const existingSupport = { ...defaultSupportSettings(), ...(store.settings.supportDefaults || {}) };
   store.settings.supportDefaults = {
     enabled: req.body.enabled === 'true',
     showOnWatchPage: req.body.showOnWatchPage === 'true',
     placement: ['before', 'during', 'after'].includes(req.body.placement) ? req.body.placement : 'after',
     title: String(req.body.title || 'Support this stream').trim().slice(0, 120) || 'Support this stream',
     description: String(req.body.description || '').trim().slice(0, 1000),
-    embedHtml: sanitizeSupportEmbed(req.body.embedHtml)
+    embedHtml: sanitizeSupportEmbed(req.body.embedHtml),
+    platformShareEnabled: req.body.platformShareEnabled === 'true',
+    platformSharePercent: clampNumber(req.body.platformSharePercent, 0, 100, 15),
+    platformPaymentTitle: String(req.body.platformPaymentTitle || 'Support AAAStreamer hosting').trim().slice(0, 120) || 'Support AAAStreamer hosting',
+    platformPaymentDescription: String(req.body.platformPaymentDescription || '').trim().slice(0, 1000),
+    platformPaymentEmbedHtml: sanitizeSupportEmbed(req.body.platformPaymentEmbedHtml),
+    paypalUrl: existingSupport.paypalUrl || '',
+    stripeUrl: existingSupport.stripeUrl || '',
+    cashAppUrl: existingSupport.cashAppUrl || '',
+    applePayUrl: existingSupport.applePayUrl || '',
+    paymentNotes: existingSupport.paymentNotes || ''
   };
   store.events.push({ id: id('evt'), type: 'support_defaults_updated', payload: { enabled: store.settings.supportDefaults.enabled, showOnWatchPage: store.settings.supportDefaults.showOnWatchPage }, createdAt: nowIso() });
   writeStore(store);
@@ -2063,7 +2383,7 @@ app.post('/admin/users', requireAdmin, (req, res) => {
     id: id('usr'),
     username,
     displayName: req.body.displayName || username,
-    role: req.body.role === 'admin' ? 'admin' : 'user',
+    role: normalizeRole(req.body.role, 'user'),
     passwordHash: hashPassword(password),
     streamKey: id('sk'),
     active: true,
@@ -2075,6 +2395,115 @@ app.post('/admin/users', requireAdmin, (req, res) => {
   store.events.push({ id: id('evt'), type: 'user_created', payload: { username, role: user.role }, createdAt });
   writeStore(store);
   res.redirect('/admin/accounts');
+});
+
+app.post('/api/streams/:streamId/support-payments', async (req, res) => {
+  const store = readStore();
+  const stream = store.streams.find((item) => item.id === req.params.streamId || item.slug === req.params.streamId);
+  if (!stream) {
+    res.status(404).json({ success: false, error: 'Stream not found.' });
+    return;
+  }
+  const support = { ...defaultSupportSettings(), ...(stream.support || {}) };
+  const settings = store.settings.paymentIntegration || defaultPaymentIntegrationSettings();
+  const minimum = Number(settings.minimumAmountCents || 100);
+  const requestedCents = centsFromAmount(req.body.amount, Number(settings.defaultAmountCents || 500));
+  const amountCents = Math.max(minimum, requestedCents);
+  const provider = String(req.body.provider || '').toLowerCase();
+  const currency = settings.currency || 'usd';
+  const createdAt = nowIso();
+  const payment = {
+    id: id('pay'),
+    streamId: stream.id,
+    streamSlug: stream.slug,
+    provider,
+    status: 'created',
+    amountCents,
+    currency,
+    platformSharePercent: support.platformShareEnabled ? clampNumber(support.platformSharePercent, 0, 100, 15) : 0,
+    platformFeeCents: 0,
+    createdAt,
+    updatedAt: createdAt
+  };
+  try {
+    if (provider === 'stripe') {
+      if (!settings.stripeEnabled || !stripeSecretKey) throw new Error('Stripe Checkout is not configured.');
+      const successUrl = `${publicUrl || `${req.protocol}://${req.get('host')}`}/s/${stream.slug}?payment=success`;
+      const cancelUrl = `${publicUrl || `${req.protocol}://${req.get('host')}`}/s/${stream.slug}?payment=cancelled`;
+      const checkout = await createStripeCheckoutSession({
+        stream,
+        support,
+        settings,
+        amountCents,
+        description: support.description || `Support payment for ${stream.title}`,
+        successUrl,
+        cancelUrl
+      });
+      payment.providerSessionId = checkout.session.id;
+      payment.url = checkout.session.url;
+      payment.status = 'pending';
+      payment.platformFeeCents = checkout.platformFeeCents;
+      store.payments.push(payment);
+      store.payments = store.payments.slice(-2000);
+      store.events.push({ id: id('evt'), type: 'payment_created', payload: { paymentId: payment.id, provider, streamId: stream.id, amountCents, platformFeeCents: payment.platformFeeCents }, createdAt: nowIso() });
+      writeStore(store);
+      res.json({ success: true, provider, paymentId: payment.id, url: checkout.session.url });
+      return;
+    }
+    if (provider === 'whmcs') {
+      if (!settings.whmcsEnabled) throw new Error('WHMCS payments are not enabled.');
+      const userId = support.whmcsClientId || settings.whmcsDefaultClientId;
+      if (!userId) throw new Error('A WHMCS client ID is required for invoice payments.');
+      const invoice = await callWhmcsApi(settings, 'CreateInvoice', {
+        userid: userId,
+        status: 'Unpaid',
+        sendinvoice: false,
+        paymentmethod: settings.whmcsPaymentMethod,
+        itemdescription1: `${support.title || 'AAAStreamer support'} - ${stream.title}`,
+        itemamount1: (amountCents / 100).toFixed(2),
+        itemtaxed1: false,
+        notes: `AAAStreamer stream ${stream.slug}; platform share ${payment.platformSharePercent}%`
+      });
+      payment.providerInvoiceId = invoice.invoiceid || invoice.id;
+      payment.url = `${String(settings.whmcsUrl || '').replace(/\/+$/, '')}/viewinvoice.php?id=${encodeURIComponent(payment.providerInvoiceId)}`;
+      payment.status = 'invoice_created';
+      payment.platformFeeCents = support.platformShareEnabled ? Math.round(amountCents * payment.platformSharePercent / 100) : 0;
+      store.payments.push(payment);
+      store.payments = store.payments.slice(-2000);
+      store.events.push({ id: id('evt'), type: 'payment_invoice_created', payload: { paymentId: payment.id, provider, streamId: stream.id, invoiceId: payment.providerInvoiceId, amountCents, platformFeeCents: payment.platformFeeCents }, createdAt: nowIso() });
+      writeStore(store);
+      res.json({ success: true, provider, paymentId: payment.id, invoiceId: payment.providerInvoiceId, url: payment.url });
+      return;
+    }
+    res.status(400).json({ success: false, error: 'Choose Stripe or WHMCS as the payment method.' });
+  } catch (error) {
+    store.events.push({ id: id('evt'), type: 'payment_create_failed', payload: { provider, streamId: stream.id, message: error.message }, createdAt: nowIso() });
+    writeStore(store);
+    res.status(502).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/payments/stripe/webhook', (req, res) => {
+  if (!verifyStripeSignature(req)) {
+    res.status(400).json({ success: false, error: 'Invalid Stripe signature.' });
+    return;
+  }
+  const event = req.body;
+  const session = event?.data?.object || {};
+  const store = readStore();
+  const payment = (store.payments || []).find((item) => item.provider === 'stripe' && item.providerSessionId === session.id);
+  if (payment) {
+    if (event.type === 'checkout.session.completed') payment.status = 'paid';
+    if (event.type === 'checkout.session.expired') payment.status = 'expired';
+    payment.updatedAt = nowIso();
+    payment.stripePaymentIntent = session.payment_intent || payment.stripePaymentIntent;
+    store.events.push({ id: id('evt'), type: 'stripe_webhook_payment_updated', payload: { paymentId: payment.id, status: payment.status, eventType: event.type }, createdAt: nowIso() });
+    writeStore(store);
+  } else {
+    store.events.push({ id: id('evt'), type: 'stripe_webhook_unmatched', payload: { eventType: event?.type || 'unknown', sessionId: session?.id || null }, createdAt: nowIso() });
+    writeStore(store);
+  }
+  res.json({ received: true });
 });
 
 app.post('/admin/updater/settings', requireAdmin, (req, res) => {
