@@ -30,7 +30,7 @@ management.
 - account, stream key, stream inventory, and comment management
 - admin-controlled user signups
 - admin-controlled platform naming, sub-heading, slogan, tagline, and description
-- enhanced guest and logged-in user stream messaging with reactions
+- enhanced guest and logged-in user stream messaging with reactions, admin moderation, blocked-word auto-hiding, guest review, and automatic message retention cleanup
 - optional donation or payment support boxes configured by admins or stream owners, hidden from visitors by default
 - tracked token share links for public sharing, with direct technical URLs still available to signed-in users and clients that need them
 - offline-safe stream pages: public stream links and playback URLs are hidden unless the creator is live or on-demand content is enabled
@@ -38,7 +38,7 @@ management.
 - calendar scheduling for live encoder windows and pre-created media shows, backed by the internal scheduler
 - multi-encoder keys and stereo audio bitrate presets
 - stream latency, player buffer, and HLS timing controls
-- external destination records for YouTube Live, Twitch, Facebook Live, LinkedIn Live, Kick, Restream.io, and custom RTMP services
+- external destination records for YouTube Live, Twitch, Facebook Live, LinkedIn Live, Kick, Restream.io, Rumble, X, and custom RTMP services, with provider setup links and manual RTMP details kept secondary
 - optional stream background images, stream links, and iframe embed codes
 - direct-host updater with temporary maintenance mode
 - self-hosted server installer with systemd, nginx, licensing, WHMCS, social sharing, and DNS provider configuration hooks
@@ -49,7 +49,7 @@ management.
 
 ## What users can do now
 
-Admins can log in, create users, enable or disable public signups, set platform branding, configure guest and logged-in messaging, set support/payment-box defaults, configure WHMCS and Stripe payment routing, choose which server media folders are available to streamers, review tracked share links, configure install/licensing/DNS settings, review streams, set encoder defaults, tune latency and buffer defaults, and inspect recent publish, done, payment, comment, and moderation events. Users can log in, copy their RTMP server URL and stream key, copy a tracked token share link, reveal direct watch/HLS URLs when needed for desktop clients or media players, add extra encoder keys, bulk upload media, select or multi-select approved server media with checkboxes, queue media for continuous playback, add URL relay sources, schedule live or media-backed shows, save external destination details, tune stream latency and playback buffer, edit the stream profile, add a background image and links, configure an optional support/payment box, add general embedded content, link PayPal/Stripe/Cash App/Apple Pay URLs, connect a Stripe account ID or WHMCS client ID, copy embed code, and open the public watch page for their stream. Visitors receive token-style share URLs by default, can open a stream page only when the creator is live or on-demand playback is enabled, watch HLS or on-demand playback, post live comments when messaging is enabled, react to visible messages when reactions are enabled, and start configured WHMCS invoice or Stripe Checkout support payments.
+Admins can log in, create users, enable or disable public signups, set platform branding, configure guest and logged-in messaging, moderate messages, set retention windows for snappy chat pages, set support/payment-box defaults, configure WHMCS and Stripe payment routing, choose which server media folders are available to streamers, review tracked share links, configure install/licensing/DNS settings, review streams, set encoder defaults, tune latency and buffer defaults, and inspect recent publish, done, payment, comment, and moderation events. Users can log in, copy their RTMP server URL and stream key, copy a tracked token share link, reveal direct watch/HLS URLs when needed for desktop clients or media players, add extra encoder keys, bulk upload media, select or multi-select approved server media with checkboxes, queue media for continuous playback, add URL relay sources, schedule live or media-backed shows, save external destination details, tune stream latency and playback buffer, edit the stream profile, add a background image and links, configure an optional support/payment box, add general embedded content, link PayPal/Stripe/Cash App/Apple Pay URLs, connect a Stripe account ID or WHMCS client ID, copy embed code, and open the public watch page for their stream. Visitors receive token-style share URLs by default, can open a stream page only when the creator is live or on-demand playback is enabled, watch HLS or on-demand playback, post live comments when messaging is enabled, react to visible messages when reactions are enabled, and start configured WHMCS invoice or Stripe Checkout support payments.
 
 ## Payments and platform share
 
@@ -80,7 +80,11 @@ embed pages do not expose HLS URLs for them.
 Admins manage server media folders from `/admin/media`. Each folder can be
 enabled, disabled, visible to users, hidden for admin-only use, and limited to
 audio or video. The default folder list includes common server media paths such
-as `/mnt/backup/media`, `/mnt/backup/audio-description`, and `/mnt/backup/music`.
+as `/mnt/backup/media`, `/mnt/backup/audio-description`, `/mnt/backup/music`,
+matching `/mnt/*/media`, `/mnt/*/audio-description`, `/mnt/*/music`, and
+website upload paths such as `/home/dom/*html/uploads/website*/Audio` and
+`/home/dom/*html/uploads/website*/galleries`. Symbolic links to media files are
+followed when they resolve safely to playable files.
 Streamers can also upload one or more supported audio/video files into the
 configured upload folder, select approved server media with checkboxes, use a
 check-all control, add selected media into a playback queue, and select HTTP or
@@ -92,9 +96,13 @@ when a queue is present, AAAStreamer advances through queued media and rotates
 played sources to the back of the queue so the stream continues without manual
 restart. Stream owners can set uploads to auto-enable, delay enablement after
 upload, auto-add uploaded files to the queue, auto-refresh the media tab when
-new files appear, or choose loop, sequential, random, and stop/disable actions
-from a single relay action menu. This supports music, audio-description, video,
-or remote stream URLs, while keeping normal OBS/Ecamm RTMP ingest available.
+new files appear, preview a one-minute logged-in-only clip before enabling a
+file, set fade-in/fade-out targets, or choose loop, sequential, random, and
+stop/disable actions from a single relay action menu. Detected metadata,
+durations, filenames, and chapter counts are shown in the media tables so the
+operator can see what will be played. This supports music, audio-description,
+video, or remote stream URLs, while keeping normal OBS/Ecamm RTMP ingest
+available.
 
 ## Calendar and scheduler
 
@@ -127,9 +135,12 @@ URL through the configured service identity, such as a TappedIn account on
 ## Self-hosted installer, licensing, and DNS
 
 The Linux server installer is `scripts/install-aaastreamer-server.sh`. It
-creates a service account, installs dependencies, pulls the repository, writes
+creates a service account, installs dependencies, pulls the repository, creates
+owned data/media/upload folders under `/var/lib/aaastreamer` by default, writes
 `/etc/aaastreamer/aaastreamer.env`, creates a systemd service, and can create an
-nginx vhost when `DOMAIN` is provided.
+nginx vhost when `DOMAIN` is provided. Self-hosted installs should keep media
+inside folders owned by the app user unless the admin deliberately adds a
+mounted or external folder that the service account can read.
 
 Customer-owned installs can use their own PayPal, Apple Pay, Stripe links, or
 other creator payment methods. License, invoice, install ID, product ID, domain,

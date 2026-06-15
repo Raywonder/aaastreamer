@@ -18,11 +18,11 @@ accessibility, automation, and scalability.
 - separate admin pages for streams, accounts, signup settings, branding, messaging, share links, payments, install/licensing, media, encoder defaults, and updates
 - optional user signup page controlled from the admin panel
 - platform branding controls for the public name, sub-heading, slogan, tagline, and description shown on default installs
-- enhanced guest and logged-in user stream messaging with message types and reactions
+- enhanced guest and logged-in user stream messaging with message types, reactions, admin moderation, guest review, blocked-word auto-hiding, and retention cleanup
 - optional support/payment embed boxes configured by admins or stream owners, hidden from visitors by default
 - offline-safe public listings that hide stream links unless the creator is live or on-demand content is available
-- server media folders, streamer uploads, and URL relay sources for on-demand playback or looped source broadcasts
-- checkbox-based media selection, check-all controls, delayed auto-enable for uploads, queue auto-add, media auto-refresh, and loop/sequential/random relay actions
+- server media folders, streamer uploads, galleries, and URL relay sources for on-demand playback or looped source broadcasts
+- checkbox-based media selection, check-all controls, detected filenames/metadata/chapters, logged-in one-minute previews, delayed auto-enable for uploads, queue auto-add, media auto-refresh, fade controls, and loop/sequential/random relay actions
 - scheduled live windows and scheduled pre-created media shows
 - multi-encoder keys per account for OBS, Ecamm Live, Audio Hijack workflows, Streamlabs, Larix, vMix, and other RTMP tools
 - stereo audio bitrate presets from 96k through 320k
@@ -84,6 +84,14 @@ the admin setting. Stream messages support comment, question, and support-messag
 types. When reactions are enabled, viewers can react with like, love, applause,
 or thanks, and live viewers receive updates through the existing event stream.
 
+The admin messaging panel also includes moderation controls. Admins can hold
+guest messages for review, auto-hide messages containing configured words or
+phrases, approve hidden or pending messages, hide messages without deleting
+them, delete messages that should not be retained, cap the total stored message
+count, and auto-clear messages after a selected number of hours or days. This
+keeps busy stream chats responsive while still preserving enough recent context
+for moderation.
+
 Admins can configure default support-box text and embed HTML from
 `/admin/messaging`. Each streamer can override those values from `/dashboard`.
 The box can be placed before the stream player, near the stream player, or after
@@ -101,9 +109,12 @@ Admins can configure approved media folders from `/admin/media`. Folder records
 use `label|path|enabled|visible|audio|video`; use `hidden` for admin-only
 folders, `disabled` to turn a folder off, `no-audio` or `no-video` to limit file
 types. The default configuration looks for common server media folders including
-`/mnt/backup/media`, `/mnt/backup/audio-description`, `/mnt/backup/music`, and
-`/mnt/backup`. The uploaded-media folder is also exposed as a managed media
-folder.
+`/mnt/backup/media`, `/mnt/backup/audio-description`, `/mnt/backup/music`,
+`/mnt/*/media`, `/mnt/*/audio-description`, `/mnt/*/music`,
+`/home/dom/*html/uploads/website*/Audio`, and
+`/home/dom/*html/uploads/website*/galleries`. The uploaded-media folder is also
+exposed as a managed media folder. Symbolic links are followed when they resolve
+to playable files.
 
 Streamers can:
 
@@ -113,6 +124,9 @@ Streamers can:
 - choose whether uploads auto-enable immediately or after a configured delay
 - choose whether uploaded media is automatically added to the queue
 - keep the media management tab auto-refreshing when new media appears
+- review title, filename, duration, size, detected metadata, and chapter count
+- open a logged-in-only one-minute preview with fade in and fade out before
+  enabling a file for visitors
 - add HTTP or HTTPS URL relay sources
 - use quick source setup cards for RTMP encoders, audio stream URLs, video
   stream or file URLs, HLS playlists, server media, uploads, and custom RTMP
@@ -121,6 +135,7 @@ Streamers can:
 - choose loop, sequential, random, start, stop, or disable actions for the
   source relay that publishes selected media through the local RTMP ingest path
   with `ffmpeg`
+- set fade-in, fade-out, and crossfade target values for media playback
 
 URL relays support remote media URLs and live HTTP audio/video streams. Local
 media and URL relays can be used for 24/7 channels, music streams,
@@ -156,8 +171,11 @@ configured Mastodon identity, such as a TappedIn bot or user on `md.tappedin.fm`
 ## Installer, licensing, and DNS
 
 `scripts/install-aaastreamer-server.sh` is the first Linux server installer. It
-installs dependencies, creates a service user, pulls the app, writes the env
-file, creates a systemd service, and optionally writes an nginx vhost.
+installs dependencies, creates a service user, pulls the app, creates owned
+data, media, and upload folders under `/var/lib/aaastreamer` by default, writes
+the env file, creates a systemd service, and optionally writes an nginx vhost.
+Self-hosted installs should use those owned folders unless an administrator
+explicitly grants the service account access to mounted media paths.
 
 Self-hosted and managed installs keep their own local creator payment methods,
 but license and invoice tracking remain linked to the Devine Creations WHMCS
@@ -199,9 +217,12 @@ events and live chat. Higher buffer values are better for mobile visitors or
 busy networks where avoiding stalls matters more than shaving off seconds.
 
 External destination records can be stored for YouTube Live, Twitch, Facebook
-Live, LinkedIn Live, Kick, Restream.io, and custom RTMP or RTMPS services. These
-records keep platform connection details organized with the account. Streamers
-can still publish directly from OBS, Ecamm, or other software to those platforms.
+Live, LinkedIn Live, Kick, Restream.io, Rumble, X, and custom RTMP or RTMPS
+services. The destination form shows provider setup links and the services a
+provider can reach, such as Restream's connected channels. Manual RTMP details
+remain available behind a details control for services that require direct
+server/key setup. Streamers can enable or disable each destination with
+checkboxes before saving their live destination choices.
 
 ## VoiceLink API Integration
 

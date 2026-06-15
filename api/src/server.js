@@ -57,13 +57,15 @@ const mediaExtensions = new Map([
   ['.m4v', 'video'], ['.mkv', 'video'], ['.mov', 'video'], ['.mp4', 'video'], ['.webm', 'video']
 ]);
 const platformPresets = [
-  { id: 'youtube', name: 'YouTube Live', url: 'https://www.youtube.com/live_dashboard', ingest: 'rtmp://a.rtmp.youtube.com/live2' },
-  { id: 'twitch', name: 'Twitch', url: 'https://dashboard.twitch.tv/u/stream-manager', ingest: 'rtmp://live.twitch.tv/app' },
-  { id: 'facebook', name: 'Facebook Live', url: 'https://www.facebook.com/live/producer', ingest: 'rtmps://live-api-s.facebook.com:443/rtmp' },
-  { id: 'linkedin', name: 'LinkedIn Live', url: 'https://www.linkedin.com/video/golive/now/', ingest: 'rtmp://1-rtmp-live.linkedin.com/live' },
-  { id: 'kick', name: 'Kick', url: 'https://kick.com/dashboard/stream', ingest: 'rtmps://fa-live.stream.kick.com/app' },
-  { id: 'restream', name: 'Restream.io', url: 'https://app.restream.io/channel', ingest: 'rtmp://live.restream.io/live' },
-  { id: 'custom', name: 'Custom RTMP or RTMPS', url: '', ingest: '' }
+  { id: 'youtube', name: 'YouTube Live', url: 'https://www.youtube.com/live_dashboard', connectUrl: 'https://studio.youtube.com/channel/UC/livestreaming', ingest: 'rtmp://a.rtmp.youtube.com/live2', services: ['YouTube channel live stream', 'Scheduled YouTube event'] },
+  { id: 'twitch', name: 'Twitch', url: 'https://dashboard.twitch.tv/u/stream-manager', connectUrl: 'https://dashboard.twitch.tv/u/stream-manager', ingest: 'rtmp://live.twitch.tv/app', services: ['Twitch channel stream'] },
+  { id: 'facebook', name: 'Facebook Live', url: 'https://www.facebook.com/live/producer', connectUrl: 'https://www.facebook.com/live/producer', ingest: 'rtmps://live-api-s.facebook.com:443/rtmp', services: ['Facebook profile', 'Facebook page', 'Facebook group'] },
+  { id: 'linkedin', name: 'LinkedIn Live', url: 'https://www.linkedin.com/video/golive/now/', connectUrl: 'https://www.linkedin.com/video/golive/now/', ingest: 'rtmp://1-rtmp-live.linkedin.com/live', services: ['LinkedIn profile', 'LinkedIn page', 'LinkedIn event'] },
+  { id: 'kick', name: 'Kick', url: 'https://kick.com/dashboard/stream', connectUrl: 'https://kick.com/dashboard/stream', ingest: 'rtmps://fa-live.stream.kick.com/app', services: ['Kick channel stream'] },
+  { id: 'restream', name: 'Restream.io', url: 'https://app.restream.io/channel', connectUrl: 'https://app.restream.io/channel', ingest: 'rtmp://live.restream.io/live', services: ['YouTube', 'Twitch', 'Facebook', 'LinkedIn', 'X', 'Kick', 'Custom RTMP destinations through Restream'] },
+  { id: 'rumble', name: 'Rumble Live', url: 'https://rumble.com/account/livestreaming', connectUrl: 'https://rumble.com/account/livestreaming', ingest: '', services: ['Rumble channel stream'] },
+  { id: 'x', name: 'X Live', url: 'https://studio.x.com/', connectUrl: 'https://studio.x.com/', ingest: '', services: ['X live broadcast'] },
+  { id: 'custom', name: 'Manual RTMP or RTMPS', url: '', connectUrl: '', ingest: '', services: ['Any destination that gives you an RTMP or RTMPS server URL and stream key'] }
 ];
 const sourcePresets = [
   {
@@ -190,6 +192,47 @@ function writeStore(store) {
   fs.writeFileSync(dataFile, JSON.stringify(store, null, 2));
 }
 
+function normalizeMessagingSettings(settings = {}) {
+  const defaults = defaultMessagingSettings();
+  return {
+    ...defaults,
+    ...settings,
+    visitorMessagesEnabled: settings.visitorMessagesEnabled !== false,
+    loggedInUserMessagesEnabled: settings.loggedInUserMessagesEnabled !== false,
+    reactionsEnabled: settings.reactionsEnabled !== false,
+    requireNameForGuests: settings.requireNameForGuests !== false,
+    maxMessageLength: clampNumber(settings.maxMessageLength, 100, 5000, defaults.maxMessageLength),
+    requireGuestReview: settings.requireGuestReview === true,
+    autoHideBlockedWords: settings.autoHideBlockedWords !== false,
+    blockedWords: String(settings.blockedWords || '').trim().slice(0, 5000),
+    retentionHours: clampNumber(settings.retentionHours, 0, 24 * 365, defaults.retentionHours),
+    maxStoredMessages: clampNumber(settings.maxStoredMessages, 100, 50000, defaults.maxStoredMessages)
+  };
+}
+
+function pruneComments(store) {
+  const messaging = normalizeMessagingSettings(store.settings?.messaging || {});
+  const cutoff = messaging.retentionHours > 0 ? Date.now() - messaging.retentionHours * 60 * 60 * 1000 : 0;
+  store.comments = (store.comments || []).filter((comment) => {
+    if (!cutoff) return true;
+    const created = Date.parse(comment.createdAt || '');
+    return !Number.isFinite(created) || created >= cutoff;
+  }).slice(-messaging.maxStoredMessages);
+}
+
+function blockedWordList(settings) {
+  return String(settings.blockedWords || '')
+    .split(/[\r\n,]+/)
+    .map((word) => word.trim().toLowerCase())
+    .filter(Boolean)
+    .slice(0, 200);
+}
+
+function messageHitsBlockedWord(message, settings) {
+  const haystack = String(message || '').toLowerCase();
+  return blockedWordList(settings).find((word) => haystack.includes(word)) || '';
+}
+
 function defaultEncoderSettings() {
   return {
     videoBitrate: '4500k',
@@ -223,7 +266,12 @@ function defaultMessagingSettings() {
     loggedInUserMessagesEnabled: true,
     reactionsEnabled: true,
     requireNameForGuests: true,
-    maxMessageLength: 1000
+    maxMessageLength: 1000,
+    requireGuestReview: false,
+    autoHideBlockedWords: true,
+    blockedWords: '',
+    retentionHours: 168,
+    maxStoredMessages: 5000
   };
 }
 
@@ -329,7 +377,10 @@ function defaultStreamMediaBehavior() {
     autoRefreshMedia: true,
     uploadEnableDelaySeconds: 0,
     playbackMode: 'loop',
-    continuousPlayback: true
+    continuousPlayback: true,
+    fadeInSeconds: 0,
+    fadeOutSeconds: 0,
+    crossfadeSeconds: 0
   };
 }
 
@@ -346,7 +397,10 @@ function normalizeStreamMediaBehavior(settings = {}) {
     autoQueueUploads: settings.autoQueueUploads !== false,
     autoRefreshMedia: settings.autoRefreshMedia !== false,
     uploadEnableDelaySeconds: clampNumber(settings.uploadEnableDelaySeconds, 0, 86400, 0),
-    continuousPlayback: settings.continuousPlayback !== false
+    continuousPlayback: settings.continuousPlayback !== false,
+    fadeInSeconds: clampNumber(settings.fadeInSeconds, 0, 30, 0),
+    fadeOutSeconds: clampNumber(settings.fadeOutSeconds, 0, 30, 0),
+    crossfadeSeconds: clampNumber(settings.crossfadeSeconds, 0, 30, 0)
   };
 }
 
@@ -456,27 +510,39 @@ function defaultExtraContentSettings() {
 
 function defaultMediaSettings() {
   const envFolders = String(process.env.AAASTREAMER_MEDIA_FOLDERS || '')
-    .split(path.delimiter)
+    .split(/\r?\n|;/)
     .map((item) => item.trim())
     .filter(Boolean);
-  const folders = (envFolders.length ? envFolders : [
-    '/mnt/backup/media',
-    '/mnt/backup/audio-description',
-    '/mnt/backup/music',
-    '/mnt/backup'
-  ]).map((folderPath, index) => ({
-    id: slugify(`${index + 1}-${folderPath}`),
-    label: path.basename(folderPath) || folderPath,
-    path: folderPath,
-    enabled: true,
-    visibleToUsers: index < 3,
-    allowAudio: true,
-    allowVideo: true
-  }));
+  const folderSpecs = envFolders.length ? envFolders : [
+    'Backup media|/mnt/backup/media|enabled|visible|audio|video',
+    'Audio description|/mnt/backup/audio-description|enabled|visible|audio|video',
+    'Music|/mnt/backup/music|enabled|visible|audio|video',
+    'Mounted media|/mnt/*/media|enabled|visible|audio|video',
+    'Mounted audio description|/mnt/*/audio-description|enabled|visible|audio|video',
+    'Mounted music|/mnt/*/music|enabled|visible|audio|video',
+    'Website audio uploads|/home/dom/*html/uploads/website*/Audio|enabled|visible|audio|no-video',
+    'Website gallery videos|/home/dom/*html/uploads/website*/galleries|enabled|visible|no-audio|video',
+    'Backup root|/mnt/backup|enabled|hidden|audio|video'
+  ];
+  const folders = folderSpecs.map((spec, index) => {
+    const parts = String(spec).split('|').map((item) => item.trim());
+    const hasRichSpec = parts.length > 1;
+    const label = hasRichSpec ? parts[0] : path.basename(spec) || spec;
+    const folderPath = hasRichSpec ? parts[1] : spec;
+    return {
+      id: slugify(`${index + 1}-${folderPath}`),
+      label,
+      path: folderPath,
+      enabled: parts[2] !== 'disabled',
+      visibleToUsers: hasRichSpec ? parts[3] !== 'hidden' : index < 3,
+      allowAudio: parts[4] !== 'no-audio',
+      allowVideo: parts[5] !== 'no-video'
+    };
+  }).filter((folder) => folder.path);
   return {
     enabled: true,
     maxScanDepth: 4,
-    uploadFolder: path.join(dataDir, 'uploads'),
+    uploadFolder: process.env.AAASTREAMER_UPLOAD_FOLDER || path.join(dataDir, 'uploads'),
     uploadsVisibleToUsers: true,
     folders,
     urlRelayEnabled: true,
@@ -507,7 +573,7 @@ function normalizeStore(store) {
   store.settings.social = { ...defaultSocialSettings(), ...(store.settings.social || {}) };
   store.settings.siteName = store.settings.platformBranding.platformName || store.settings.siteName;
   store.settings.visitorCommentsEnabled ??= true;
-  store.settings.messaging = { ...defaultMessagingSettings(), ...(store.settings.messaging || {}) };
+  store.settings.messaging = normalizeMessagingSettings(store.settings.messaging || {});
   store.settings.supportDefaults = { ...defaultSupportSettings(), ...(store.settings.supportDefaults || {}) };
   store.settings.mediaLibrary = normalizeMediaSettings(store.settings.mediaLibrary);
   store.settings.registrationsEnabled ??= process.env.AAASTREAMER_REGISTRATION_ENABLED === 'true';
@@ -519,6 +585,7 @@ function normalizeStore(store) {
   store.scheduledShows = (store.scheduledShows || []).map(normalizeScheduledShow).filter(Boolean);
   store.shareLinks = (store.shareLinks || []).filter((link) => link?.token && link?.streamId);
   for (const stream of store.streams) normalizeStream(stream);
+  pruneComments(store);
   return store;
 }
 
@@ -548,17 +615,23 @@ function normalizeStream(stream) {
 
 function normalizeMediaSettings(settings = {}) {
   const defaults = defaultMediaSettings();
-  const folders = Array.isArray(settings.folders) && settings.folders.length ? settings.folders : defaults.folders;
+  const configuredFolders = Array.isArray(settings.folders) && settings.folders.length ? settings.folders : [];
+  const configuredKeys = new Set(configuredFolders.map((folder) => String(folder.path || '').trim()).filter(Boolean));
+  const defaultFoldersToAdd = defaults.folders.filter((folder) => !configuredKeys.has(folder.path));
+  const folders = configuredFolders.length ? [...configuredFolders, ...defaultFoldersToAdd] : defaults.folders;
   const uploadFolder = String(settings.uploadFolder || defaults.uploadFolder).trim();
-  const normalizedFolders = folders.map((folder, index) => ({
-    id: slugify(folder.id || `${index + 1}-${folder.path || folder.label || 'media'}`),
-    label: String(folder.label || path.basename(folder.path || '') || `Media folder ${index + 1}`).trim().slice(0, 120),
-    path: String(folder.path || '').trim(),
-    enabled: folder.enabled !== false,
-    visibleToUsers: folder.visibleToUsers !== false,
-    allowAudio: folder.allowAudio !== false,
-    allowVideo: folder.allowVideo !== false
-  })).filter((folder) => folder.path);
+  const normalizedFolders = folders.flatMap((folder, index) => {
+    const expandedPaths = expandMediaFolderPath(String(folder.path || '').trim());
+    return expandedPaths.map((folderPath, expandedIndex) => ({
+      id: slugify(folder.id && expandedPaths.length === 1 ? folder.id : `${index + 1}-${expandedIndex + 1}-${folderPath}`),
+      label: String(folder.label && expandedPaths.length === 1 ? folder.label : path.basename(folderPath || '') || `Media folder ${index + 1}`).trim().slice(0, 120),
+      path: folderPath,
+      enabled: folder.enabled !== false,
+      visibleToUsers: folder.visibleToUsers !== false,
+      allowAudio: folder.allowAudio !== false,
+      allowVideo: folder.allowVideo !== false
+    }));
+  }).filter((folder) => folder.path);
   if (uploadFolder && !normalizedFolders.some((folder) => path.resolve(folder.path) === path.resolve(uploadFolder))) {
     normalizedFolders.unshift({
       id: 'uploads',
@@ -596,6 +669,48 @@ function normalizeStreamSource(source) {
     autoEnabled: source.autoEnabled === true,
     createdAt: source.createdAt || nowIso()
   };
+}
+
+function expandMediaFolderPath(pattern) {
+  if (!pattern) return [];
+  if (!pattern.includes('*')) return [pattern];
+  const parts = path.resolve(pattern).split(path.sep);
+  const roots = [parts[0] || path.sep];
+  const matches = parts.slice(1).reduce((current, part) => {
+    const next = [];
+    const regex = part.includes('*')
+      ? new RegExp(`^${part.split('*').map((piece) => piece.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`)
+      : null;
+    for (const base of current) {
+      let entries = [];
+      try {
+        entries = fs.readdirSync(base, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (entry.name.startsWith('.')) continue;
+        if (regex && !regex.test(entry.name)) continue;
+        if (!regex && entry.name !== part) continue;
+        const candidate = path.join(base, entry.name);
+        try {
+          if (entry.isDirectory() || (entry.isSymbolicLink() && fs.statSync(candidate).isDirectory())) {
+            next.push(candidate);
+          }
+        } catch {
+          continue;
+        }
+      }
+    }
+    return next;
+  }, roots);
+  return matches.filter((item) => {
+    try {
+      return fs.statSync(item).isDirectory();
+    } catch {
+      return false;
+    }
+  }).slice(0, 80);
 }
 
 function defaultLatencySettings() {
@@ -862,6 +977,46 @@ function mediaTypeFor(filePath) {
   return mediaExtensions.get(path.extname(filePath).toLowerCase()) || null;
 }
 
+function ffprobePath() {
+  return process.env.FFPROBE_PATH || 'ffprobe';
+}
+
+function probeMediaFile(filePath) {
+  try {
+    const output = childProcess.execFileSync(ffprobePath(), [
+      '-v', 'quiet',
+      '-print_format', 'json',
+      '-show_format',
+      '-show_chapters',
+      filePath
+    ], { encoding: 'utf8', timeout: 8000, stdio: ['ignore', 'pipe', 'ignore'] });
+    const parsed = JSON.parse(output);
+    const tags = parsed.format?.tags || {};
+    return {
+      title: tags.title || tags.TITLE || path.basename(filePath).replace(/\.[^.]+$/, ''),
+      artist: tags.artist || tags.ARTIST || tags.album_artist || '',
+      album: tags.album || tags.ALBUM || '',
+      durationSeconds: Number(parsed.format?.duration || 0) || 0,
+      chapters: (parsed.chapters || []).slice(0, 40).map((chapter, index) => ({
+        index,
+        title: chapter.tags?.title || chapter.tags?.TITLE || `Chapter ${index + 1}`,
+        startSeconds: Number(chapter.start_time || 0) || 0,
+        endSeconds: Number(chapter.end_time || 0) || 0
+      }))
+    };
+  } catch {
+    return null;
+  }
+}
+
+function formatDuration(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds || 0)));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`;
+}
+
 function resolveMediaFolder(store, folderId) {
   const settings = store.settings.mediaLibrary || defaultMediaSettings();
   return settings.folders.find((folder) => folder.id === folderId && folder.enabled);
@@ -943,17 +1098,30 @@ function scanMediaFolder(folder, maxDepth) {
         walk(fullPath, depth + 1);
         continue;
       }
-      if (!entry.isFile()) continue;
+      let isFile = entry.isFile();
+      if (!isFile && entry.isSymbolicLink()) {
+        try {
+          isFile = fs.statSync(fullPath).isFile();
+        } catch {
+          isFile = false;
+        }
+      }
+      if (!isFile) continue;
       const mediaType = mediaTypeFor(fullPath);
       if (!mediaType) continue;
       if (mediaType === 'audio' && !folder.allowAudio) continue;
       if (mediaType === 'video' && !folder.allowVideo) continue;
       const relativePath = path.relative(root, fullPath).split(path.sep).join('/');
       const stat = fs.statSync(fullPath);
+      const metadata = probeMediaFile(fullPath);
       files.push({
         folderId: folder.id,
         relativePath,
-        label: relativePath.replace(/\.[^.]+$/, '').replace(/[\\/_.-]+/g, ' '),
+        label: metadata?.title || relativePath.replace(/\.[^.]+$/, '').replace(/[\\/_.-]+/g, ' '),
+        fileName: path.basename(relativePath),
+        metadata: metadata || null,
+        durationSeconds: metadata?.durationSeconds || 0,
+        chapters: metadata?.chapters || [],
         mediaType,
         size: stat.size,
         modifiedAt: stat.mtime.toISOString()
@@ -1457,10 +1625,12 @@ function mediaCatalogCheckboxes(store, user, selectedSources = []) {
         mediaType: file.mediaType
       });
       const key = sourceQueueKey(source);
-      rows.push(`<tr><td><input type="checkbox" name="localMedia" value="${escapeHtml(`${file.folderId}|${file.relativePath}`)}" ${selectedKeys.has(key) ? 'checked' : ''}></td><td>${escapeHtml(file.label)}</td><td>${escapeHtml(folder.label)}</td><td>${escapeHtml(file.mediaType)}</td><td>${escapeHtml(formatBytes(file.size))}</td><td>${escapeHtml(file.modifiedAt || '')}</td></tr>`);
+      const previewUrl = `/dashboard/media/preview/${encodeURIComponent(file.folderId)}/${file.relativePath.split(/[\\/]+/).map(encodeURIComponent).join('/')}`;
+      const chapterText = file.chapters?.length ? `${file.chapters.length} chapters` : 'No chapters detected';
+      rows.push(`<tr><td><input type="checkbox" name="localMedia" value="${escapeHtml(`${file.folderId}|${file.relativePath}`)}" ${selectedKeys.has(key) ? 'checked' : ''}></td><td>${escapeHtml(file.label)}</td><td>${escapeHtml(file.fileName || path.basename(file.relativePath))}</td><td>${escapeHtml(folder.label)}</td><td>${escapeHtml(file.mediaType)}</td><td>${escapeHtml(formatDuration(file.durationSeconds))}</td><td>${escapeHtml(formatBytes(file.size))}</td><td>${escapeHtml(chapterText)}</td><td><a href="${escapeHtml(previewUrl)}" target="_blank" rel="noopener noreferrer">Preview one minute</a></td></tr>`);
     }
   }
-  return rows.join('') || '<tr><td colspan="6">No media files are available from enabled folders.</td></tr>';
+  return rows.join('') || '<tr><td colspan="9">No media files are available from enabled folders.</td></tr>';
 }
 
 function formatBytes(bytes) {
@@ -1646,6 +1816,20 @@ function startSourceProcess(stream, source, store) {
     ? safeMediaPath(resolveMediaFolder(store, source.folderId), source.relativePath)
     : source?.url;
   if (!input) throw new Error('No source input selected');
+  const behavior = normalizeStreamMediaBehavior(stream.mediaBehavior);
+  const mediaInfo = source?.type === 'localMedia' ? probeMediaFile(input) : null;
+  const duration = Number(mediaInfo?.durationSeconds || 0);
+  const audioFilters = [];
+  const videoFilters = [];
+  if (behavior.fadeInSeconds > 0) {
+    audioFilters.push(`afade=t=in:st=0:d=${behavior.fadeInSeconds}`);
+    videoFilters.push(`fade=t=in:st=0:d=${Math.min(behavior.fadeInSeconds, 10)}`);
+  }
+  if (behavior.fadeOutSeconds > 0 && duration > behavior.fadeOutSeconds + 1) {
+    const fadeStart = Math.max(0, duration - behavior.fadeOutSeconds);
+    audioFilters.push(`afade=t=out:st=${fadeStart}:d=${behavior.fadeOutSeconds}`);
+    videoFilters.push(`fade=t=out:st=${fadeStart}:d=${Math.min(behavior.fadeOutSeconds, 10)}`);
+  }
   const outputKey = stream.streamKey;
   const output = `rtmp://127.0.0.1:1935/${rtmpAppName}/${outputKey}`;
   stopSourceProcess(stream.id);
@@ -1662,6 +1846,8 @@ function startSourceProcess(stream, source, store) {
     '-i', input,
     '-map', '0:v?',
     '-map', '0:a?',
+    ...(videoFilters.length ? ['-vf', videoFilters.join(',')] : []),
+    ...(audioFilters.length ? ['-af', audioFilters.join(',')] : []),
     '-c:v', 'libx264',
     '-preset', 'veryfast',
     '-pix_fmt', 'yuv420p',
@@ -1858,10 +2044,70 @@ app.get('/events', (req, res) => {
   req.on('close', () => sseClients.delete(res));
 });
 
-app.get('/api/media/catalog', (req, res) => {
+app.get('/api/media/catalog', requireUser, (req, res) => {
   const store = readStore();
-  const user = currentUser(req);
-  res.json({ success: true, folders: mediaCatalog(store, user) });
+  res.json({ success: true, folders: mediaCatalog(store, req.user) });
+});
+
+app.get('/dashboard/media/preview/:folderId/*', requireUser, (req, res) => {
+  const store = readStore();
+  const folder = resolveMediaFolder(store, req.params.folderId);
+  const relativePath = req.params[0] || '';
+  if (!folder || (req.user.role !== 'admin' && !folder.visibleToUsers)) {
+    res.status(404).send(page('Preview not found', '<h1>Preview not found</h1><p>This media item is not available to your account.</p>', req.user));
+    return;
+  }
+  const target = safeMediaPath(folder, relativePath);
+  const mediaType = target ? mediaTypeFor(target) : null;
+  if (!target || !fs.existsSync(target) || !mediaType) {
+    res.status(404).send(page('Preview not found', '<h1>Preview not found</h1><p>This media item could not be found.</p>', req.user));
+    return;
+  }
+  const info = probeMediaFile(target) || {};
+  const duration = Number(info.durationSeconds || 0);
+  const latestStart = Math.max(60, duration - 300);
+  const earliestStart = Math.min(60, latestStart);
+  const startAt = duration > 180 ? Math.floor(earliestStart + Math.random() * Math.max(1, latestStart - earliestStart)) : 0;
+  const title = info.title || path.basename(relativePath);
+  const previewUrl = `/dashboard/media/preview-stream/${encodeURIComponent(req.params.folderId)}/${relativePath.split(/[\\/]+/).map(encodeURIComponent).join('/')}?start=${encodeURIComponent(startAt)}`;
+  const chapters = info.chapters?.length
+    ? `<ul>${info.chapters.slice(0, 12).map((chapter) => `<li>${escapeHtml(chapter.title)}: ${escapeHtml(formatDuration(chapter.startSeconds))} to ${escapeHtml(formatDuration(chapter.endSeconds))}</li>`).join('')}</ul>`
+    : '<p class="muted">No chapters were detected in this file.</p>';
+  const player = mediaType === 'audio'
+    ? `<audio controls autoplay src="${escapeHtml(previewUrl)}"></audio>`
+    : `<video controls autoplay src="${escapeHtml(previewUrl)}"></video>`;
+  res.send(page('Media preview', `<h1>Media preview</h1><section><h2>${escapeHtml(title)}</h2><p>Preview starts around ${escapeHtml(formatDuration(startAt))} and plays for one minute with a fade in and fade out.</p>${player}<h3>Detected metadata</h3><ul><li>File: ${escapeHtml(path.basename(relativePath))}</li><li>Duration: ${escapeHtml(formatDuration(duration))}</li><li>Artist: ${escapeHtml(info.artist || 'None')}</li><li>Album: ${escapeHtml(info.album || 'None')}</li></ul><h3>Detected chapters</h3>${chapters}</section>`, req.user));
+});
+
+app.get('/dashboard/media/preview-stream/:folderId/*', requireUser, (req, res) => {
+  const store = readStore();
+  const folder = resolveMediaFolder(store, req.params.folderId);
+  const relativePath = req.params[0] || '';
+  if (!folder || (req.user.role !== 'admin' && !folder.visibleToUsers)) {
+    res.status(404).send('Preview not found');
+    return;
+  }
+  const target = safeMediaPath(folder, relativePath);
+  const mediaType = target ? mediaTypeFor(target) : null;
+  if (!target || !fs.existsSync(target) || !mediaType) {
+    res.status(404).send('Preview not found');
+    return;
+  }
+  const startAt = clampNumber(req.query.start, 0, 86400, 0);
+  const args = ['-hide_banner', '-loglevel', 'error', '-ss', String(startAt), '-t', '60', '-i', target];
+  if (mediaType === 'audio') {
+    args.push('-vn', '-af', 'afade=t=in:st=0:d=10,afade=t=out:st=50:d=10', '-c:a', 'libmp3lame', '-b:a', '160k', '-f', 'mp3', 'pipe:1');
+    res.setHeader('Content-Type', 'audio/mpeg');
+  } else {
+    args.push('-vf', 'fade=t=in:st=0:d=2,fade=t=out:st=58:d=2', '-af', 'afade=t=in:st=0:d=10,afade=t=out:st=50:d=10', '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', 'frag_keyframe+empty_moov', '-f', 'mp4', 'pipe:1');
+    res.setHeader('Content-Type', 'video/mp4');
+  }
+  const child = childProcess.spawn(ffmpegPath(), args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  child.stdout.pipe(res);
+  child.stderr.on('data', (data) => appendEvent('media_preview_log', { message: String(data).slice(0, 500), folderId: req.params.folderId }));
+  req.on('close', () => {
+    if (!child.killed) child.kill('SIGTERM');
+  });
 });
 
 app.get('/media/:folderId/*', (req, res) => {
@@ -1933,8 +2179,8 @@ app.get('/s/:slug', (req, res) => {
   ensureContinuousOnDemandRelayForStream(store, stream, 'watch_page');
   const playbackUrl = streamPlaybackUrl(stream, store);
   const playableStatus = isLive(stream) ? 'live' : (streamHasOnDemand(stream, store) ? 'on demand' : 'offline');
-  const comments = store.comments.filter((comment) => comment.streamId === stream.id).slice(-100);
-  const messaging = store.settings.messaging || defaultMessagingSettings();
+  const comments = store.comments.filter((comment) => comment.streamId === stream.id && comment.status !== 'hidden' && comment.status !== 'pending').slice(-100);
+  const messaging = normalizeMessagingSettings(store.settings.messaging || {});
   const user = currentUser(req);
   const canComment = stream.allowComments && (
     user ? messaging.loggedInUserMessagesEnabled : messaging.visitorMessagesEnabled
@@ -2092,8 +2338,8 @@ app.get('/dashboard', (req, res) => {
     ...stream.encoderKeys
   ];
   const encoderRows = encoders.map((encoder) => `<tr><td>${escapeHtml(encoder.name)}</td><td><code>${escapeHtml(encoder.key)}</code></td><td>${escapeHtml(encoder.audioBitrate || stream.encoderSettings.audioBitrate)}</td><td>${encoder.active === false ? 'disabled' : 'enabled'}</td><td><input readonly value="${escapeHtml(hlsUrlFor(encoder.key))}"></td></tr>`).join('');
-  const destinationRows = (stream.destinations || []).map((destination) => `<tr><td>${escapeHtml(destination.name)}</td><td>${escapeHtml(destination.platform)}</td><td>${destination.enabled ? 'enabled' : 'disabled'}</td><td><code>${escapeHtml(destination.rtmpUrl)}</code></td><td><form method="post" action="/dashboard/destinations/${escapeHtml(destination.id)}/delete"><button type="submit" class="danger">Remove</button></form></td></tr>`).join('');
-  const presetOptions = platformPresets.map((preset) => `<option value="${escapeHtml(preset.id)}" data-ingest="${escapeHtml(preset.ingest)}">${escapeHtml(preset.name)}</option>`).join('');
+  const destinationRows = (stream.destinations || []).map((destination) => `<tr><td><input type="checkbox" form="destinationStateForm" name="enabledDestinations" value="${escapeHtml(destination.id)}" ${destination.enabled ? 'checked' : ''}></td><td>${escapeHtml(destination.name)}</td><td>${escapeHtml(destination.platform)}</td><td>${destination.connected ? 'connected' : 'manual setup'}</td><td><details><summary>Show manual RTMP</summary><code>${escapeHtml(destination.rtmpUrl)}</code></details></td><td><form method="post" action="/dashboard/destinations/${escapeHtml(destination.id)}/delete"><button type="submit" class="danger">Remove</button></form></td></tr>`).join('');
+  const presetOptions = platformPresets.map((preset) => `<option value="${escapeHtml(preset.id)}" data-ingest="${escapeHtml(preset.ingest)}" data-connect="${escapeHtml(preset.connectUrl || preset.url || '')}" data-services="${escapeHtml((preset.services || []).join(', '))}">${escapeHtml(preset.name)}</option>`).join('');
   const selectedSource = stream.currentSource || null;
   const relayRows = (stream.relaySources || []).map((source) => `<tr><td>${escapeHtml(source.label)}</td><td>${escapeHtml(source.mediaType)}</td><td><a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">Open URL</a></td><td><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/select" class="inline-form"><button type="submit">Use</button></form><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/delete" class="inline-form"><button type="submit" class="danger">Remove</button></form></td></tr>`).join('');
   const queueRows = queuedSourceRows(stream, store);
@@ -2116,12 +2362,12 @@ app.get('/dashboard', (req, res) => {
 <form class="inline-form" method="post" action="/dashboard/stream/key"><input type="hidden" name="action" value="revoke"><button type="submit" class="danger">Revoke current stream key</button></form></section>
 <section><h2>Encoder keys</h2><table><tr><th>Name</th><th>Key</th><th>Audio bitrate</th><th>Status</th><th>HLS output</th></tr>${encoderRows}</table>
 <form method="post" action="/dashboard/encoders"><label>Encoder name<input name="name" placeholder="OBS Windows, Ecamm Mac, Audio Hijack"></label><label>Audio bitrate<select name="audioBitrate">${audioBitrates.map((rate) => `<option ${rate === stream.encoderSettings.audioBitrate ? 'selected' : ''}>${rate}</option>`).join('')}</select></label><button type="submit">Add encoder key</button></form></section>
-<section><h2>Destinations</h2><table><tr><th>Name</th><th>Platform</th><th>Status</th><th>RTMP URL</th><th>Action</th></tr>${destinationRows || '<tr><td colspan="5">No destinations configured yet.</td></tr>'}</table>
-<form method="post" action="/dashboard/destinations"><label>Platform<select id="platformPreset" name="platform">${presetOptions}</select></label><label>Name<input name="name" placeholder="Main YouTube channel"></label><label>RTMP or RTMPS URL<input id="destinationRtmpUrl" name="rtmpUrl"></label><label>Stream key<input name="streamKey"></label><label><input type="checkbox" name="enabled" value="true" checked> Enable destination</label><button type="submit">Add destination</button></form></section>`;
+<section><h2>Destinations</h2><p class="muted">Use the provider setup link first when available. Manual RTMP fields are for custom destinations or services that do not expose a connected setup path yet.</p><form id="destinationStateForm" method="post" action="/dashboard/destinations/enabled"><table><tr><th>Live</th><th>Name</th><th>Platform</th><th>Connection</th><th>Manual RTMP</th><th>Action</th></tr>${destinationRows || '<tr><td colspan="6">No destinations configured yet.</td></tr>'}</table><button type="submit">Save live destination choices</button></form>
+<form method="post" action="/dashboard/destinations"><label>Platform<select id="platformPreset" name="platform">${presetOptions}</select></label><p id="destinationServices" class="muted"></p><p><a id="destinationConnectLink" class="button" href="#" target="_blank" rel="noopener noreferrer">Open service setup</a></p><label>Name<input name="name" placeholder="Main YouTube channel"></label><label>RTMP or RTMPS URL, manual destinations only<input id="destinationRtmpUrl" name="rtmpUrl"></label><label>Stream key, manual destinations only<input name="streamKey"></label><label><input type="checkbox" name="enabled" value="true" checked> Enable destination</label><button type="submit">Add destination</button></form></section>`;
   const mediaTab = `<section><h2>Media management</h2><p>Current source: <strong>${escapeHtml(sourceSummary(selectedSource))}</strong>. Relay process: <strong>${activeSourceRunning ? 'running' : 'stopped'}</strong>.</p>
-<form method="post" action="/dashboard/media-settings"><div class="grid"><label><input type="checkbox" name="autoEnableUploads" value="true" ${behavior.autoEnableUploads ? 'checked' : ''}> Auto-enable new uploads</label><label><input type="checkbox" name="autoQueueUploads" value="true" ${behavior.autoQueueUploads ? 'checked' : ''}> Auto-add uploads to queue</label><label><input type="checkbox" name="autoRefreshMedia" value="true" ${behavior.autoRefreshMedia ? 'checked' : ''}> Auto-refresh media list</label><label>Enable delay after upload, seconds<input type="number" min="0" max="86400" name="uploadEnableDelaySeconds" value="${escapeHtml(behavior.uploadEnableDelaySeconds)}"></label><label>Playback action<select name="playbackMode"><option value="loop" ${behavior.playbackMode === 'loop' ? 'selected' : ''}>Auto loop continuously</option><option value="sequential" ${behavior.playbackMode === 'sequential' ? 'selected' : ''}>Play queue in order</option><option value="random" ${behavior.playbackMode === 'random' ? 'selected' : ''}>Random queue playback</option><option value="disabled" ${behavior.playbackMode === 'disabled' ? 'selected' : ''}>Stop or disable source relay</option></select></label></div><button type="submit">Save media settings</button></form>
+<form method="post" action="/dashboard/media-settings"><div class="grid"><label><input type="checkbox" name="autoEnableUploads" value="true" ${behavior.autoEnableUploads ? 'checked' : ''}> Auto-enable new uploads</label><label><input type="checkbox" name="autoQueueUploads" value="true" ${behavior.autoQueueUploads ? 'checked' : ''}> Auto-add uploads to queue</label><label><input type="checkbox" name="autoRefreshMedia" value="true" ${behavior.autoRefreshMedia ? 'checked' : ''}> Auto-refresh media list</label><label>Enable delay after upload, seconds<input type="number" min="0" max="86400" name="uploadEnableDelaySeconds" value="${escapeHtml(behavior.uploadEnableDelaySeconds)}"></label><label>Playback action<select name="playbackMode"><option value="loop" ${behavior.playbackMode === 'loop' ? 'selected' : ''}>Auto loop continuously</option><option value="sequential" ${behavior.playbackMode === 'sequential' ? 'selected' : ''}>Play queue in order</option><option value="random" ${behavior.playbackMode === 'random' ? 'selected' : ''}>Random queue playback</option><option value="disabled" ${behavior.playbackMode === 'disabled' ? 'selected' : ''}>Stop or disable source relay</option></select></label><label>Fade in seconds<input type="range" min="0" max="30" step="1" name="fadeInSeconds" value="${escapeHtml(behavior.fadeInSeconds)}"></label><label>Fade out seconds<input type="range" min="0" max="30" step="1" name="fadeOutSeconds" value="${escapeHtml(behavior.fadeOutSeconds)}"></label><label>Crossfade target seconds<input type="range" min="0" max="30" step="1" name="crossfadeSeconds" value="${escapeHtml(behavior.crossfadeSeconds)}"></label></div><button type="submit">Save media settings</button></form>
 <section class="subsection"><h3>Quick source setup</h3><div class="preset-grid">${quickSourceCards}</div></section>
-<form method="post" action="/dashboard/sources/select"><input type="hidden" name="sourceType" value="localMedia"><p><button type="button" id="checkAllMedia">Check all media</button><button type="button" id="uncheckAllMedia" class="secondary">Uncheck all media</button></p><table id="mediaCatalog"><tr><th>Select</th><th>Name</th><th>Folder</th><th>Type</th><th>Size</th><th>Modified</th></tr>${mediaCatalogCheckboxes(store, user, streamSources(stream))}</table><button type="submit">Use selected media</button></form>
+<form method="post" action="/dashboard/sources/select"><input type="hidden" name="sourceType" value="localMedia"><p><button type="button" id="checkAllMedia">Check all media</button><button type="button" id="uncheckAllMedia" class="secondary">Uncheck all media</button></p><table id="mediaCatalog"><tr><th>Select</th><th>Title</th><th>File name</th><th>Folder</th><th>Type</th><th>Duration</th><th>Size</th><th>Chapters</th><th>Preview</th></tr>${mediaCatalogCheckboxes(store, user, streamSources(stream))}</table><button type="submit">Use selected media</button></form>
 <form method="post" action="/dashboard/sources/upload"><label>Upload audio or video files<input id="mediaUpload" type="file" accept="audio/*,video/*" multiple></label><input type="hidden" id="mediaUploadData" name="uploadData"><label>Upload title<input name="uploadLabel" placeholder="Intro music, event replay, audio described movie"></label><button type="submit">Upload media</button></form>
 <form method="post" action="/dashboard/sources/url"><input type="hidden" name="sourceType" value="urlRelay"><label>Relay label<input id="relayLabel" name="relayLabel" placeholder="Radio relay, remote event, training video"></label><label>Media type<select id="relayMediaType" name="relayMediaType"><option value="video">video</option><option value="audio">audio</option></select></label><label>HTTP or HTTPS media URL<input id="relayUrl" name="relayUrl" placeholder="https://example.com/stream.mp3"></label><button type="submit">Add URL relay source</button></form>
 <section class="subsection"><h3>Source queue</h3><table><tr><th>Name</th><th>Type</th><th>Source</th><th>Actions</th></tr>${queueRows || '<tr><td colspan="4">No queued sources. Upload or check media to build a playlist.</td></tr>'}</table><form method="post" action="/dashboard/sources/queue/clear" class="inline-form"><button type="submit" class="danger">Clear queue</button></form><form method="post" action="/dashboard/sources/action" class="inline-form"><label>Relay action<select name="sourceAction"><option value="start">Start selected or queued media</option><option value="loop">Auto loop current source</option><option value="random">Random playback</option><option value="stop">Stop or disable source relay</option></select></label><button type="submit">Apply action</button></form></section>
@@ -2146,7 +2392,9 @@ const shareStream=document.getElementById('shareStream');
 if(shareStream){shareStream.addEventListener('click',async()=>{const url=document.getElementById('watchUrl').value;const title=${JSON.stringify(stream.title)};try{if(navigator.share){await navigator.share({title,url});setCopyStatus('Share sheet opened.');}else{await copyText(url,'Stream link');}}catch(error){if(error && error.name==='AbortError')return;try{await copyText(url,'Stream link');}catch{setCopyStatus('Sharing failed. Select the watch page field and copy it manually.');}}});}
 const platformPreset=document.getElementById('platformPreset');
 const destinationRtmpUrl=document.getElementById('destinationRtmpUrl');
-if(platformPreset){platformPreset.addEventListener('change',()=>{const option=platformPreset.selectedOptions[0];if(option && !destinationRtmpUrl.value){destinationRtmpUrl.value=option.dataset.ingest||'';}});platformPreset.dispatchEvent(new Event('change'));}
+const destinationConnectLink=document.getElementById('destinationConnectLink');
+const destinationServices=document.getElementById('destinationServices');
+if(platformPreset){platformPreset.addEventListener('change',()=>{const option=platformPreset.selectedOptions[0];if(option && !destinationRtmpUrl.value){destinationRtmpUrl.value=option.dataset.ingest||'';} if(destinationConnectLink){const connect=option?.dataset.connect||'';destinationConnectLink.href=connect||'#';destinationConnectLink.style.display=connect?'inline-block':'none';destinationConnectLink.textContent=connect?'Open '+option.textContent+' setup':'Manual setup only';} if(destinationServices){destinationServices.textContent=option?.dataset.services?'Supported through this service: '+option.dataset.services:'Manual RTMP destination.';}});platformPreset.dispatchEvent(new Event('change'));}
 const relayLabel=document.getElementById('relayLabel');
 const relayMediaType=document.getElementById('relayMediaType');
 const relayUrl=document.getElementById('relayUrl');
@@ -2232,12 +2480,30 @@ app.post('/dashboard/destinations', requireUser, (req, res) => {
     name: String(req.body.name || preset.name).trim().slice(0, 100) || preset.name,
     rtmpUrl,
     streamKey: String(req.body.streamKey || '').trim(),
+    connectUrl: preset.connectUrl || preset.url || '',
+    services: preset.services || [],
+    connected: false,
     enabled: req.body.enabled === 'true',
     createdAt: nowIso()
   });
   stream.updatedAt = nowIso();
   store.events.push({ id: id('evt'), type: 'destination_added', payload: { streamId: stream.id, platform: preset.name }, createdAt: nowIso() });
   writeStore(store);
+  res.redirect('/dashboard');
+});
+
+app.post('/dashboard/destinations/enabled', requireUser, (req, res) => {
+  const store = readStore();
+  const stream = store.streams.find((item) => item.ownerId === req.user.id);
+  if (stream) {
+    const enabledIds = new Set(bodyValues(req.body.enabledDestinations));
+    for (const destination of stream.destinations || []) {
+      destination.enabled = enabledIds.has(destination.id);
+    }
+    stream.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'destination_enabled_state_updated', payload: { streamId: stream.id, enabledCount: enabledIds.size }, createdAt: nowIso() });
+    writeStore(store);
+  }
   res.redirect('/dashboard');
 });
 
@@ -2558,7 +2824,10 @@ app.post('/dashboard/media-settings', requireUser, (req, res) => {
     autoRefreshMedia: req.body.autoRefreshMedia === 'true',
     uploadEnableDelaySeconds: req.body.uploadEnableDelaySeconds,
     playbackMode: req.body.playbackMode,
-    continuousPlayback: req.body.playbackMode !== 'disabled'
+    continuousPlayback: req.body.playbackMode !== 'disabled',
+    fadeInSeconds: req.body.fadeInSeconds,
+    fadeOutSeconds: req.body.fadeOutSeconds,
+    crossfadeSeconds: req.body.crossfadeSeconds
   });
   stream.updatedAt = nowIso();
   store.events.push({ id: id('evt'), type: 'stream_media_settings_updated', payload: { streamId: stream.id, mediaBehavior: stream.mediaBehavior }, createdAt: nowIso() });
@@ -2775,25 +3044,79 @@ app.post('/admin/branding', requireAdmin, (req, res) => {
 
 app.get('/admin/messaging', requireAdmin, (req, res) => {
   const store = readStore();
-  const messaging = store.settings.messaging || defaultMessagingSettings();
+  const messaging = normalizeMessagingSettings(store.settings.messaging || {});
   const support = store.settings.supportDefaults || defaultSupportSettings();
+  const messageRows = (store.comments || []).slice(-150).reverse().map((comment) => {
+    const stream = store.streams.find((item) => item.id === comment.streamId);
+    const status = comment.status || 'visible';
+    return `<tr><td>${escapeHtml(comment.createdAt || '')}</td><td>${escapeHtml(stream?.title || 'Unknown stream')}</td><td>${escapeHtml(comment.authorName || '')}<br><span class="muted">${escapeHtml(comment.authorType || '')}</span></td><td>${escapeHtml(status)}</td><td>${escapeHtml(comment.message || '')}</td><td><form class="inline-form" method="post" action="/admin/comments/${escapeHtml(comment.id)}/moderate"><button name="action" value="approve" type="submit">Approve</button><button name="action" value="hide" type="submit">Hide</button><button name="action" value="delete" type="submit" class="danger">Delete</button></form></td></tr>`;
+  }).join('');
+  const retentionOptions = [
+    [0, 'Keep until manually cleared'],
+    [6, '6 hours'],
+    [12, '12 hours'],
+    [24, '1 day'],
+    [72, '3 days'],
+    [168, '1 week'],
+    [336, '2 weeks'],
+    [720, '30 days']
+  ].map(([value, label]) => `<option value="${value}" ${Number(messaging.retentionHours) === value ? 'selected' : ''}>${label}</option>`).join('');
   const body = `<h1>Admin panel</h1>${adminTabs('messaging')}
-<section><h2>Messaging features</h2><form method="post" action="/admin/messaging"><label><input type="checkbox" name="visitorMessagesEnabled" value="true" ${messaging.visitorMessagesEnabled ? 'checked' : ''}> Guests can post stream messages when comments are enabled on the stream</label><label><input type="checkbox" name="loggedInUserMessagesEnabled" value="true" ${messaging.loggedInUserMessagesEnabled ? 'checked' : ''}> Logged-in users can post stream messages</label><label><input type="checkbox" name="reactionsEnabled" value="true" ${messaging.reactionsEnabled ? 'checked' : ''}> Enable reactions on messages</label><label><input type="checkbox" name="requireNameForGuests" value="true" ${messaging.requireNameForGuests ? 'checked' : ''}> Require guests to enter a display name</label><label>Maximum message length<input type="number" min="100" max="5000" step="50" name="maxMessageLength" value="${escapeHtml(messaging.maxMessageLength)}"></label><button type="submit">Save messaging settings</button></form></section>
+<section><h2>Messaging features</h2><form method="post" action="/admin/messaging"><label><input type="checkbox" name="visitorMessagesEnabled" value="true" ${messaging.visitorMessagesEnabled ? 'checked' : ''}> Guests can post stream messages when comments are enabled on the stream</label><label><input type="checkbox" name="loggedInUserMessagesEnabled" value="true" ${messaging.loggedInUserMessagesEnabled ? 'checked' : ''}> Logged-in users can post stream messages</label><label><input type="checkbox" name="reactionsEnabled" value="true" ${messaging.reactionsEnabled ? 'checked' : ''}> Enable reactions on messages</label><label><input type="checkbox" name="requireNameForGuests" value="true" ${messaging.requireNameForGuests ? 'checked' : ''}> Require guests to enter a display name</label><label><input type="checkbox" name="requireGuestReview" value="true" ${messaging.requireGuestReview ? 'checked' : ''}> Hold guest messages for admin review</label><label><input type="checkbox" name="autoHideBlockedWords" value="true" ${messaging.autoHideBlockedWords ? 'checked' : ''}> Auto-hide messages containing blocked words</label><label>Maximum message length<input type="number" min="100" max="5000" step="50" name="maxMessageLength" value="${escapeHtml(messaging.maxMessageLength)}"></label><label>Auto-clear messages after<select name="retentionHours">${retentionOptions}</select></label><label>Maximum stored messages<input type="number" min="100" max="50000" step="100" name="maxStoredMessages" value="${escapeHtml(messaging.maxStoredMessages)}"></label><label>Blocked words or phrases, one per line<textarea name="blockedWords" rows="5">${escapeHtml(messaging.blockedWords || '')}</textarea></label><button type="submit">Save messaging settings</button></form></section>
+<section><h2>Message moderation</h2><p class="muted">Approve pending messages, hide messages from stream pages, or delete messages that should not be retained.</p><table><tr><th>Time</th><th>Stream</th><th>Author</th><th>Status</th><th>Message</th><th>Actions</th></tr>${messageRows || '<tr><td colspan="6">No messages have been posted yet.</td></tr>'}</table><form method="post" action="/admin/comments/prune"><button type="submit">Run message cleanup now</button></form></section>
 <section><h2>Default support and payment box</h2><p class="muted">These defaults are copied into new streams. Stream owners can link their own PayPal, Stripe, Cash App, Apple Pay, or payment embed. The platform payment area can hold WHMCS-linked payment methods for Devine Creations or AAAStreamer support.</p><form method="post" action="/admin/support-defaults"><label><input type="checkbox" name="enabled" value="true" ${support.enabled ? 'checked' : ''}> Enable support box by default for new streams</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${support.showOnWatchPage ? 'checked' : ''}> Show support boxes to visitors by default</label><label>Default placement<select name="placement"><option value="before" ${support.placement === 'before' ? 'selected' : ''}>Before stream player</option><option value="during" ${support.placement === 'during' ? 'selected' : ''}>Beside stream player area</option><option value="after" ${!['before', 'during'].includes(support.placement) ? 'selected' : ''}>After comments and stream details</option></select></label><label>Heading<input name="title" value="${escapeHtml(support.title)}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(support.description)}</textarea></label><label>Creator payment or donation embed HTML<textarea name="embedHtml" rows="6">${escapeHtml(support.embedHtml)}</textarea></label><label><input type="checkbox" name="platformShareEnabled" value="true" ${support.platformShareEnabled ? 'checked' : ''}> Enable platform support share notice</label><label>Platform share percent<input type="number" min="0" max="100" step="0.1" name="platformSharePercent" value="${escapeHtml(support.platformSharePercent ?? 15)}"></label><label>Platform payment heading<input name="platformPaymentTitle" value="${escapeHtml(support.platformPaymentTitle || 'Support AAAStreamer hosting')}"></label><label>Platform payment description<textarea name="platformPaymentDescription" rows="3">${escapeHtml(support.platformPaymentDescription || '')}</textarea></label><label>Platform or WHMCS payment embed HTML<textarea name="platformPaymentEmbedHtml" rows="6">${escapeHtml(support.platformPaymentEmbedHtml || '')}</textarea></label><button type="submit">Save support defaults</button></form></section>`;
   res.send(page('Admin messaging', body, req.user));
 });
 
 app.post('/admin/messaging', requireAdmin, (req, res) => {
   const store = readStore();
-  store.settings.messaging = {
+  store.settings.messaging = normalizeMessagingSettings({
     visitorMessagesEnabled: req.body.visitorMessagesEnabled === 'true',
     loggedInUserMessagesEnabled: req.body.loggedInUserMessagesEnabled === 'true',
     reactionsEnabled: req.body.reactionsEnabled === 'true',
     requireNameForGuests: req.body.requireNameForGuests === 'true',
-    maxMessageLength: clampNumber(req.body.maxMessageLength, 100, 5000, 1000)
-  };
+    requireGuestReview: req.body.requireGuestReview === 'true',
+    autoHideBlockedWords: req.body.autoHideBlockedWords === 'true',
+    maxMessageLength: req.body.maxMessageLength,
+    retentionHours: req.body.retentionHours,
+    maxStoredMessages: req.body.maxStoredMessages,
+    blockedWords: req.body.blockedWords
+  });
+  pruneComments(store);
   store.events.push({ id: id('evt'), type: 'messaging_settings_updated', payload: store.settings.messaging, createdAt: nowIso() });
   writeStore(store);
+  res.redirect('/admin/messaging');
+});
+
+app.post('/admin/comments/prune', requireAdmin, (req, res) => {
+  const store = readStore();
+  const before = store.comments.length;
+  pruneComments(store);
+  store.events.push({ id: id('evt'), type: 'comments_pruned', payload: { before, after: store.comments.length }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/admin/messaging');
+});
+
+app.post('/admin/comments/:commentId/moderate', requireAdmin, (req, res) => {
+  const store = readStore();
+  const commentIndex = store.comments.findIndex((comment) => comment.id === req.params.commentId);
+  if (commentIndex >= 0) {
+    const action = String(req.body.action || '').toLowerCase();
+    const comment = store.comments[commentIndex];
+    if (action === 'delete') {
+      store.comments.splice(commentIndex, 1);
+    } else if (action === 'hide') {
+      comment.status = 'hidden';
+      comment.moderatedAt = nowIso();
+      comment.moderatedBy = req.user.id;
+    } else if (action === 'approve') {
+      comment.status = 'visible';
+      comment.moderatedAt = nowIso();
+      comment.moderatedBy = req.user.id;
+    }
+    store.events.push({ id: id('evt'), type: 'comment_moderated', payload: { commentId: req.params.commentId, action }, createdAt: nowIso() });
+    writeStore(store);
+  }
   res.redirect('/admin/messaging');
 });
 
@@ -2989,10 +3312,12 @@ app.get('/admin/media', requireAdmin, (req, res) => {
   const media = store.settings.mediaLibrary || defaultMediaSettings();
   const catalog = mediaCatalog(store, req.user);
   const folderRows = catalog.map((folder) => `<tr><td>${escapeHtml(folder.label)}</td><td><code>${escapeHtml(folder.path || '')}</code></td><td>${folder.enabled ? 'enabled' : 'disabled'}</td><td>${folder.visibleToUsers ? 'visible to users' : 'admin only'}</td><td>${folder.files.length}</td></tr>`).join('');
+  const fileRows = catalog.flatMap((folder) => folder.files.slice(0, 200).map((file) => `<tr><td>${escapeHtml(file.label)}</td><td>${escapeHtml(file.fileName || path.basename(file.relativePath))}</td><td>${escapeHtml(folder.label)}</td><td>${escapeHtml(file.mediaType)}</td><td>${escapeHtml(formatDuration(file.durationSeconds))}</td><td>${escapeHtml(file.chapters?.length ? `${file.chapters.length} chapters` : 'No chapters')}</td><td>${escapeHtml(formatBytes(file.size))}</td></tr>`)).join('');
   const body = `<h1>Admin panel</h1>${adminTabs('media')}
 <section><h2>Media library folders</h2><p class="muted">Admins control which server folders are available for streamers. Hidden folders remain available to admins but are not shown to normal users. Use one folder per line in this format: label|path|enabled|visible|audio|video. Use disabled, hidden, no-audio, or no-video when needed.</p>
 <form method="post" action="/admin/media"><label><input type="checkbox" name="enabled" value="true" ${media.enabled ? 'checked' : ''}> Enable server media library</label><label><input type="checkbox" name="allowUsersToSelectServerMedia" value="true" ${media.allowUsersToSelectServerMedia ? 'checked' : ''}> Users can select media from visible folders</label><label><input type="checkbox" name="uploadsVisibleToUsers" value="true" ${media.uploadsVisibleToUsers ? 'checked' : ''}> Uploaded media folder is visible to users</label><label><input type="checkbox" name="urlRelayEnabled" value="true" ${media.urlRelayEnabled ? 'checked' : ''}> Enable URL relay sources</label><label><input type="checkbox" name="allowUsersToAddRelayUrls" value="true" ${media.allowUsersToAddRelayUrls ? 'checked' : ''}> Users can add their own HTTP or HTTPS relay URLs</label><label>Upload folder<input name="uploadFolder" value="${escapeHtml(media.uploadFolder)}"></label><label>Maximum scan depth<input type="number" min="1" max="8" name="maxScanDepth" value="${escapeHtml(media.maxScanDepth)}"></label><label>Folders<textarea name="folders" rows="8">${escapeHtml(mediaFoldersText(media))}</textarea></label><button type="submit">Save media source settings</button></form></section>
-<section><h2>Detected media</h2><table><tr><th>Folder</th><th>Path</th><th>Status</th><th>User access</th><th>Detected files</th></tr>${folderRows || '<tr><td colspan="5">No enabled media folders are configured or reachable.</td></tr>'}</table></section>`;
+<section><h2>Detected folders</h2><table><tr><th>Folder</th><th>Path</th><th>Status</th><th>User access</th><th>Detected files</th></tr>${folderRows || '<tr><td colspan="5">No enabled media folders are configured or reachable.</td></tr>'}</table></section>
+<section><h2>Detected media files</h2><table><tr><th>Title</th><th>File name</th><th>Folder</th><th>Type</th><th>Duration</th><th>Chapters</th><th>Size</th></tr>${fileRows || '<tr><td colspan="7">No playable media files were detected in the enabled folders.</td></tr>'}</table></section>`;
   res.send(page('Admin media sources', body, req.user));
 });
 
@@ -3272,11 +3597,6 @@ app.get('/api/streams/:streamId', (req, res) => {
   res.json({ success: true, stream: publicStreamSummary(stream, store, user?.role === 'admin' || stream.ownerId === user?.id) });
 });
 
-app.get('/api/media/catalog', requireUser, (req, res) => {
-  const store = readStore();
-  res.json({ success: true, folders: mediaCatalog(store, req.user) });
-});
-
 app.post('/api/streams/:streamId/comments', (req, res) => {
   const store = readStore();
   const stream = store.streams.find((item) => item.id === req.params.streamId || item.slug === req.params.streamId);
@@ -3285,7 +3605,7 @@ app.post('/api/streams/:streamId/comments', (req, res) => {
     return;
   }
   const user = currentUser(req);
-  const messaging = store.settings.messaging || defaultMessagingSettings();
+  const messaging = normalizeMessagingSettings(store.settings.messaging || {});
   if (user && !messaging.loggedInUserMessagesEnabled) {
     res.status(403).json({ success: false, error: 'Messages are disabled for logged-in users' });
     return;
@@ -3308,6 +3628,8 @@ app.post('/api/streams/:streamId/comments', (req, res) => {
     res.status(400).json({ success: false, error: 'Comment is required' });
     return;
   }
+  const blockedWord = messaging.autoHideBlockedWords ? messageHitsBlockedWord(message, messaging) : '';
+  const status = blockedWord ? 'hidden' : (!user && messaging.requireGuestReview ? 'pending' : 'visible');
   const comment = {
     id: id('cmt'),
     streamId: stream.id,
@@ -3317,19 +3639,27 @@ app.post('/api/streams/:streamId/comments', (req, res) => {
     messageType,
     message,
     reactions: {},
-    status: 'visible',
+    status,
+    moderationReason: blockedWord ? `Blocked word or phrase: ${blockedWord}` : '',
     createdAt: nowIso()
   };
   store.comments.push(comment);
-  store.comments = store.comments.slice(-5000);
+  pruneComments(store);
   writeStore(store);
-  broadcast({ type: 'comment', payload: { ...comment, html: renderComment(comment, messaging.reactionsEnabled) } });
-  res.json({ success: true, comment });
+  if (comment.status === 'visible') {
+    broadcast({ type: 'comment', payload: { ...comment, html: renderComment(comment, messaging.reactionsEnabled) } });
+  }
+  res.json({
+    success: true,
+    comment,
+    moderationStatus: comment.status,
+    message: comment.status === 'pending' ? 'Message received and waiting for moderation.' : comment.status === 'hidden' ? 'Message received but hidden by moderation settings.' : 'Message posted.'
+  });
 });
 
 app.post('/api/comments/:commentId/reactions', (req, res) => {
   const store = readStore();
-  const messaging = store.settings.messaging || defaultMessagingSettings();
+  const messaging = normalizeMessagingSettings(store.settings.messaging || {});
   if (!messaging.reactionsEnabled) {
     res.status(403).json({ success: false, error: 'Reactions are disabled' });
     return;
@@ -3340,7 +3670,7 @@ app.post('/api/comments/:commentId/reactions', (req, res) => {
     res.status(400).json({ success: false, error: 'Unsupported reaction' });
     return;
   }
-  const comment = store.comments.find((item) => item.id === req.params.commentId && (!streamId || item.streamId === streamId));
+  const comment = store.comments.find((item) => item.id === req.params.commentId && (!streamId || item.streamId === streamId) && item.status !== 'hidden' && item.status !== 'pending');
   if (!comment) {
     res.status(404).json({ success: false, error: 'Comment not found' });
     return;

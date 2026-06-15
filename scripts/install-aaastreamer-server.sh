@@ -4,6 +4,9 @@ set -euo pipefail
 APP_USER="${APP_USER:-aaastreamer}"
 APP_DIR="${APP_DIR:-/opt/aaastreamer}"
 APP_PORT="${APP_PORT:-8095}"
+DATA_DIR="${DATA_DIR:-/var/lib/aaastreamer}"
+MEDIA_DIR="${MEDIA_DIR:-${DATA_DIR}/media}"
+UPLOAD_DIR="${UPLOAD_DIR:-${DATA_DIR}/uploads}"
 PUBLIC_URL="${PUBLIC_URL:-}"
 RTMP_HOST="${RTMP_HOST:-localhost}"
 RTMP_APP_NAME="${RTMP_APP_NAME:-live}"
@@ -26,6 +29,9 @@ fi
 echo "Installing AAAStreamer server"
 echo "App user: ${APP_USER}"
 echo "App dir: ${APP_DIR}"
+echo "Data dir: ${DATA_DIR}"
+echo "Media dir: ${MEDIA_DIR}"
+echo "Upload dir: ${UPLOAD_DIR}"
 echo "Port: ${APP_PORT}"
 echo "Public URL: ${PUBLIC_URL:-not set yet}"
 
@@ -63,6 +69,12 @@ install_source() {
   sudo -u "$APP_USER" npm --prefix "$APP_DIR/api" ci --omit=dev
 }
 
+prepare_storage() {
+  mkdir -p "$DATA_DIR" "$MEDIA_DIR" "$UPLOAD_DIR"
+  chown -R "$APP_USER:$APP_USER" "$DATA_DIR"
+  chmod 750 "$DATA_DIR" "$MEDIA_DIR" "$UPLOAD_DIR"
+}
+
 write_env() {
   mkdir -p /etc/aaastreamer
   umask 077
@@ -75,6 +87,9 @@ RTMP_APP_NAME=${RTMP_APP_NAME}
 AAASTREAMER_REGISTRATION_ENABLED=true
 AAASTREAMER_UPLOAD_LIMIT=75mb
 AAASTREAMER_MAX_UPLOAD_BYTES=78643200
+AAASTREAMER_DATA_DIR=${DATA_DIR}
+AAASTREAMER_MEDIA_FOLDERS=Server media|${MEDIA_DIR}|enabled|visible|audio|video
+AAASTREAMER_UPLOAD_FOLDER=${UPLOAD_DIR}
 # Optional integrations. Set values after install, then restart ${SERVICE_NAME}.
 AAASTREAMER_WHMCS_URL=
 AAASTREAMER_WHMCS_API_IDENTIFIER=
@@ -124,7 +139,7 @@ RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
-ReadWritePaths=${APP_DIR}/api/data /tmp /var/tmp
+ReadWritePaths=${APP_DIR}/api/data ${DATA_DIR} ${MEDIA_DIR} ${UPLOAD_DIR} /tmp /var/tmp
 
 [Install]
 WantedBy=multi-user.target
@@ -167,6 +182,7 @@ EOF_NGINX
 install_packages
 ensure_user
 install_source
+prepare_storage
 write_env
 write_systemd
 write_nginx
