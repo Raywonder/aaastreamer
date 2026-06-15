@@ -363,7 +363,7 @@ function defaultEncoderSettings() {
     playerBufferSeconds: 10,
     hlsSegmentDurationMs: 2000,
     hlsPartDurationMs: 200,
-    hlsSegmentCount: 8
+    hlsSegmentCount: 12
   };
 }
 
@@ -701,6 +701,10 @@ function defaultMediaSettings() {
     'Mounted music|/mnt/*/music|enabled|visible|audio|video',
     'Website audio uploads|/home/dom/*html/uploads/website*/Audio|enabled|visible|audio|no-video',
     'Website gallery videos|/home/dom/*html/uploads/website*/galleries|enabled|visible|no-audio|video',
+    'Devine Creations website audio|/home/devinecr/devinecreations.net/uploads/website_specific/audio|enabled|visible|audio|no-video',
+    'Devine Creations galleries|/home/devinecr/devinecreations.net/uploads/galleries|enabled|visible|no-audio|video',
+    'VoiceLink uploaded media|/home/devinecr/apps/voicelink-local/data/media|enabled|visible|audio|video',
+    'Thrive Messenger videos|/home/devinecr/apps/ThriveMessenger/assets/videos|enabled|visible|no-audio|video',
     'Backup root|/mnt/backup|enabled|hidden|audio|video'
   ];
   const folders = folderSpecs.map((spec, index) => {
@@ -1686,11 +1690,31 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
   const targetLatency = Number(stream.latencySettings?.targetLatencySeconds || 6);
   const playerBuffer = Number(stream.latencySettings?.playerBufferSeconds || 10);
   const reconnectBuffer = Number(stream.latencySettings?.reconnectBufferSeconds || 10);
-  const commonAttrs = `id="${escapeHtml(playerId)}" controls playsinline${autoplay} preload="auto" data-target-latency="${escapeHtml(targetLatency)}" data-player-buffer="${escapeHtml(playerBuffer)}" data-reconnect-buffer="${escapeHtml(reconnectBuffer)}"`;
+  const volumeKey = `aaastreamer:volume:${stream?.id || stream?.streamKey || playerId}`;
+  const commonAttrs = `id="${escapeHtml(playerId)}" controls playsinline${autoplay} preload="auto" data-volume-key="${escapeHtml(volumeKey)}" data-target-latency="${escapeHtml(targetLatency)}" data-player-buffer="${escapeHtml(playerBuffer)}" data-reconnect-buffer="${escapeHtml(reconnectBuffer)}"`;
+  const volumeScript = `<script>
+(() => {
+  const player = document.getElementById(${JSON.stringify(playerId)});
+  if (!player) return;
+  const key = player.dataset.volumeKey;
+  try {
+    const saved = key ? localStorage.getItem(key) : null;
+    if (saved !== null) {
+      const value = Number(saved);
+      if (Number.isFinite(value) && value >= 0 && value <= 1) player.volume = value;
+    }
+  } catch {}
+  player.addEventListener('volumechange', () => {
+    try {
+      if (key) localStorage.setItem(key, String(player.volume));
+    } catch {}
+  });
+})();
+</script>`;
   if (!isHlsUrl(playbackUrl)) {
-    return `<video ${commonAttrs} src="${escapeHtml(playbackUrl)}"></video>`;
+    return `<video ${commonAttrs} src="${escapeHtml(playbackUrl)}"></video>${volumeScript}`;
   }
-  return `<video ${commonAttrs} data-hls-src="${escapeHtml(playbackUrl)}"></video><p id="${escapeHtml(statusId)}" class="muted" role="status">Loading stream player.</p><script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script><script>
+  return `<video ${commonAttrs} data-hls-src="${escapeHtml(playbackUrl)}"></video><p id="${escapeHtml(statusId)}" class="muted" role="status">Loading stream player.</p>${volumeScript}<script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script><script>
 (() => {
   const player = document.getElementById(${JSON.stringify(playerId)});
   const status = document.getElementById(${JSON.stringify(statusId)});
@@ -1701,23 +1725,26 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
   const playerBuffer = Math.max(targetLatency, Number(player.dataset.playerBuffer || 10) || 10);
   const reconnectDelay = Math.max(2000, (Number(player.dataset.reconnectBuffer || 10) || 10) * 1000);
   let retryTimer = null;
+  let nativeRetryCount = 0;
+  const refreshSource = () => source + (source.includes('?') ? '&' : '?') + 'refresh=' + Date.now();
   const retryNative = () => {
     clearTimeout(retryTimer);
     retryTimer = setTimeout(() => {
-      const currentTime = player.currentTime || 0;
-      player.src = source + (source.includes('?') ? '&' : '?') + 'refresh=' + Date.now();
+      nativeRetryCount += 1;
+      setStatus('Playback stalled. Reloading the live stream buffer.');
+      player.src = refreshSource();
       player.load();
-      if (currentTime > 0) {
-        player.currentTime = currentTime;
-      }
       player.play().catch(() => {});
-    }, reconnectDelay);
+    }, Math.min(reconnectDelay, 5000));
   };
   if (player.canPlayType('application/vnd.apple.mpegurl')) {
     player.src = source;
     player.addEventListener('waiting', () => setStatus('Buffering stream. Holding a little more audio for smooth playback.'));
+    player.addEventListener('playing', () => { nativeRetryCount = 0; setStatus('Stream player ready.'); });
+    player.addEventListener('pause', () => clearTimeout(retryTimer));
     player.addEventListener('stalled', retryNative);
     player.addEventListener('error', retryNative);
+    player.addEventListener('emptied', () => { if (nativeRetryCount < 5) retryNative(); });
     setStatus('Stream player ready.');
   } else if (window.Hls && Hls.isSupported()) {
     const hls = new Hls({
@@ -1889,6 +1916,19 @@ function mediaCatalogCheckboxes(store, user, stream) {
     }
   }
   return rows.join('') || '<tr><td colspan="10">No media files are available from enabled folders.</td></tr>';
+}
+
+function mediaLibraryFolderRows(store, user) {
+  const catalog = mediaCatalog(store, user);
+  return catalog.map((folder) => {
+    const typeText = [
+      folder.allowAudio ? 'audio' : '',
+      folder.allowVideo ? 'video' : ''
+    ].filter(Boolean).join(' and ') || 'none';
+    const accessText = folder.visibleToUsers ? 'visible' : 'admin only';
+    const pathText = folder.path ? `<br><code>${escapeHtml(folder.path)}</code>` : '';
+    return `<tr><td>${escapeHtml(folder.label)}${pathText}</td><td>${escapeHtml(typeText)}</td><td>${escapeHtml(accessText)}</td><td>${escapeHtml(String(folder.files.length))}</td></tr>`;
+  }).join('') || '<tr><td colspan="4">No media library folders are enabled for this account.</td></tr>';
 }
 
 function formatBytes(bytes) {
@@ -2755,25 +2795,49 @@ app.get('/dashboard', (req, res) => {
   const queueRows = queuedSourceRows(stream, store);
   const activeSourceRunning = sourceProcesses.has(stream.id);
   const quickSourceCards = sourcePresetCards(stream, serverUrl);
+  const mediaFolderRows = mediaLibraryFolderRows(store, user);
   const behavior = normalizeStreamMediaBehavior(stream.mediaBehavior);
   const scheduleRows = scheduledShowsForStream(store, stream).map((show) => `<tr><td>${escapeHtml(show.title)}</td><td>${escapeHtml(show.startAt || '')}</td><td>${escapeHtml(show.mode)}</td><td>${escapeHtml(show.status)}</td><td><form method="post" action="/dashboard/schedule/${escapeHtml(show.id)}/toggle" class="inline-form"><button type="submit">${show.enabled ? 'Disable' : 'Enable'}</button></form><form method="post" action="/dashboard/schedule/${escapeHtml(show.id)}/cancel" class="inline-form"><button type="submit" class="danger">Cancel</button></form></td></tr>`).join('');
   const authDomains = configuredAuthDomains(store, req).join(', ');
   const passkeyRows = (user.passkeys || []).map((passkey) => `<tr><td>${escapeHtml(passkey.name || 'Passkey')}</td><td>${escapeHtml(passkey.rpID || '')}</td><td>${escapeHtml(passkey.createdAt || '')}</td><td>${escapeHtml(passkey.lastUsedAt || 'Never')}</td></tr>`).join('');
   const totpUri = user.totpPendingSecret ? `otpauth://totp/${encodeURIComponent(store.settings.siteName || 'AAAStreamer')}:${encodeURIComponent(user.username)}?secret=${encodeURIComponent(user.totpPendingSecret)}&issuer=${encodeURIComponent(store.settings.siteName || 'AAAStreamer')}` : '';
   const tabs = dashboardTabs(activeTab);
-  const overviewTab = `<section><h2>User streaming details</h2>
-<p class="muted">Use these connection details in OBS, Ecamm Live, Audio Hijack, Streamlabs, vMix, Larix Broadcaster, or any app that can publish RTMP.</p>
-<div class="field-row"><label>Server URL<input id="rtmpUrl" readonly value="${escapeHtml(serverUrl)}"></label><button type="button" data-copy-target="rtmpUrl">Copy URL</button></div>
-<div class="field-row"><label>Stream key<input id="streamKey" readonly value="${escapeHtml(stream.streamKey)}"></label><button type="button" data-copy-target="streamKey">Copy key</button></div>
+  const streamEvents = (store.events || []).filter((event) => event.payload?.streamId === stream.id).slice(-25);
+  const visibleComments = (store.comments || []).filter((comment) => comment.streamId === stream.id && comment.status !== 'hidden').length;
+  const pendingComments = (store.comments || []).filter((comment) => comment.streamId === stream.id && comment.status === 'pending').length;
+  const enabledDestinations = (stream.destinations || []).filter((destination) => destination.enabled).length;
+  const liveEncoderCount = Object.values(stream.activeEncoders || {}).filter((encoder) => encoder.status === 'live').length;
+  const lastEvent = streamEvents.at(-1);
+  const analyticsRows = [
+    ['Stream status', stream.status || 'offline'],
+    ['Relay process', activeSourceRunning ? 'running' : 'stopped'],
+    ['Current source', sourceSummary(selectedSource)],
+    ['Queue items', String((stream.sourceQueue || []).length)],
+    ['Enabled destinations', `${enabledDestinations} of ${(stream.destinations || []).length}`],
+    ['Live encoders', String(liveEncoderCount)],
+    ['Visible messages', String(visibleComments)],
+    ['Pending messages', String(pendingComments)],
+    ['Latest stream event', lastEvent ? `${lastEvent.type} at ${lastEvent.createdAt}` : 'No stream events yet']
+  ].map(([label, value]) => `<tr><th scope="row">${escapeHtml(label)}</th><td>${escapeHtml(value)}</td></tr>`).join('');
+  const recentEventRows = streamEvents.slice(-8).reverse().map((event) => `<tr><td>${escapeHtml(event.createdAt || '')}</td><td>${escapeHtml(event.type || '')}</td></tr>`).join('');
+  const overviewTab = `<section><h2>Links</h2>
 <div class="field-row"><label>Share link<input id="watchUrl" readonly value="${escapeHtml(shareUrl)}"></label><button type="button" data-copy-target="watchUrl">Copy share link</button></div>
 <div class="field-row"><label>Direct watch page<input id="directWatchUrl" readonly value="${escapeHtml(watchUrl)}"></label><button type="button" data-copy-target="directWatchUrl">Copy direct watch link</button></div>
 <div class="field-row"><label>HLS playback URL<input id="hlsUrl" readonly value="${escapeHtml(hlsUrl)}"></label><button type="button" data-copy-target="hlsUrl">Copy HLS link</button></div>
 <div class="field-row"><label>Web embed code<input id="embedCode" readonly value="${escapeHtml(embedCode)}"></label><button type="button" data-copy-target="embedCode">Copy embed code</button></div>
 <p><button type="button" id="shareStream">Share stream link</button></p><p id="copyStatus" class="notice" role="status" aria-live="polite"></p>
-<form method="post" action="/dashboard/share/mastodon"><label>Optional Mastodon share text<textarea name="status" rows="3">${escapeHtml(`${stream.title}\n${shareUrl}`)}</textarea></label><button type="submit">Share on Mastodon</button></form>
-<form class="inline-form" method="post" action="/dashboard/stream/key"><input type="hidden" name="action" value="revoke"><button type="submit" class="danger" onclick="return confirm('This will revoke the current stream key and generate a new one. Existing encoder settings using the old key will stop working until you update them. Continue?')">Revoke and generate new key</button></form></section>`;
-  const encodersTab = `<section><h2>Encoder keys and settings</h2><p class="muted">Use encoder keys for OBS, Ecamm, Audio Hijack, Streamlabs, vMix, Larix, and other software that publishes to AAAStreamer. Each row shows the key, audio settings, current status, and HLS output created for that encoder.</p><table><tr><th>Name</th><th>Key</th><th>Audio bitrate</th><th>Sample rate</th><th>Status</th><th>HLS output</th></tr>${encoderRows}</table>
-<form method="post" action="/dashboard/encoders"><label>Encoder name<input name="name" placeholder="OBS Windows, Ecamm Mac, Audio Hijack"></label><label>Audio bitrate<select name="audioBitrate">${audioBitrates.map((rate) => `<option ${rate === stream.encoderSettings.audioBitrate ? 'selected' : ''}>${rate}</option>`).join('')}</select></label><button type="submit">Add encoder key for another app</button></form></section>`;
+<form method="post" action="/dashboard/share/mastodon"><label>Optional Mastodon share text<textarea name="status" rows="3">${escapeHtml(`${stream.title}\n${shareUrl}`)}</textarea></label><button type="submit">Share on Mastodon</button></form></section>
+<section><h2>Stats and analytics</h2><table>${analyticsRows}</table></section>
+<section><h2>Recent stream activity</h2><table><tr><th>Time</th><th>Event</th></tr>${recentEventRows || '<tr><td colspan="2">No stream activity yet.</td></tr>'}</table></section>`;
+  const encodersTab = `<section><h2>Encoder connection details</h2>
+<p class="muted">Use these connection details in OBS, Ecamm Live, Audio Hijack, Streamlabs, vMix, Larix Broadcaster, or any app that can publish RTMP.</p>
+<div class="field-row"><label>Server URL<input id="rtmpUrl" readonly value="${escapeHtml(serverUrl)}"></label><button type="button" data-copy-target="rtmpUrl">Copy URL</button></div>
+<div class="field-row"><label>Primary stream key<input id="streamKey" readonly value="${escapeHtml(stream.streamKey)}"></label><button type="button" data-copy-target="streamKey">Copy key</button></div>
+<form class="inline-form" method="post" action="/dashboard/stream/key"><input type="hidden" name="action" value="revoke"><button type="submit" class="danger" onclick="return confirm('This will revoke the current stream key and generate a new one. Existing encoder settings using the old key will stop working until you update them. Continue?')">Revoke and generate new key</button></form></section>
+<section><h2>Encoder keys</h2><p class="muted">Each row shows a key that an encoder app can use, plus the audio settings, status, and HLS output for that encoder.</p><table><tr><th>Name</th><th>Key</th><th>Audio bitrate</th><th>Sample rate</th><th>Status</th><th>HLS output</th></tr>${encoderRows}</table>
+<form method="post" action="/dashboard/encoders"><label>Encoder name<input name="name" placeholder="OBS Windows, Ecamm Mac, Audio Hijack"></label><label>Audio bitrate<select name="audioBitrate">${audioBitrates.map((rate) => `<option ${rate === stream.encoderSettings.audioBitrate ? 'selected' : ''}>${rate}</option>`).join('')}</select></label><button type="submit">Add encoder key for another app</button></form></section>
+<section><h2>Encoder audio and video defaults</h2><form method="post" action="/dashboard/encoder-settings"><label>Video bitrate<input name="videoBitrate" value="${escapeHtml(stream.encoderSettings.videoBitrate || '4500k')}"></label><label>Audio bitrate<select name="audioBitrate">${audioBitrates.map((rate) => `<option ${rate === stream.encoderSettings.audioBitrate ? 'selected' : ''}>${rate}</option>`).join('')}</select></label><label>Audio channels<select name="audioChannels"><option value="stereo" selected>stereo</option></select></label><label>Sample rate<select name="sampleRate"><option value="44100" ${stream.encoderSettings.sampleRate === '44100' ? 'selected' : ''}>44100</option><option value="48000" ${stream.encoderSettings.sampleRate !== '44100' ? 'selected' : ''}>48000</option></select></label><label>Keyframe interval seconds<input name="keyframeIntervalSeconds" type="number" min="1" max="10" step="1" value="${escapeHtml(stream.encoderSettings.keyframeIntervalSeconds || 2)}"></label><label>HLS segment duration, ms<input name="hlsSegmentDurationMs" type="number" min="1000" max="6000" step="100" value="${escapeHtml(stream.encoderSettings.hlsSegmentDurationMs || 2000)}"></label><label>HLS segment count<input name="hlsSegmentCount" type="number" min="8" max="24" step="1" value="${escapeHtml(Math.max(12, Number(stream.encoderSettings.hlsSegmentCount || 12)))}"></label><button type="submit">Save encoder defaults</button></form></section>
+<section><h2>Encoder latency and buffer</h2><form method="post" action="/dashboard/latency"><label>Stream latency mode<select name="mode"><option value="low" ${stream.latencySettings.mode === 'low' ? 'selected' : ''}>Low latency</option><option value="balanced" ${stream.latencySettings.mode === 'balanced' ? 'selected' : ''}>Balanced</option><option value="stable" ${stream.latencySettings.mode === 'stable' ? 'selected' : ''}>Most stable for Safari and mobile browsers</option></select></label><label>Target live latency, seconds<input name="targetLatencySeconds" type="number" min="2" max="30" step="0.5" value="${escapeHtml(stream.latencySettings.targetLatencySeconds)}"></label><label>Player buffer, seconds<input name="playerBufferSeconds" type="number" min="4" max="60" step="0.5" value="${escapeHtml(stream.latencySettings.playerBufferSeconds)}"></label><label>Reconnect buffer, seconds<input name="reconnectBufferSeconds" type="number" min="4" max="120" step="1" value="${escapeHtml(stream.latencySettings.reconnectBufferSeconds)}"></label><button type="submit">Save encoder latency and buffer</button></form></section>`;
   const destinationsTab = `<section><h2>Destinations</h2><p class="muted">Destinations are external services or subchannels that may receive your stream, such as YouTube, Restream, Twitch, or a custom RTMP target. Select rows, then choose whether to enable or disable them. Manual RTMP details stay hidden unless you open them.</p><form id="destinationStateForm" method="post" action="/dashboard/destinations/enabled"><table><tr><th>Select for bulk action</th><th>Live status</th><th>Name or subchannel</th><th>Platform</th><th>Connection</th><th>Manual RTMP</th><th>Action</th></tr>${destinationRows || '<tr><td colspan="7">No destinations configured yet.</td></tr>'}</table><label>Destination action<select name="bulkAction"><option value="enable-selected">Enable selected destinations</option><option value="disable-selected">Disable selected destinations</option><option value="enable-all">Enable all destinations</option><option value="disable-all">Disable all destinations</option></select></label><p class="muted">Enable means the destination is allowed to receive stream output. Disable leaves the destination saved but prevents it from going live.</p><button type="submit">Apply destination action</button></form>
 <form method="post" action="/dashboard/destinations" data-confirm-kind="add" data-confirm-message="Add this destination or subchannel to your stream settings?"><label>Platform<select id="platformPreset" name="platform">${presetOptions}</select></label><p id="destinationServices" class="muted"></p><p><a id="destinationConnectLink" class="button" href="#" target="_blank" rel="noopener noreferrer">Open service setup</a></p><label>Name<input name="name" placeholder="Main YouTube channel"></label><label>RTMP or RTMPS URL, manual destinations only<input id="destinationRtmpUrl" name="rtmpUrl"></label><label>Stream key, manual destinations only<input name="streamKey"></label><label><input type="checkbox" name="enabled" value="true" checked> Enable this destination after saving</label><button type="submit">Add destination or subchannel</button></form></section>`;
   const accountTab = `<section><h2>Account details</h2><form method="post" action="/dashboard/account"><label>Display name<input name="displayName" value="${escapeHtml(user.displayName || '')}"></label><label>Client ID or client email<input name="whmcsLookup" value="${escapeHtml(user.whmcsClientId || user.whmcsPortalEmail || '')}" placeholder="Client ID or email address"></label><p class="muted">When the client portal is configured, AAAStreamer looks up the matching client ID and client email automatically.</p><button type="submit">Save account details</button></form><p>Client ID: <strong>${escapeHtml(user.whmcsClientId || 'None')}</strong>. Client email: <strong>${escapeHtml(user.whmcsPortalEmail || 'None')}</strong>.</p></section>
@@ -2785,6 +2849,7 @@ app.get('/dashboard', (req, res) => {
   const mediaTab = `<section><h2>Media management</h2><p>Current source: <strong>${escapeHtml(sourceSummary(selectedSource))}</strong>. Relay process: <strong>${activeSourceRunning ? 'running' : 'stopped'}</strong>.</p>
 <form method="post" action="/dashboard/media-settings"><div class="grid"><label><input type="checkbox" name="autoEnableUploads" value="true" ${behavior.autoEnableUploads ? 'checked' : ''}> Auto-enable new uploads</label><label><input type="checkbox" name="autoQueueUploads" value="true" ${behavior.autoQueueUploads ? 'checked' : ''}> Auto-add uploads to queue</label><label><input type="checkbox" name="autoRefreshMedia" value="true" ${behavior.autoRefreshMedia ? 'checked' : ''}> Auto-refresh media list</label><label>Enable delay after upload, seconds<input type="number" min="0" max="86400" name="uploadEnableDelaySeconds" value="${escapeHtml(behavior.uploadEnableDelaySeconds)}"></label><label>Playback action<select name="playbackMode"><option value="loop" ${behavior.playbackMode === 'loop' ? 'selected' : ''}>Auto loop continuously</option><option value="sequential" ${behavior.playbackMode === 'sequential' ? 'selected' : ''}>Play queue in order</option><option value="random" ${behavior.playbackMode === 'random' ? 'selected' : ''}>Random queue playback</option><option value="disabled" ${behavior.playbackMode === 'disabled' ? 'selected' : ''}>Stop or disable source relay</option></select></label><label>Fade in seconds<input type="range" min="0" max="30" step="1" name="fadeInSeconds" value="${escapeHtml(behavior.fadeInSeconds)}"></label><label>Fade out seconds<input type="range" min="0" max="30" step="1" name="fadeOutSeconds" value="${escapeHtml(behavior.fadeOutSeconds)}"></label><label>Crossfade target seconds<input type="range" min="0" max="30" step="1" name="crossfadeSeconds" value="${escapeHtml(behavior.crossfadeSeconds)}"></label></div><button type="submit">Save media settings</button></form>
 <section class="subsection"><h3>Quick source setup</h3><div class="preset-grid">${quickSourceCards}</div></section>
+<section class="subsection"><h3>Library folders</h3><p class="muted">These are the server folders currently available to this account for live or on-demand playback. The file count only includes supported audio and video formats that AAAStreamer can read.</p><table><tr><th>Library</th><th>Types</th><th>Access</th><th>Usable files</th></tr>${mediaFolderRows}</table></section>
 <form method="post" action="/dashboard/sources/select" data-confirm-kind="live" data-confirm-message="Start playing or queue the selected media for this stream?"><input type="hidden" name="sourceType" value="localMedia"><p><button type="button" id="checkAllMedia">Check all media</button><button type="button" id="uncheckAllMedia" class="secondary">Uncheck all media</button></p><table id="mediaCatalog"><tr><th>Select</th><th>Title</th><th>File name</th><th>Folder</th><th>Type</th><th>Duration</th><th>Size</th><th>Chapters</th><th>Use status</th><th>Preview</th></tr>${mediaCatalogCheckboxes(store, user, stream)}</table><p class="muted">Selected media becomes the current source or is added to the playback queue, depending on your media playback settings.</p><button type="submit">Start playing or queue selected media</button></form>
 <form method="post" action="/dashboard/sources/upload" data-confirm-kind="add" data-confirm-message="Upload and add the selected media files?"><label>Upload audio or video files<input id="mediaUpload" type="file" accept="audio/*,video/*" multiple></label><input type="hidden" id="mediaUploadData" name="uploadData"><label>Upload title<input name="uploadLabel" placeholder="Intro music, event replay, audio described movie"></label><button type="submit">Upload media</button></form>
 <form method="post" action="/dashboard/sources/url" data-confirm-kind="add" data-confirm-message="Add this URL relay source?"><input type="hidden" name="sourceType" value="urlRelay"><label>Relay label<input id="relayLabel" name="relayLabel" placeholder="Radio relay, remote event, training video"></label><label>Media type<select id="relayMediaType" name="relayMediaType"><option value="video">video</option><option value="audio">audio</option></select></label><label>HTTP or HTTPS media URL<input id="relayUrl" name="relayUrl" placeholder="https://example.com/stream.mp3"></label><button type="submit">Add URL relay source</button></form>
@@ -2795,7 +2860,7 @@ app.get('/dashboard', (req, res) => {
 <section><h2>Extra embedded content</h2><form method="post" action="/dashboard/extra-content"><label><input type="checkbox" name="enabled" value="true" ${stream.extraContent?.enabled ? 'checked' : ''}> Enable extra embedded content</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${stream.extraContent?.showOnWatchPage ? 'checked' : ''}> Show on visitor stream page</label><label>Heading<input name="title" value="${escapeHtml(stream.extraContent?.title || 'Additional content')}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(stream.extraContent?.description || '')}</textarea></label><label>Embed HTML<textarea name="embedHtml" rows="8">${escapeHtml(stream.extraContent?.embedHtml || '')}</textarea></label><button type="submit">Save extra content</button></form>${renderExtraContentBox(stream, 'dashboard')}</section>`;
   const support = effectiveSupportSettings(stream, user, store.settings);
   const supportTab = `<section><h2>Support and payment box</h2><p class="muted">Admin streams use the configured default client when the stream field is blank. Linked user accounts use their stored client ID.</p><form method="post" action="/dashboard/support"><label><input type="checkbox" name="enabled" value="true" ${support.enabled ? 'checked' : ''}> Enable support box for this stream</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${support.showOnWatchPage ? 'checked' : ''}> Show support box on the visitor watch page</label><label>Placement<select name="placement"><option value="before" ${support.placement === 'before' ? 'selected' : ''}>Before stream player</option><option value="during" ${support.placement === 'during' ? 'selected' : ''}>Beside stream player area</option><option value="after" ${!['before', 'during'].includes(support.placement) ? 'selected' : ''}>After comments and stream details</option></select></label><label>Heading<input name="title" value="${escapeHtml(support.title || 'Support this stream')}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(support.description || '')}</textarea></label><label>PayPal URL<input name="paypalUrl" value="${escapeHtml(support.paypalUrl || '')}" placeholder="https://paypal.me/example"></label><label>Stripe payment link<input name="stripeUrl" value="${escapeHtml(support.stripeUrl || '')}" placeholder="https://buy.stripe.com/..."></label><label>Stripe Connect account ID<input name="stripeConnectAccountId" value="${escapeHtml(support.stripeConnectAccountId || '')}" placeholder="acct_..."></label><label>Client ID or client email for invoice payments<input name="whmcsLookup" value="${escapeHtml(support.whmcsClientId || user.whmcsClientId || user.whmcsPortalEmail || '')}" placeholder="${escapeHtml(user.role === 'admin' ? paymentSettings.whmcsDefaultClientId || 'Admin default not set' : user.whmcsClientId || 'Linked client ID or email')}"></label><label>Cash App URL<input name="cashAppUrl" value="${escapeHtml(support.cashAppUrl || '')}" placeholder="https://cash.app/$name"></label><label>Apple Pay or payment URL<input name="applePayUrl" value="${escapeHtml(support.applePayUrl || '')}" placeholder="https://example.com/apple-pay"></label><label>Payment notes<textarea name="paymentNotes" rows="3">${escapeHtml(support.paymentNotes || '')}</textarea></label><label>Payment or donation embed HTML<textarea name="embedHtml" rows="6">${escapeHtml(support.embedHtml || '')}</textarea></label><button type="submit">Save support settings</button></form>${renderSupportBox({ ...stream, support }, 'dashboard')}</section>`;
-  const advancedTab = `<section><h2>Latency and buffer</h2><form method="post" action="/dashboard/latency"><label>Stream latency mode<select name="mode"><option value="low" ${stream.latencySettings.mode === 'low' ? 'selected' : ''}>Low latency</option><option value="balanced" ${stream.latencySettings.mode === 'balanced' ? 'selected' : ''}>Balanced</option><option value="stable" ${stream.latencySettings.mode === 'stable' ? 'selected' : ''}>Most stable</option></select></label><label>Target live latency, seconds<input name="targetLatencySeconds" type="number" min="2" max="30" step="0.5" value="${escapeHtml(stream.latencySettings.targetLatencySeconds)}"></label><label>Player buffer, seconds<input name="playerBufferSeconds" type="number" min="4" max="60" step="0.5" value="${escapeHtml(stream.latencySettings.playerBufferSeconds)}"></label><label>Reconnect buffer, seconds<input name="reconnectBufferSeconds" type="number" min="4" max="120" step="1" value="${escapeHtml(stream.latencySettings.reconnectBufferSeconds)}"></label><button type="submit">Save latency settings</button></form></section><section><h2>On-demand display</h2><form method="post" action="/dashboard/sources/ondemand"><label><input type="checkbox" name="enabled" value="true" ${stream.onDemand?.enabled ? 'checked' : ''}> Enable on-demand playback</label><label><input type="checkbox" name="showWhenOffline" value="true" ${stream.onDemand?.showWhenOffline ? 'checked' : ''}> Show to visitors when offline and selected media is available</label><label>On-demand title<input name="title" value="${escapeHtml(stream.onDemand?.title || '')}"></label><button type="submit">Save on-demand settings</button></form></section>`;
+  const advancedTab = `<section><h2>On-demand display</h2><form method="post" action="/dashboard/sources/ondemand"><label><input type="checkbox" name="enabled" value="true" ${stream.onDemand?.enabled ? 'checked' : ''}> Enable on-demand playback</label><label><input type="checkbox" name="showWhenOffline" value="true" ${stream.onDemand?.showWhenOffline ? 'checked' : ''}> Show to visitors when offline and selected media is available</label><label>On-demand title<input name="title" value="${escapeHtml(stream.onDemand?.title || '')}"></label><button type="submit">Save on-demand settings</button></form></section>`;
   const selectedBody = { overview: overviewTab, media: mediaTab, encoders: encodersTab, destinations: destinationsTab, schedule: scheduleTab, profile: profileTab, support: supportTab, account: accountTab, advanced: advancedTab }[activeTab];
   const body = `<h1>User panel</h1>${reminderHtml}${tabs}${selectedBody}<script>
 const copyStatus=document.getElementById('copyStatus');
@@ -3216,7 +3281,29 @@ app.post('/dashboard/latency', requireUser, (req, res) => {
   stream.updatedAt = nowIso();
   store.events.push({ id: id('evt'), type: 'stream_latency_updated', payload: { streamId: stream.id, latencySettings: stream.latencySettings }, createdAt: nowIso() });
   writeStore(store);
-  res.redirect('/dashboard?tab=advanced');
+  res.redirect('/dashboard?tab=encoders');
+});
+
+app.post('/dashboard/encoder-settings', requireUser, (req, res) => {
+  const store = readStore();
+  const user = store.users.find((item) => item.id === req.user.id);
+  const stream = ensureStreamForUser(store, user);
+  stream.encoderSettings = {
+    ...defaultEncoderSettings(),
+    ...(stream.encoderSettings || {}),
+    videoBitrate: String(req.body.videoBitrate || stream.encoderSettings?.videoBitrate || '4500k').trim().slice(0, 20),
+    audioBitrate: audioBitrates.includes(req.body.audioBitrate) ? req.body.audioBitrate : stream.encoderSettings?.audioBitrate || '160k',
+    audioChannels: 'stereo',
+    sampleRate: req.body.sampleRate === '44100' ? '44100' : '48000',
+    keyframeIntervalSeconds: clampNumber(req.body.keyframeIntervalSeconds, 1, 10, 2),
+    hlsSegmentDurationMs: clampNumber(req.body.hlsSegmentDurationMs, 1000, 6000, 2000),
+    hlsPartDurationMs: clampNumber(req.body.hlsPartDurationMs, 100, 1000, 200),
+    hlsSegmentCount: clampNumber(req.body.hlsSegmentCount, 8, 24, 12)
+  };
+  stream.updatedAt = nowIso();
+  store.events.push({ id: id('evt'), type: 'stream_encoder_settings_updated', payload: { streamId: stream.id, encoderSettings: stream.encoderSettings }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/dashboard?tab=encoders');
 });
 
 app.post('/dashboard/support', requireUser, async (req, res) => {
@@ -4061,7 +4148,7 @@ app.get('/admin/encoders', requireAdmin, (req, res) => {
   const store = readStore();
   const settings = store.settings.encoderDefaults;
   const body = `<h1>Admin panel</h1>${adminTabs('encoders')}
-<section><h2>Default encoder settings</h2><form method="post" action="/admin/encoders"><label>Video bitrate<input name="videoBitrate" value="${escapeHtml(settings.videoBitrate)}"></label><label>Audio bitrate<select name="audioBitrate">${audioBitrates.map((rate) => `<option ${rate === settings.audioBitrate ? 'selected' : ''}>${rate}</option>`).join('')}</select></label><label>Audio channels<select name="audioChannels"><option value="stereo" selected>stereo</option></select></label><label>Sample rate<select name="sampleRate"><option ${settings.sampleRate === '44100' ? 'selected' : ''}>44100</option><option ${settings.sampleRate !== '44100' ? 'selected' : ''}>48000</option></select></label><label>Keyframe interval seconds<input name="keyframeIntervalSeconds" type="number" min="1" max="10" value="${escapeHtml(settings.keyframeIntervalSeconds)}"></label><label>Default latency mode<select name="latencyMode"><option value="low" ${settings.latencyMode === 'low' ? 'selected' : ''}>Low latency</option><option value="balanced" ${settings.latencyMode === 'balanced' ? 'selected' : ''}>Balanced</option><option value="stable" ${settings.latencyMode === 'stable' ? 'selected' : ''}>Most stable</option></select></label><label>Target live latency, seconds<input name="targetLatencySeconds" type="number" min="2" max="30" step="0.5" value="${escapeHtml(settings.targetLatencySeconds)}"></label><label>Player buffer, seconds<input name="playerBufferSeconds" type="number" min="4" max="60" step="0.5" value="${escapeHtml(settings.playerBufferSeconds)}"></label><label>HLS segment duration, ms<input name="hlsSegmentDurationMs" type="number" min="1000" max="6000" step="100" value="${escapeHtml(settings.hlsSegmentDurationMs)}"></label><label>HLS part duration, ms<input name="hlsPartDurationMs" type="number" min="100" max="1000" step="50" value="${escapeHtml(settings.hlsPartDurationMs)}"></label><label>HLS segment count<input name="hlsSegmentCount" type="number" min="4" max="20" step="1" value="${escapeHtml(settings.hlsSegmentCount)}"></label><button type="submit">Save encoder defaults</button></form></section>
+<section><h2>Default encoder settings</h2><form method="post" action="/admin/encoders"><label>Video bitrate<input name="videoBitrate" value="${escapeHtml(settings.videoBitrate)}"></label><label>Audio bitrate<select name="audioBitrate">${audioBitrates.map((rate) => `<option ${rate === settings.audioBitrate ? 'selected' : ''}>${rate}</option>`).join('')}</select></label><label>Audio channels<select name="audioChannels"><option value="stereo" selected>stereo</option></select></label><label>Sample rate<select name="sampleRate"><option ${settings.sampleRate === '44100' ? 'selected' : ''}>44100</option><option ${settings.sampleRate !== '44100' ? 'selected' : ''}>48000</option></select></label><label>Keyframe interval seconds<input name="keyframeIntervalSeconds" type="number" min="1" max="10" value="${escapeHtml(settings.keyframeIntervalSeconds)}"></label><label>Default latency mode<select name="latencyMode"><option value="low" ${settings.latencyMode === 'low' ? 'selected' : ''}>Low latency</option><option value="balanced" ${settings.latencyMode === 'balanced' ? 'selected' : ''}>Balanced</option><option value="stable" ${settings.latencyMode === 'stable' ? 'selected' : ''}>Most stable</option></select></label><label>Target live latency, seconds<input name="targetLatencySeconds" type="number" min="2" max="30" step="0.5" value="${escapeHtml(settings.targetLatencySeconds)}"></label><label>Player buffer, seconds<input name="playerBufferSeconds" type="number" min="4" max="60" step="0.5" value="${escapeHtml(settings.playerBufferSeconds)}"></label><label>HLS segment duration, ms<input name="hlsSegmentDurationMs" type="number" min="1000" max="6000" step="100" value="${escapeHtml(settings.hlsSegmentDurationMs)}"></label><label>HLS part duration, ms<input name="hlsPartDurationMs" type="number" min="100" max="1000" step="50" value="${escapeHtml(settings.hlsPartDurationMs)}"></label><label>HLS segment count<input name="hlsSegmentCount" type="number" min="8" max="24" step="1" value="${escapeHtml(Math.max(12, Number(settings.hlsSegmentCount || 12)))}"></label><button type="submit">Save encoder defaults</button></form></section>
 <section><h2>Recommended software</h2><ul><li>OBS Studio: Custom streaming server, RTMP URL, stream key.</li><li>Ecamm Live: RTMP destination with the same server URL and stream key.</li><li>Audio Hijack: pair with a supported broadcaster or virtual camera/RTMP workflow for audio-only or mixed sessions.</li><li>Larix Broadcaster and Streamlabs: custom RTMP destination using the same details.</li></ul></section>`;
   res.send(page('Admin encoder settings', body, req.user));
 });
@@ -4079,7 +4166,7 @@ app.post('/admin/encoders', requireAdmin, (req, res) => {
     playerBufferSeconds: clampNumber(req.body.playerBufferSeconds, 4, 60, 10),
     hlsSegmentDurationMs: clampNumber(req.body.hlsSegmentDurationMs, 1000, 6000, 2000),
     hlsPartDurationMs: clampNumber(req.body.hlsPartDurationMs, 100, 1000, 200),
-    hlsSegmentCount: clampNumber(req.body.hlsSegmentCount, 4, 20, 8)
+    hlsSegmentCount: clampNumber(req.body.hlsSegmentCount, 8, 24, 12)
   };
   store.events.push({ id: id('evt'), type: 'encoder_defaults_updated', payload: store.settings.encoderDefaults, createdAt: nowIso() });
   writeStore(store);

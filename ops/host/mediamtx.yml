@@ -15,12 +15,12 @@ hls: true
 hlsAddress: :8096
 hlsAllowOrigins: ['*']
 hlsAlwaysRemux: true
-hlsVariant: lowLatency
-hlsSegmentCount: 7
-hlsSegmentDuration: 1s
-hlsPartDuration: 200ms
+hlsVariant: mpegts
+hlsSegmentCount: 12
+hlsSegmentDuration: 2s
+hlsPartDuration: 500ms
 hlsSegmentMaxSize: 50M
-hlsMuxerCloseAfter: 60s
+hlsMuxerCloseAfter: 120s
 
 webrtc: false
 srt: false
