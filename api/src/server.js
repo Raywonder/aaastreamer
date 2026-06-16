@@ -1164,8 +1164,21 @@ function requireBroadcaster(req, res, next) {
 
 function requireAdmin(req, res, next) {
   const user = currentUser(req);
-  if (!user || user.role !== 'admin') {
-    res.status(403).json({ success: false, error: 'Admin access required' });
+  if (!user) {
+    if (req.path.startsWith('/api/') || String(req.get('accept') || '').includes('application/json')) {
+      res.status(401).json({ success: false, error: 'Login required' });
+      return;
+    }
+    res.redirect('/login');
+    return;
+  }
+  if (user.role !== 'admin') {
+    if (req.path.startsWith('/api/') || String(req.get('accept') || '').includes('application/json')) {
+      res.status(403).json({ success: false, error: 'Admin access required' });
+      return;
+    }
+    const body = `<h1>Admin access required</h1><section><p>Admin settings are only available to site administrators.</p><p>Your broadcaster and account tools are available from your dashboard.</p><p><a class="button" href="/dashboard">Back to dashboard</a></p></section>`;
+    res.status(403).send(page('Admin access required', body, user));
     return;
   }
   req.user = user;
@@ -1561,8 +1574,9 @@ function ensureStreamForUser(store, user, body = {}) {
 function page(title, body, user = null) {
   const settings = readStore().settings;
   const branding = settings.platformBranding || defaultPlatformBranding();
+  const adminLink = user?.role === 'admin' ? '<a href="/admin">Admin</a>' : '';
   const nav = user
-    ? `<a href="/dashboard">Dashboard</a><a href="/admin">Admin</a><form method="post" action="/logout"><button type="submit">Log out</button></form>`
+    ? `<a href="/dashboard">Dashboard</a>${adminLink}<form method="post" action="/logout"><button type="submit">Log out</button></form>`
     : `<a href="/login">Log in</a>${settings.registrationsEnabled ? '<a href="/signup">Sign up</a>' : ''}`;
   return `<!doctype html>
 <html lang="en">
@@ -3945,12 +3959,7 @@ app.post('/dashboard/stream/key', requireBroadcaster, (req, res) => {
   res.redirect('/dashboard');
 });
 
-app.get('/admin', (req, res) => {
-  const user = currentUser(req);
-  if (!user || user.role !== 'admin') {
-    res.redirect('/login');
-    return;
-  }
+app.get('/admin', requireAdmin, (req, res) => {
   res.redirect('/admin/streams');
 });
 
