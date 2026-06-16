@@ -1920,25 +1920,35 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
   const reconnectDelay = Math.max(2000, (Number(player.dataset.reconnectBuffer || 10) || 10) * 1000);
   let retryTimer = null;
   let nativeRetryCount = 0;
+  let lastProgressAt = Date.now();
+  let hlsRecoveryAt = 0;
+  const markProgress = () => { lastProgressAt = Date.now(); };
+  const shouldHardRecover = () => Date.now() - lastProgressAt >= reconnectDelay;
   const refreshSource = () => source + (source.includes('?') ? '&' : '?') + 'refresh=' + Date.now();
-  const retryNative = () => {
+  const retryNative = (force = false) => {
     clearTimeout(retryTimer);
     retryTimer = setTimeout(() => {
+      if (!force && !shouldHardRecover()) {
+        setStatus('Buffering live stream.');
+        return;
+      }
       nativeRetryCount += 1;
-      setStatus('Refreshing the live stream buffer.');
+      setStatus('Reconnecting to the live stream.');
+      const wasPaused = player.paused;
       player.src = refreshSource();
       player.load();
-      player.play().catch(() => {});
-    }, Math.min(reconnectDelay, 5000));
+      if (!wasPaused || player.autoplay) player.play().catch(() => {});
+    }, force ? 1000 : Math.min(reconnectDelay, 10000));
   };
+  ['playing', 'timeupdate', 'progress', 'canplay'].forEach((eventName) => player.addEventListener(eventName, markProgress));
   if (player.canPlayType('application/vnd.apple.mpegurl')) {
     player.src = source;
-    player.addEventListener('waiting', () => setStatus('Loading more live audio and video.'));
+    player.addEventListener('waiting', () => setStatus('Buffering live stream.'));
     player.addEventListener('playing', () => { nativeRetryCount = 0; setStatus(''); });
     player.addEventListener('pause', () => clearTimeout(retryTimer));
-    player.addEventListener('stalled', retryNative);
-    player.addEventListener('error', retryNative);
-    player.addEventListener('emptied', () => { if (nativeRetryCount < 5) retryNative(); });
+    player.addEventListener('stalled', () => retryNative(false));
+    player.addEventListener('error', () => retryNative(true));
+    player.addEventListener('emptied', () => { if (nativeRetryCount < 5) retryNative(true); });
     setStatus('');
   } else if (window.Hls && Hls.isSupported()) {
     const hls = new Hls({
@@ -1963,15 +1973,28 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
     });
     hls.on(Hls.Events.ERROR, (_, data) => {
       if (!data?.fatal) return;
-      setStatus('Refreshing the live stream buffer.');
-      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
-      else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+      const now = Date.now();
+      if (now - hlsRecoveryAt < 3000) return;
+      hlsRecoveryAt = now;
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+        setStatus('Reconnecting to the live stream.');
+        hls.startLoad(-1);
+      } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+        setStatus('Recovering live stream playback.');
+        hls.recoverMediaError();
+      } else if (shouldHardRecover()) {
+        setStatus('Restarting live stream playback.');
+        hls.destroy();
+        player.src = refreshSource();
+        player.load();
+        player.play().catch(() => {});
+      }
     });
-    player.addEventListener('stalled', () => hls.startLoad());
+    player.addEventListener('stalled', () => { if (shouldHardRecover()) hls.startLoad(-1); else setStatus('Buffering live stream.'); });
     hls.loadSource(source);
     hls.attachMedia(player);
-    player.addEventListener('waiting', () => setStatus('Loading more live audio and video.'));
-    player.addEventListener('playing', () => setStatus(''));
+    player.addEventListener('waiting', () => setStatus('Buffering live stream.'));
+    player.addEventListener('playing', () => { markProgress(); setStatus(''); });
     setStatus('');
   } else {
     setStatus('This browser cannot play HLS directly. Try Safari, VLC, or a current Chrome, Edge, or Firefox build with JavaScript enabled.');
