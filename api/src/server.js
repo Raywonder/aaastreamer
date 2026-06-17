@@ -686,6 +686,10 @@ function normalizeUser(user) {
     confirmGoingLive: user.confirmationPreferences?.confirmGoingLive !== false,
     confirmDisabling: user.confirmationPreferences?.confirmDisabling !== false
   };
+  user.whatsNew = {
+    seenVersion: String(user.whatsNew?.seenVersion || ''),
+    suppressOnLogin: user.whatsNew?.suppressOnLogin === true
+  };
   user.totpEnabled = user.totpEnabled === true;
   user.passkeys = Array.isArray(user.passkeys) ? user.passkeys : [];
   return user;
@@ -1138,6 +1142,45 @@ function notificationEmailReminder(user) {
   return `<section class="notice" role="status"><h2>Notification email reminder</h2><p>Add a notification email so AAAStreamer can contact you about account recovery, scheduled shows, stream events, and payment or moderation notices.</p><p><a class="button" href="/dashboard?tab=account">Set notification email</a></p></section>`;
 }
 
+function whatsNewItemsForRole(role) {
+  const common = [
+    'Safari and iOS playback now waits for real lack of progress before refreshing a live HLS source, reducing repeated stop-start buffering on mobile browsers.',
+    "The logged-in navigation includes a What's new link so release notes can be opened again later."
+  ];
+  const admin = [
+    'Admin media folder settings now use a managed table with checkboxes, per-folder action menus, and one bulk action menu instead of raw folder path editing.',
+    'Bulk media-folder changes require a two-step confirmation when more than one folder is selected.',
+    'Upload folders are displayed for review in normal admin workflows rather than edited as free-form path values.'
+  ];
+  const userItems = [
+    'Broadcaster media management continues to use selectable library rows, check-all controls, preview buttons, and action dropdowns for queues and playback.',
+    'Folder paths are visible only where useful for context; streamer workflows use selectable libraries instead of manual folder values.'
+  ];
+  if (role === 'admin') return [...admin, ...common];
+  return [...userItems, ...common];
+}
+
+function shouldShowWhatsNew(user) {
+  if (!user || user.whatsNew?.suppressOnLogin) return false;
+  return String(user.whatsNew?.seenVersion || '') !== appVersion;
+}
+
+function whatsNewBody(user, options = {}) {
+  const items = whatsNewItemsForRole(user?.role || 'user');
+  const next = safeInternalPath(options.next || '/dashboard');
+  const manual = options.manual === true;
+  return `<h1>What's new in AAAStreamer ${escapeHtml(appVersion)}</h1>
+<section><h2>${user?.role === 'admin' ? 'Administrator updates' : 'User updates'}</h2><ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul></section>
+<form method="post" action="/whats-new/close"><input type="hidden" name="next" value="${escapeHtml(next)}"><label><input type="checkbox" name="suppressOnLogin" value="true" ${user?.whatsNew?.suppressOnLogin ? 'checked' : ''}> Do not show What's new automatically when I log in</label><button type="submit">${manual ? 'Close' : 'Continue to dashboard'}</button></form>
+<p><a class="button secondary" href="${escapeHtml(next)}">Continue without changing this setting</a></p>`;
+}
+
+function safeInternalPath(value) {
+  const raw = String(value || '').trim();
+  if (!raw.startsWith('/') || raw.startsWith('//') || raw.includes('://')) return '/dashboard';
+  return raw.slice(0, 300);
+}
+
 function requireUser(req, res, next) {
   const user = currentUser(req);
   if (!user) {
@@ -1576,7 +1619,7 @@ function page(title, body, user = null) {
   const branding = settings.platformBranding || defaultPlatformBranding();
   const adminLink = user?.role === 'admin' ? '<a href="/admin">Admin</a>' : '';
   const nav = user
-    ? `<a href="/dashboard">Dashboard</a>${adminLink}<form method="post" action="/logout"><button type="submit">Log out</button></form>`
+    ? `<a href="/dashboard">Dashboard</a>${adminLink}<a href="/whats-new?manual=true">What's new</a><form method="post" action="/logout"><button type="submit">Log out</button></form>`
     : `<a href="/login">Log in</a>${settings.registrationsEnabled ? '<a href="/signup">Sign up</a>' : ''}`;
   return `<!doctype html>
 <html lang="en">
@@ -1591,6 +1634,7 @@ nav{display:flex;gap:.75rem;align-items:center;flex-wrap:wrap} main{max-width:11
 section,.panel{border:1px solid #303944;background:#171c22;padding:1rem;margin:1rem 0;border-radius:6px}
 label{display:block;margin:.75rem 0 .25rem} input,textarea,select{width:100%;box-sizing:border-box;padding:.65rem;background:#0c0f12;color:#f3f6f8;border:1px solid #4b5968;border-radius:4px}
 input[type="checkbox"]{width:auto;margin-right:.45rem}.tabs{display:flex;gap:.5rem;flex-wrap:wrap;margin:1rem 0}.tabs a{padding:.55rem .75rem;border:1px solid #4b5968;border-radius:4px;text-decoration:none}.tabs a[aria-current="page"]{background:#2c75c9;color:white}
+td select,.table-action-select{width:auto;min-width:12rem}.bulk-actions{display:flex;gap:.75rem;align-items:end;flex-wrap:wrap;margin:.75rem 0}.bulk-actions label{margin:0}
 button,.button{display:inline-block;margin:.35rem .35rem .35rem 0;padding:.65rem .85rem;background:#2c75c9;color:white;border:0;border-radius:4px;text-decoration:none;cursor:pointer}
 button.secondary,.button.secondary{background:#3d4651} button.danger{background:#b84242}
 table{width:100%;border-collapse:collapse;margin-top:.75rem} th,td{border-bottom:1px solid #303944;text-align:left;padding:.6rem;vertical-align:top}
@@ -1921,14 +1965,22 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
   let retryTimer = null;
   let nativeRetryCount = 0;
   let lastProgressAt = Date.now();
+  let lastNativeTime = 0;
   let hlsRecoveryAt = 0;
-  const markProgress = () => { lastProgressAt = Date.now(); };
-  const shouldHardRecover = () => Date.now() - lastProgressAt >= reconnectDelay;
+  const isAppleNativeHls = player.canPlayType('application/vnd.apple.mpegurl') && /Safari|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+  const nativeBufferFloor = isAppleNativeHls ? Math.max(playerBuffer, 24) : playerBuffer;
+  const markProgress = () => {
+    lastProgressAt = Date.now();
+    lastNativeTime = player.currentTime;
+  };
+  const shouldHardRecover = () => Date.now() - lastProgressAt >= nativeBufferFloor * 1000;
   const refreshSource = () => source + (source.includes('?') ? '&' : '?') + 'refresh=' + Date.now();
   const retryNative = (force = false) => {
     clearTimeout(retryTimer);
     retryTimer = setTimeout(() => {
-      if (!force && !shouldHardRecover()) {
+      const timeChanged = Math.abs(player.currentTime - lastNativeTime) > 0.25;
+      lastNativeTime = player.currentTime;
+      if (!force && (!shouldHardRecover() || timeChanged)) {
         setStatus('Buffering live stream.');
         return;
       }
@@ -1938,13 +1990,13 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
       player.src = refreshSource();
       player.load();
       if (!wasPaused || player.autoplay) player.play().catch(() => {});
-    }, force ? 1000 : Math.min(reconnectDelay, 10000));
+    }, force ? 1000 : Math.max(12000, Math.min(reconnectDelay, nativeBufferFloor * 1000)));
   };
   ['playing', 'timeupdate', 'progress', 'canplay'].forEach((eventName) => player.addEventListener(eventName, markProgress));
   if (player.canPlayType('application/vnd.apple.mpegurl')) {
     player.src = source;
     player.addEventListener('waiting', () => setStatus('Buffering live stream.'));
-    player.addEventListener('playing', () => { nativeRetryCount = 0; setStatus(''); });
+    player.addEventListener('playing', () => { nativeRetryCount = 0; markProgress(); setStatus(''); });
     player.addEventListener('pause', () => clearTimeout(retryTimer));
     player.addEventListener('stalled', () => retryNative(false));
     player.addEventListener('error', () => retryNative(true));
@@ -2977,6 +3029,29 @@ app.post('/logout', (req, res) => {
   res.redirect('/');
 });
 
+app.get('/whats-new', requireUser, (req, res) => {
+  const store = readStore();
+  const user = userById(store, req.user.id) || req.user;
+  res.send(page('What is new', whatsNewBody(user, {
+    next: req.query.next || '/dashboard',
+    manual: req.query.manual === 'true'
+  }), user));
+});
+
+app.post('/whats-new/close', requireUser, (req, res) => {
+  const store = readStore();
+  const user = userById(store, req.user.id);
+  if (user) {
+    user.whatsNew = {
+      seenVersion: appVersion,
+      suppressOnLogin: req.body.suppressOnLogin === 'true'
+    };
+    user.updatedAt = nowIso();
+    writeStore(store);
+  }
+  res.redirect(safeInternalPath(req.body.next || '/dashboard'));
+});
+
 app.get('/dashboard', (req, res) => {
   const user = currentUser(req);
   if (!user) {
@@ -2984,6 +3059,11 @@ app.get('/dashboard', (req, res) => {
     return;
   }
   const store = readStore();
+  const storedUser = userById(store, user.id) || user;
+  if (shouldShowWhatsNew(storedUser) && req.query.whatsNew !== 'skip') {
+    res.redirect(`/whats-new?next=${encodeURIComponent('/dashboard')}`);
+    return;
+  }
   const paymentSettings = store.settings.paymentIntegration || defaultPaymentIntegrationSettings();
   const reminderHtml = notificationEmailReminder(user);
   if (reminderHtml) {
@@ -4403,23 +4483,157 @@ function parseMediaFoldersText(raw) {
   }).filter(Boolean);
 }
 
+function arrayFromBodyValue(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item));
+  if (value === undefined || value === null || value === '') return [];
+  return [String(value)];
+}
+
+function normalizeMediaFolderAction(value) {
+  const action = String(value || '').trim();
+  return [
+    'enable',
+    'disable',
+    'show',
+    'hide',
+    'allow-audio',
+    'block-audio',
+    'allow-video',
+    'block-video',
+    'enable-audio-video',
+    'disable-audio-video'
+  ].includes(action) ? action : '';
+}
+
+function applyMediaFolderAction(folder, action) {
+  const next = { ...folder };
+  switch (normalizeMediaFolderAction(action)) {
+    case 'enable':
+      next.enabled = true;
+      break;
+    case 'disable':
+      next.enabled = false;
+      break;
+    case 'show':
+      next.visibleToUsers = true;
+      break;
+    case 'hide':
+      next.visibleToUsers = false;
+      break;
+    case 'allow-audio':
+      next.allowAudio = true;
+      break;
+    case 'block-audio':
+      next.allowAudio = false;
+      break;
+    case 'allow-video':
+      next.allowVideo = true;
+      break;
+    case 'block-video':
+      next.allowVideo = false;
+      break;
+    case 'enable-audio-video':
+      next.enabled = true;
+      next.allowAudio = true;
+      next.allowVideo = true;
+      break;
+    case 'disable-audio-video':
+      next.allowAudio = false;
+      next.allowVideo = false;
+      break;
+  }
+  return next;
+}
+
+function mediaFolderActionOptions(selected = '') {
+  const options = [
+    ['', 'No change'],
+    ['enable', 'Enable this folder'],
+    ['disable', 'Disable this folder'],
+    ['show', 'Show to users'],
+    ['hide', 'Hide from users'],
+    ['allow-audio', 'Allow audio files'],
+    ['block-audio', 'Do not use audio files'],
+    ['allow-video', 'Allow video files'],
+    ['block-video', 'Do not use video files'],
+    ['enable-audio-video', 'Enable and allow audio/video'],
+    ['disable-audio-video', 'Disable audio/video use']
+  ];
+  return options.map(([value, label]) => `<option value="${escapeHtml(value)}" ${value === selected ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('');
+}
+
+function updateMediaFoldersFromRequest(settings, body = {}) {
+  const existing = normalizeMediaSettings(settings).folders;
+  const selectedIds = new Set(arrayFromBodyValue(body.selectedFolderIds));
+  const bulkAction = normalizeMediaFolderAction(body.bulkFolderAction);
+  return existing.map((folder) => {
+    const rowAction = normalizeMediaFolderAction(body[`folderAction_${folder.id}`]);
+    let next = rowAction ? applyMediaFolderAction(folder, rowAction) : { ...folder };
+    if (bulkAction && selectedIds.has(folder.id)) {
+      next = applyMediaFolderAction(next, bulkAction);
+    }
+    return next;
+  });
+}
+
+function renderAdminMediaFolderRows(media, catalog) {
+  const catalogById = new Map(catalog.map((folder) => [folder.id, folder]));
+  const folders = normalizeMediaSettings(media).folders;
+  return folders.map((folder) => {
+    const detected = catalogById.get(folder.id)?.files?.length ?? 0;
+    const status = folder.enabled ? 'Enabled' : 'Disabled';
+    const access = folder.visibleToUsers ? 'Visible to users' : 'Admin only';
+    const types = [folder.allowAudio ? 'audio' : '', folder.allowVideo ? 'video' : ''].filter(Boolean).join(' and ') || 'not selected';
+    const safeId = escapeHtml(folder.id);
+    return `<tr>
+<td><input type="checkbox" name="selectedFolderIds" value="${safeId}" aria-label="Select ${escapeHtml(folder.label)} for bulk folder actions"></td>
+<td>${escapeHtml(folder.label)}<br><code>${escapeHtml(folder.path || '')}</code></td>
+<td>${escapeHtml(status)}</td>
+<td>${escapeHtml(access)}</td>
+<td>${escapeHtml(types)}</td>
+<td>${escapeHtml(String(detected))}</td>
+<td><label class="muted" for="folder-action-${safeId}">Action</label><select id="folder-action-${safeId}" class="table-action-select" name="folderAction_${safeId}">${mediaFolderActionOptions()}</select></td>
+</tr>`;
+  }).join('') || '<tr><td colspan="7">No media folders are configured.</td></tr>';
+}
+
 app.get('/admin/media', requireAdmin, (req, res) => {
   const store = readStore();
   const media = store.settings.mediaLibrary || defaultMediaSettings();
   const catalog = mediaCatalog(store, req.user);
-  const folderRows = catalog.map((folder) => `<tr><td>${escapeHtml(folder.label)}</td><td><code>${escapeHtml(folder.path || '')}</code></td><td>${folder.enabled ? 'enabled' : 'disabled'}</td><td>${folder.visibleToUsers ? 'visible to users' : 'admin only'}</td><td>${folder.files.length}</td></tr>`).join('');
+  const folderRows = renderAdminMediaFolderRows(media, catalog);
   const fileRows = catalog.flatMap((folder) => folder.files.slice(0, 200).map((file) => `<tr><td>${escapeHtml(file.label)}</td><td>${escapeHtml(file.fileName || path.basename(file.relativePath))}</td><td>${escapeHtml(folder.label)}</td><td>${escapeHtml(file.mediaType)}</td><td>${escapeHtml(formatDuration(file.durationSeconds))}</td><td>${escapeHtml(file.chapters?.length ? `${file.chapters.length} chapters` : 'No chapters')}</td><td>${escapeHtml(formatBytes(file.size))}</td></tr>`)).join('');
   const body = `<h1>Admin panel</h1>${adminTabs('media')}
-<section><h2>Media library folders</h2><p class="muted">Admins control which server folders are available for streamers. Hidden folders remain available to admins but are not shown to normal users. Use one folder per line in this format: label|path|enabled|visible|audio|video. Use disabled, hidden, no-audio, or no-video when needed.</p>
-<form method="post" action="/admin/media"><label><input type="checkbox" name="enabled" value="true" ${media.enabled ? 'checked' : ''}> Enable server media library</label><label><input type="checkbox" name="allowUsersToSelectServerMedia" value="true" ${media.allowUsersToSelectServerMedia ? 'checked' : ''}> Users can select media from visible folders</label><label><input type="checkbox" name="uploadsVisibleToUsers" value="true" ${media.uploadsVisibleToUsers ? 'checked' : ''}> Uploaded media folder is visible to users</label><label><input type="checkbox" name="urlRelayEnabled" value="true" ${media.urlRelayEnabled ? 'checked' : ''}> Enable URL relay sources</label><label><input type="checkbox" name="allowUsersToAddRelayUrls" value="true" ${media.allowUsersToAddRelayUrls ? 'checked' : ''}> Users can add their own HTTP or HTTPS relay URLs</label><label>Upload folder<input name="uploadFolder" value="${escapeHtml(media.uploadFolder)}"></label><label>Maximum scan depth<input type="number" min="1" max="8" name="maxScanDepth" value="${escapeHtml(media.maxScanDepth)}"></label><label>Folders<textarea name="folders" rows="8">${escapeHtml(mediaFoldersText(media))}</textarea></label><button type="submit">Save media source settings</button></form></section>
-<section><h2>Detected folders</h2><table><tr><th>Folder</th><th>Path</th><th>Status</th><th>User access</th><th>Detected files</th></tr>${folderRows || '<tr><td colspan="5">No enabled media folders are configured or reachable.</td></tr>'}</table></section>
+<section><h2>Media library folders</h2><p class="muted">Admins control which server folders are available for streamers. Folder paths are shown as a managed list so settings are changed with clear actions instead of raw path editing.</p>
+<form method="post" action="/admin/media" id="adminMediaForm"><label><input type="checkbox" name="enabled" value="true" ${media.enabled ? 'checked' : ''}> Enable server media library</label><label><input type="checkbox" name="allowUsersToSelectServerMedia" value="true" ${media.allowUsersToSelectServerMedia ? 'checked' : ''}> Users can select media from visible folders</label><label><input type="checkbox" name="uploadsVisibleToUsers" value="true" ${media.uploadsVisibleToUsers ? 'checked' : ''}> Uploaded media folder is visible to users</label><label><input type="checkbox" name="urlRelayEnabled" value="true" ${media.urlRelayEnabled ? 'checked' : ''}> Enable URL relay sources</label><label><input type="checkbox" name="allowUsersToAddRelayUrls" value="true" ${media.allowUsersToAddRelayUrls ? 'checked' : ''}> Users can add their own HTTP or HTTPS relay URLs</label><p>Upload folder: <code>${escapeHtml(media.uploadFolder)}</code></p><input type="hidden" name="uploadFolder" value="${escapeHtml(media.uploadFolder)}"><label>Maximum scan depth<input type="number" min="1" max="8" name="maxScanDepth" value="${escapeHtml(media.maxScanDepth)}"></label><div class="bulk-actions"><label>Action for checked folders<select name="bulkFolderAction" class="table-action-select">${mediaFolderActionOptions()}</select></label><button type="button" id="checkAllFolders">Check all folders</button><button type="button" id="uncheckAllFolders" class="secondary">Uncheck all folders</button></div><table><tr><th>Select</th><th>Folder</th><th>Status</th><th>User access</th><th>Allowed media</th><th>Detected files</th><th>Folder action</th></tr>${folderRows}</table><button type="submit">Save media source settings</button></form><script>
+(() => {
+  const form = document.getElementById('adminMediaForm');
+  const boxes = () => Array.from(document.querySelectorAll('input[name="selectedFolderIds"]'));
+  document.getElementById('checkAllFolders')?.addEventListener('click', () => boxes().forEach((box) => { box.checked = true; }));
+  document.getElementById('uncheckAllFolders')?.addEventListener('click', () => boxes().forEach((box) => { box.checked = false; }));
+  form?.addEventListener('submit', (event) => {
+    const selected = boxes().filter((box) => box.checked).length;
+    const bulkAction = form.elements.bulkFolderAction?.value || '';
+    if (selected > 1 && bulkAction) {
+      const first = confirm('Apply this folder action to ' + selected + ' selected folders?');
+      if (!first) {
+        event.preventDefault();
+        return;
+      }
+      const second = confirm('This will update several media folder settings at once. Continue?');
+      if (!second) event.preventDefault();
+    }
+  });
+})();
+</script></section>
 <section><h2>Detected media files</h2><table><tr><th>Title</th><th>File name</th><th>Folder</th><th>Type</th><th>Duration</th><th>Chapters</th><th>Size</th></tr>${fileRows || '<tr><td colspan="7">No playable media files were detected in the enabled folders.</td></tr>'}</table></section>`;
   res.send(page('Admin media sources', body, req.user));
 });
 
 app.post('/admin/media', requireAdmin, (req, res) => {
   const store = readStore();
-  const folders = parseMediaFoldersText(req.body.folders);
+  const previousMedia = store.settings.mediaLibrary || defaultMediaSettings();
+  const folders = updateMediaFoldersFromRequest(previousMedia, req.body);
   store.settings.mediaLibrary = normalizeMediaSettings({
     enabled: req.body.enabled === 'true',
     allowUsersToSelectServerMedia: req.body.allowUsersToSelectServerMedia === 'true',

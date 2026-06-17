@@ -114,11 +114,13 @@ media source. This prevents stale HLS links, stream keys, or inactive watch
 links from being exposed as playable content.
 
 Admins can configure approved media folders from `/admin/media`. Folder records
-use `label|path|enabled|visible|audio|video`; use `hidden` for admin-only
-folders, `disabled` to turn a folder off, `no-audio` or `no-video` to limit file
-types. The default configuration looks for common server media folders including
-`/mnt/backup/media`, `/mnt/backup/audio-description`, `/mnt/backup/music`,
-`/mnt/*/media`, `/mnt/*/audio-description`, `/mnt/*/music`,
+are shown as a managed table with checkboxes, per-folder action menus, and one
+bulk action menu for selected folders. Folder paths are displayed so admins can
+verify the source, but normal admin, user, and moderator workflows do not ask
+people to edit folder paths as raw text values. The default configuration looks
+for common server media folders including `/mnt/backup/media`,
+`/mnt/backup/audio-description`, `/mnt/backup/music`, `/mnt/*/media`,
+`/mnt/*/audio-description`, `/mnt/*/music`,
 `/home/dom/*html/uploads/website*/Audio`, and
 `/home/dom/*html/uploads/website*/galleries`. The uploaded-media folder is also
 exposed as a managed media folder. Symbolic links are followed when they resolve
@@ -273,8 +275,10 @@ destinations, or only save the current live checkbox state.
 For Safari and iOS playback stability, the server sends explicit HLS playlist
 and segment headers, permits range requests, and relays generated media with
 stable timestamps, keyframes, stereo AAC audio, and conservative muxing
-settings. Users can still raise player buffer values from the dashboard for
-busy mobile networks.
+settings. The native Safari player keeps a larger effective buffer floor and no
+longer reloads the HLS source for ordinary short `stalled` events while playback
+is still progressing. Users can still raise player buffer values from the
+dashboard for busy mobile networks.
 
 ## VoiceLink API Integration
 

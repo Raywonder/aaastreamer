@@ -79,12 +79,15 @@ stream owner enables on-demand playback and selects a valid source. Offline
 streams without on-demand content are hidden from the public stream list, and
 embed pages do not expose HLS URLs for them.
 
-Admins manage server media folders from `/admin/media`. Each folder can be
-enabled, disabled, visible to users, hidden for admin-only use, and limited to
-audio or video. The default folder list includes common server media paths such
-as `/mnt/backup/media`, `/mnt/backup/audio-description`, `/mnt/backup/music`,
-matching `/mnt/*/media`, `/mnt/*/audio-description`, `/mnt/*/music`, and
-website upload paths such as `/home/dom/*html/uploads/website*/Audio` and
+Admins manage server media folders from `/admin/media` with a table of known
+folders, row action menus, checkboxes, and one bulk action menu. Folder paths
+are displayed for review but are not edited as raw text fields in the normal
+admin, user, or moderator workflows. Each folder can be enabled, disabled,
+visible to users, hidden for admin-only use, and limited to audio or video. The
+default folder list includes common server media paths such as
+`/mnt/backup/media`, `/mnt/backup/audio-description`, `/mnt/backup/music`,
+matching `/mnt/*/media`, `/mnt/*/audio-description`, `/mnt/*/music`, and website
+upload paths such as `/home/dom/*html/uploads/website*/Audio` and
 `/home/dom/*html/uploads/website*/galleries`. Symbolic links to media files are
 followed when they resolve safely to playable files.
 Streamers can also upload one or more supported audio/video files into the
@@ -142,7 +145,9 @@ owned data/media/upload folders under `/var/lib/aaastreamer` by default, writes
 `/etc/aaastreamer/aaastreamer.env`, creates a systemd service, and can create an
 nginx vhost when `DOMAIN` is provided. Self-hosted installs should keep media
 inside folders owned by the app user unless the admin deliberately adds a
-mounted or external folder that the service account can read.
+mounted or external folder that the service account can read. Normal web UI
+folder management presents those approved folders as selectable rows with
+actions, not free-form path entry.
 
 Customer-owned installs can use their own PayPal, Apple Pay, Stripe links, or
 other creator payment methods. License, invoice, install ID, product ID, domain,
