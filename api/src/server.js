@@ -1208,14 +1208,11 @@ function shouldShowWhatsNew(user) {
   return String(user.whatsNew?.seenVersion || '') !== appVersion;
 }
 
-function whatsNewBody(user, options = {}) {
+function whatsNewBody(user) {
   const items = whatsNewItemsForRole(user?.role || 'user');
-  const next = safeInternalPath(options.next || '/dashboard');
-  const manual = options.manual === true;
   return `<h1>What's new in AAAStreamer ${escapeHtml(appVersion)}</h1>
 <section><h2>${user?.role === 'admin' ? 'Administrator updates' : 'User updates'}</h2><ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul></section>
-<form method="post" action="/whats-new/close"><input type="hidden" name="next" value="${escapeHtml(next)}"><label><input type="checkbox" name="suppressOnLogin" value="true" ${user?.whatsNew?.suppressOnLogin ? 'checked' : ''}> Do not show What's new automatically when I log in</label><button type="submit">${manual ? 'Close' : 'Continue to dashboard'}</button></form>
-<p><a class="button secondary" href="${escapeHtml(next)}">Continue without changing this setting</a></p>`;
+<form method="post" action="/whats-new/close"><label><input type="checkbox" name="suppressOnLogin" value="true" ${user?.whatsNew?.suppressOnLogin ? 'checked' : ''}> Do not show What's new automatically when I log in</label><button type="submit">Continue to dashboard</button></form>`;
 }
 
 function safeInternalPath(value) {
@@ -3195,10 +3192,7 @@ app.post('/logout', (req, res) => {
 app.get('/whats-new', requireUser, (req, res) => {
   const store = readStore();
   const user = userById(store, req.user.id) || req.user;
-  res.send(page('What is new', whatsNewBody(user, {
-    next: req.query.next || '/dashboard',
-    manual: req.query.manual === 'true'
-  }), user));
+  res.send(page('What is new', whatsNewBody(user), user));
 });
 
 app.post('/whats-new/close', requireUser, (req, res) => {
@@ -3212,7 +3206,7 @@ app.post('/whats-new/close', requireUser, (req, res) => {
     user.updatedAt = nowIso();
     writeStore(store);
   }
-  res.redirect(safeInternalPath(req.body.next || '/dashboard'));
+  res.redirect('/dashboard?whatsNew=skip');
 });
 
 app.get('/dashboard', (req, res) => {
