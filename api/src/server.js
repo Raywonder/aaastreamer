@@ -908,6 +908,7 @@ function normalizeWordPressConnectorSite(site = {}) {
     commentsEnabled: site.commentsEnabled !== false,
     hideCommentsOnStreamPage: site.hideCommentsOnStreamPage === true,
     accountEnabled: site.accountEnabled !== false,
+    autoUpdate: site.autoUpdate !== false,
     healthLevel,
     lastCheckInAt: site.lastCheckInAt || '',
     lastCheckedAt: site.lastCheckedAt || '',
@@ -2780,6 +2781,7 @@ app.post('/api/wordpress/checkin', (req, res) => {
     commentsEnabled: !(req.body.commentsEnabled === false || req.body.commentsEnabled === 'false'),
     hideCommentsOnStreamPage: req.body.hideCommentsOnStreamPage === true || req.body.hideCommentsOnStreamPage === 'true',
     accountEnabled: !(req.body.accountEnabled === false || req.body.accountEnabled === 'false'),
+    autoUpdate: !(req.body.autoUpdate === false || req.body.autoUpdate === 'false'),
     healthLevel: req.body.enabled === false || req.body.enabled === 'false' ? 4 : 9,
     lastCheckInAt: nowIso(),
     lastError: '',
@@ -2787,7 +2789,7 @@ app.post('/api/wordpress/checkin', (req, res) => {
   }));
   store.events.push({ id: id('evt'), type: created ? 'wordpress_connector_checkin_created' : 'wordpress_connector_checkin', payload: { siteUrl, streamSlug, userId: site.userId || '' }, createdAt: nowIso() });
   writeStore(store);
-  res.json({ success: true, siteId: site.id, healthLevel: wordpressConnectorHealth(site), commentsHiddenOnStreamPage: wordpressConnectorHidesStreamComments(store, stream || { id: site.streamId, slug: site.streamSlug }) });
+  res.json({ success: true, siteId: site.id, healthLevel: wordpressConnectorHealth(site), commentsHiddenOnStreamPage: wordpressConnectorHidesStreamComments(store, stream || { id: site.streamId, slug: site.streamSlug }), autoUpdate: site.autoUpdate !== false });
 });
 
 function canEditStream(user, stream) {
@@ -4499,7 +4501,7 @@ app.get('/admin/wordpress', requireAdmin, (req, res) => {
 <td>${escapeHtml(String(wordpressConnectorHealth(site)))} of 10</td>
 <td>${escapeHtml(site.lastCheckInAt || 'Never')}</td>
 <td>${escapeHtml(site.lastError || 'None')}</td>
-<td><form method="post" action="/admin/wordpress/sites/${escapeHtml(site.id)}"><label>Status<select name="pluginStatus"><option value="enabled" ${site.enabled ? 'selected' : ''}>enabled</option><option value="disabled" ${!site.enabled ? 'selected' : ''}>disabled</option><option value="error" ${site.pluginStatus === 'error' ? 'selected' : ''}>error</option></select></label><label><input type="checkbox" name="commentsEnabled" value="true" ${site.commentsEnabled ? 'checked' : ''}> Comments allowed</label><label><input type="checkbox" name="hideCommentsOnStreamPage" value="true" ${site.hideCommentsOnStreamPage ? 'checked' : ''}> Hide comments on AAAStreamer watch page</label><button type="submit">Save site controls</button></form></td>
+<td><form method="post" action="/admin/wordpress/sites/${escapeHtml(site.id)}"><label>Status<select name="pluginStatus"><option value="enabled" ${site.enabled ? 'selected' : ''}>enabled</option><option value="disabled" ${!site.enabled ? 'selected' : ''}>disabled</option><option value="error" ${site.pluginStatus === 'error' ? 'selected' : ''}>error</option></select></label><label><input type="checkbox" name="commentsEnabled" value="true" ${site.commentsEnabled ? 'checked' : ''}> Comments allowed</label><label><input type="checkbox" name="hideCommentsOnStreamPage" value="true" ${site.hideCommentsOnStreamPage ? 'checked' : ''}> Hide comments on AAAStreamer watch page</label><label><input type="checkbox" name="autoUpdate" value="true" ${site.autoUpdate !== false ? 'checked' : ''}> Auto-update this plugin</label><button type="submit">Save site controls</button></form></td>
 </tr>`;
   }).join('');
   const body = `<h1>Admin panel</h1>${adminTabs('wordpress')}
@@ -4532,9 +4534,10 @@ app.post('/admin/wordpress/sites/:siteId', requireAdmin, (req, res) => {
     site.enabled = site.pluginStatus === 'enabled';
     site.commentsEnabled = req.body.commentsEnabled === 'true';
     site.hideCommentsOnStreamPage = req.body.hideCommentsOnStreamPage === 'true';
+    site.autoUpdate = req.body.autoUpdate === 'true';
     site.healthLevel = wordpressConnectorHealth(site);
     site.updatedAt = nowIso();
-    store.events.push({ id: id('evt'), type: 'wordpress_connector_site_updated', payload: { siteId: site.id, siteUrl: site.siteUrl, pluginStatus: site.pluginStatus }, createdAt: nowIso() });
+    store.events.push({ id: id('evt'), type: 'wordpress_connector_site_updated', payload: { siteId: site.id, siteUrl: site.siteUrl, pluginStatus: site.pluginStatus, autoUpdate: site.autoUpdate }, createdAt: nowIso() });
     writeStore(store);
   }
   res.redirect('/admin/wordpress');

@@ -342,6 +342,13 @@ disable maintenance mode, and start the direct-host update process. The included
 repository changes, installs API dependencies, checks server syntax, restarts the
 PM2 service, and disables maintenance mode again.
 
+Plugin connectors report whether they allow automatic updates during each
+check-in. The admin plugin connector page stores a per-site auto-update toggle so
+site owners can opt out when needed while managed installs can still identify
+which connectors should stay on the current release track. A future plugin
+package feed should use this stored preference before offering or applying
+connector updates.
+
 Until domain selection is implemented in the admin UI, test deployments may use
 explicit port-based URLs on the account's assigned server IP. Production
 deployments should use an account-owned domain and reverse proxy once the owner

@@ -16,6 +16,7 @@ final class AAAStreamer_Connector {
     private const OPTION = 'aaastreamer_connector_settings';
     private const NONCE_ACTION = 'aaastreamer_connector_save';
     private const REST_NAMESPACE = 'aaastreamer/v1';
+    private const VERSION = '0.1.1';
 
     public static function boot(): void {
         add_action('admin_menu', [__CLASS__, 'admin_menu']);
@@ -51,6 +52,7 @@ final class AAAStreamer_Connector {
             'hide_comments_on_stream_page' => '0',
             'api_token' => '',
             'iframe_admin' => '0',
+            'auto_update' => '1',
         ];
     }
 
@@ -98,6 +100,7 @@ final class AAAStreamer_Connector {
         $next['comments_enabled'] = empty($input['comments_enabled']) ? '0' : '1';
         $next['hide_comments_on_stream_page'] = empty($input['hide_comments_on_stream_page']) ? '0' : '1';
         $next['iframe_admin'] = empty($input['iframe_admin']) ? '0' : '1';
+        $next['auto_update'] = empty($input['auto_update']) ? '0' : '1';
         $next['api_base'] = esc_url_raw(trim((string)($input['api_base'] ?? $current['api_base'])));
         $next['stream_slug'] = sanitize_title((string)($input['stream_slug'] ?? $current['stream_slug']));
         $next['stream_title'] = sanitize_text_field((string)($input['stream_title'] ?? $current['stream_title']));
@@ -121,8 +124,8 @@ final class AAAStreamer_Connector {
     }
 
     public static function enqueue_frontend(): void {
-        wp_register_style('aaastreamer-connector', plugins_url('assets/aaastreamer-connector.css', __FILE__), [], '0.1.1');
-        wp_register_script('aaastreamer-connector', plugins_url('assets/aaastreamer-connector.js', __FILE__), [], '0.1.1', true);
+        wp_register_style('aaastreamer-connector', plugins_url('assets/aaastreamer-connector.css', __FILE__), [], self::VERSION);
+        wp_register_script('aaastreamer-connector', plugins_url('assets/aaastreamer-connector.js', __FILE__), [], self::VERSION, true);
     }
 
     public static function enqueue_admin(string $hook): void {
@@ -410,6 +413,7 @@ final class AAAStreamer_Connector {
                     <?php self::checkbox_row('hide_comments_on_stream_page', __('Hide comments on the normal AAAStreamer stream page', 'aaastreamer-connector'), $settings); ?>
                     <?php self::checkbox_row('show_public_page_link', __('Show a link to the full AAAStreamer stream page', 'aaastreamer-connector'), $settings); ?>
                     <?php self::checkbox_row('iframe_admin', __('Show embedded AAAStreamer dashboard panel when supported by the AAAStreamer site', 'aaastreamer-connector'), $settings); ?>
+                    <?php self::checkbox_row('auto_update', __('Allow this connector to auto-update when AAAStreamer publishes a compatible plugin update', 'aaastreamer-connector'), $settings); ?>
                 </table>
 
                 <h2><?php esc_html_e('Stream settings', 'aaastreamer-connector'); ?></h2>
@@ -579,11 +583,12 @@ final class AAAStreamer_Connector {
             'listenPageUrl' => !empty($settings['wordpress_page_url']) ? (string)$settings['wordpress_page_url'] : home_url('/'),
             'publicPageUrl' => (string)($settings['public_page_url'] ?? ''),
             'streamSlug' => (string)$settings['stream_slug'],
-            'pluginVersion' => '0.1.1',
+            'pluginVersion' => self::VERSION,
             'enabled' => ($settings['enabled'] ?? '0') === '1',
             'accountEnabled' => ($settings['account_enabled'] ?? '0') === '1',
             'commentsEnabled' => ($settings['comments_enabled'] ?? '0') === '1',
             'hideCommentsOnStreamPage' => ($settings['hide_comments_on_stream_page'] ?? '0') === '1',
+            'autoUpdate' => ($settings['auto_update'] ?? '0') === '1',
         ];
         $headers = ['Content-Type' => 'application/json'];
         if (!empty($settings['api_token'])) {
