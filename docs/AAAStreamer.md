@@ -342,6 +342,12 @@ disable maintenance mode, and start the direct-host update process. The included
 repository changes, installs API dependencies, checks server syntax, restarts the
 PM2 service, and disables maintenance mode again.
 
+The updater page also includes restart playback recovery. When enabled,
+AAAStreamer automatically resumes valid current or queued sources for live
+streams and continuous on-demand channels after the app or server restarts.
+Admins can disable this if a deployment should come back quietly after
+maintenance instead of resuming playback.
+
 Plugin connectors report whether they allow automatic updates during each
 check-in. The admin plugin connector page stores a per-site auto-update toggle so
 site owners can opt out when needed while managed installs can still identify

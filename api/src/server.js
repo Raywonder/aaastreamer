@@ -593,6 +593,12 @@ function defaultSocialSettings() {
   };
 }
 
+function defaultPlaybackRecoverySettings() {
+  return {
+    autoResumeRelaysAfterRestart: true
+  };
+}
+
 async function createDnsRecord(settings, { name, type, content, proxied = false }) {
   if (settings.provider !== 'cloudflare') throw new Error('DNS provider is not configured for Cloudflare.');
   if (!settings.zoneId || !dnsApiToken) throw new Error('Cloudflare zone ID and API token are required.');
@@ -950,6 +956,7 @@ function normalizeStore(store) {
   store.settings.license.reissues = Array.isArray(store.settings.license.reissues) ? store.settings.license.reissues : [];
   store.settings.dns = { ...defaultDnsSettings(), ...(store.settings.dns || {}) };
   store.settings.social = { ...defaultSocialSettings(), ...(store.settings.social || {}) };
+  store.settings.playbackRecovery = { ...defaultPlaybackRecoverySettings(), ...(store.settings.playbackRecovery || {}) };
   store.settings.siteName = store.settings.platformBranding.platformName || store.settings.siteName;
   store.settings.visitorCommentsEnabled ??= true;
   store.settings.messaging = normalizeMessagingSettings(store.settings.messaging || {});
@@ -1398,6 +1405,18 @@ function shouldRunContinuousOnDemandRelay(stream, store) {
   if (!streamHasOnDemand(stream, store)) return false;
   const behavior = normalizeStreamMediaBehavior(stream.mediaBehavior);
   return behavior.continuousPlayback !== false && behavior.playbackMode !== 'disabled';
+}
+
+function playbackRecoveryEnabled(store) {
+  return store?.settings?.playbackRecovery?.autoResumeRelaysAfterRestart !== false;
+}
+
+function shouldAutoResumeSourceRelay(stream, store) {
+  if (!playbackRecoveryEnabled(store)) return false;
+  const behavior = normalizeStreamMediaBehavior(stream?.mediaBehavior);
+  if (behavior.continuousPlayback === false || behavior.playbackMode === 'disabled') return false;
+  if (!isLive(stream) && !shouldRunContinuousOnDemandRelay(stream, store)) return false;
+  return Boolean(firstPlayableSource(stream, store));
 }
 
 function streamIsPubliclyListable(stream, store) {
@@ -2635,7 +2654,7 @@ function ensureContinuousOnDemandRelays() {
   let changed = false;
   for (const stream of store.streams || []) {
     normalizeStream(stream);
-    if (!shouldRunContinuousOnDemandRelay(stream, store)) continue;
+    if (!shouldAutoResumeSourceRelay(stream, store)) continue;
     if (sourceProcesses.has(stream.id)) continue;
     const source = firstPlayableSource(stream, store);
     if (!source) continue;
@@ -2651,10 +2670,10 @@ function ensureContinuousOnDemandRelays() {
       startSourceProcess(stream, source, store);
       stream.hlsUrl = hlsUrlFor(stream.streamKey);
       stream.updatedAt = nowIso();
-      store.events.push({ id: id('evt'), type: 'ondemand_relay_warmed', payload: { streamId: stream.id, sourceId: source.id, label: source.label }, createdAt: nowIso() });
+      store.events.push({ id: id('evt'), type: shouldRunContinuousOnDemandRelay(stream, store) ? 'ondemand_relay_warmed' : 'source_relay_auto_resumed', payload: { streamId: stream.id, sourceId: source.id, label: source.label }, createdAt: nowIso() });
       changed = true;
     } catch (error) {
-      store.events.push({ id: id('evt'), type: 'ondemand_relay_warm_failed', payload: { streamId: stream.id, message: error.message }, createdAt: nowIso() });
+      store.events.push({ id: id('evt'), type: shouldRunContinuousOnDemandRelay(stream, store) ? 'ondemand_relay_warm_failed' : 'source_relay_auto_resume_failed', payload: { streamId: stream.id, message: error.message }, createdAt: nowIso() });
       changed = true;
     }
   }
@@ -4966,8 +4985,10 @@ app.post('/admin/encoders', requireAdmin, (req, res) => {
 
 app.get('/admin/updater', requireAdmin, (req, res) => {
   const store = readStore();
+  const recovery = store.settings.playbackRecovery || defaultPlaybackRecoverySettings();
   const body = `<h1>Admin panel</h1>${adminTabs('updater')}
 <section><h2>Update AAAStreamer</h2><p>Current version: <strong>${escapeHtml(appVersion)}</strong>${getGitRevision() ? `, git ${escapeHtml(getGitRevision())}` : ''}</p><form method="post" action="/admin/updater/settings"><label>Update manifest URL<input name="updateManifestUrl" value="${escapeHtml(store.settings.updateManifestUrl)}"></label><button type="submit">Save update source</button></form><form method="post" action="/admin/updater/install"><button type="submit">Install latest update</button></form><p class="muted">Installing an update briefly enables maintenance mode, pulls the configured release source, installs dependencies, restarts AAAStreamer, then disables maintenance mode so admin and user logins reopen.</p></section>
+<section><h2>Restart playback recovery</h2><form method="post" action="/admin/updater/recovery"><label><input type="checkbox" name="autoResumeRelaysAfterRestart" value="true" ${recovery.autoResumeRelaysAfterRestart !== false ? 'checked' : ''}> Auto-resume live and continuous on-demand playback after AAAStreamer restarts</label><p class="muted">When enabled, AAAStreamer restarts any valid current or queued source for live streams and continuous on-demand channels after server or app restarts.</p><button type="submit">Save playback recovery</button></form></section>
 <section><h2>Maintenance mode</h2><p>Status: <strong>${store.settings.maintenanceMode?.enabled ? 'enabled' : 'disabled'}</strong></p><form method="post" action="/admin/updater/maintenance"><label><input type="checkbox" name="enabled" value="true" ${store.settings.maintenanceMode?.enabled ? 'checked' : ''}> Maintenance mode enabled</label><label>Message<input name="message" value="${escapeHtml(store.settings.maintenanceMode?.message || '')}"></label><button type="submit">Save maintenance mode</button></form></section>`;
   res.send(page('Admin updater', body, req.user));
 });
@@ -5155,6 +5176,21 @@ app.post('/admin/updater/settings', requireAdmin, (req, res) => {
     store.settings.updateManifestUrl = url;
     store.events.push({ id: id('evt'), type: 'update_source_changed', payload: { updateManifestUrl: url }, createdAt: nowIso() });
     writeStore(store);
+  }
+  res.redirect('/admin/updater');
+});
+
+app.post('/admin/updater/recovery', requireAdmin, (req, res) => {
+  const store = readStore();
+  store.settings.playbackRecovery = {
+    ...defaultPlaybackRecoverySettings(),
+    ...(store.settings.playbackRecovery || {}),
+    autoResumeRelaysAfterRestart: req.body.autoResumeRelaysAfterRestart === 'true'
+  };
+  store.events.push({ id: id('evt'), type: 'playback_recovery_settings_updated', payload: store.settings.playbackRecovery, createdAt: nowIso() });
+  writeStore(store);
+  if (store.settings.playbackRecovery.autoResumeRelaysAfterRestart) {
+    ensureContinuousOnDemandRelays();
   }
   res.redirect('/admin/updater');
 });
