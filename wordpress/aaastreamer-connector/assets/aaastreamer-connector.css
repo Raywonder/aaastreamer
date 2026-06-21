@@ -1,0 +1,55 @@
+.aaastreamer-player {
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  padding: 1rem;
+  margin: 1rem 0;
+  background: #fff;
+}
+
+.aaastreamer-player h2 {
+  margin-top: 0;
+}
+
+.aaastreamer-audio {
+  display: block;
+  width: 100%;
+  margin: 0.75rem 0;
+}
+
+.aaastreamer-actions {
+  margin: 0.75rem 0 0;
+}
+
+.aaastreamer-button,
+.aaastreamer-actions .aaastreamer-button {
+  display: inline-block;
+  padding: 0.55rem 0.85rem;
+  border-radius: 6px;
+  border: 1px solid #1f5f9f;
+  background: #1f5f9f;
+  color: #fff;
+  text-decoration: none;
+}
+
+.aaastreamer-button:focus,
+.aaastreamer-button:hover {
+  background: #154a7e;
+  color: #fff;
+  outline: 3px solid #f8d24a;
+  outline-offset: 2px;
+}
+
+.aaastreamer-status {
+  font-weight: 600;
+}
+
+.aaastreamer-admin .aaastreamer-status-table th {
+  width: 14rem;
+}
+
+.aaastreamer-dashboard-frame {
+  width: 100%;
+  min-height: 720px;
+  border: 1px solid #ccd0d4;
+  background: #fff;
+}
