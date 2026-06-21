@@ -1893,7 +1893,7 @@ function adminTabs(active) {
     ['branding', 'Branding'],
     ['messaging', 'Messaging'],
     ['share-links', 'Share links'],
-    ['wordpress', 'WordPress'],
+    ['wordpress', 'Plugin connector'],
     ['payments', 'Payments'],
     ['install', 'Install and licensing'],
     ['media', 'Media sources'],
@@ -2187,7 +2187,7 @@ function dashboardTabs(active) {
     ['encoders', 'Encoders'],
     ['destinations', 'Destinations'],
     ['schedule', 'Calendar'],
-    ['wordpress', 'WordPress connector'],
+    ['wordpress', 'Plugin connector'],
     ['profile', 'Stream profile'],
     ['support', 'Support and payments'],
     ['account', 'Account'],
@@ -2740,7 +2740,7 @@ app.post('/api/wordpress/checkin', (req, res) => {
   const store = readStore();
   const settings = store.settings.wordpressConnector || defaultWordPressConnectorSettings();
   if (!settings.enabled) {
-    res.status(403).json({ success: false, error: 'WordPress connector service is disabled.' });
+    res.status(403).json({ success: false, error: 'Plugin connector service is disabled.' });
     return;
   }
   const siteUrl = safeUrl(req.body.siteUrl);
@@ -2752,7 +2752,7 @@ app.post('/api/wordpress/checkin', (req, res) => {
   const stream = store.streams.find((item) => item.slug === streamSlug || item.id === req.body.streamId);
   const owner = stream ? store.users.find((user) => user.id === stream.ownerId) : null;
   if (owner && !wordpressConnectorAllowedForUser(store, owner)) {
-    res.status(403).json({ success: false, error: 'This stream owner does not have WordPress connector access.' });
+    res.status(403).json({ success: false, error: 'This stream owner does not have plugin connector access.' });
     return;
   }
   store.wordpressConnectors ||= [];
@@ -3325,8 +3325,8 @@ app.get('/dashboard', (req, res) => {
   const wordpressSites = wordpressConnectorSitesForUser(store, user, stream);
   const primaryWordPressSite = wordpressSites[0] || normalizeWordPressConnectorSite({ streamId: stream.id, streamSlug: stream.slug, userId: user.id, siteUrl: '', listenPageUrl: '', enabled: true });
   const wordpressTab = wordpressAllowed
-    ? `<section><h2>WordPress connector</h2><p class="muted">Connect your WordPress site to this stream so a page on your site can embed the player, account tools, and comments while AAAStreamer remains the streaming authority.</p><form method="post" action="/dashboard/wordpress"><label>WordPress site URL<input name="siteUrl" value="${escapeHtml(primaryWordPressSite.siteUrl || '')}" placeholder="https://example.com"></label><label>WordPress listen page URL<input name="listenPageUrl" value="${escapeHtml(primaryWordPressSite.listenPageUrl || '')}" placeholder="https://example.com/listen"></label><label>Plugin REST base URL<input name="restBaseUrl" value="${escapeHtml(primaryWordPressSite.restBaseUrl || '')}" placeholder="https://example.com/index.php?rest_route=/aaastreamer/v1"></label><label><input type="checkbox" name="enabled" value="true" ${primaryWordPressSite.enabled ? 'checked' : ''}> Enable this WordPress site connection</label><label><input type="checkbox" name="commentsEnabled" value="true" ${primaryWordPressSite.commentsEnabled ? 'checked' : ''}> Allow comments from the WordPress stream page</label><label><input type="checkbox" name="hideCommentsOnStreamPage" value="true" ${primaryWordPressSite.hideCommentsOnStreamPage ? 'checked' : ''}> Hide comments on the normal AAAStreamer watch page for this stream</label><button type="submit">Save WordPress connector</button></form><section class="subsection"><h3>Embed shortcodes</h3><p><code>[aaastreamer_player]</code></p><p><code>[aaastreamer_comments]</code></p><p><code>[aaastreamer_account_panel]</code></p></section><section class="subsection"><h3>Connected WordPress sites</h3><table><tr><th>Site</th><th>Stream</th><th>Plugin version</th><th>Status</th><th>Comments</th><th>Health</th><th>Last check-in</th><th>Last error</th></tr>${wordpressConnectorSiteRows(store, wordpressSites) || '<tr><td colspan="8">No WordPress plugin check-ins yet. Save the connector here, then save settings in the WordPress plugin once.</td></tr>'}</table></section></section>`
-    : `<section><h2>WordPress connector</h2><p>This account does not currently have WordPress connector access. Contact an administrator if this stream should be embedded on a WordPress site.</p></section>`;
+    ? `<section><h2>Plugin connector</h2><p class="muted">Connect a site plugin to this stream so pages outside AAAStreamer can embed the player, account tools, and comments while AAAStreamer remains the streaming authority.</p><form method="post" action="/dashboard/wordpress"><label>WordPress site URL<input name="siteUrl" value="${escapeHtml(primaryWordPressSite.siteUrl || '')}" placeholder="https://example.com"></label><label>WordPress listen page URL<input name="listenPageUrl" value="${escapeHtml(primaryWordPressSite.listenPageUrl || '')}" placeholder="https://example.com/listen"></label><label>Plugin REST base URL<input name="restBaseUrl" value="${escapeHtml(primaryWordPressSite.restBaseUrl || '')}" placeholder="https://example.com/index.php?rest_route=/aaastreamer/v1"></label><label><input type="checkbox" name="enabled" value="true" ${primaryWordPressSite.enabled ? 'checked' : ''}> Enable this WordPress site connection</label><label><input type="checkbox" name="commentsEnabled" value="true" ${primaryWordPressSite.commentsEnabled ? 'checked' : ''}> Allow comments from the WordPress stream page</label><label><input type="checkbox" name="hideCommentsOnStreamPage" value="true" ${primaryWordPressSite.hideCommentsOnStreamPage ? 'checked' : ''}> Hide comments on the normal AAAStreamer watch page for this stream</label><button type="submit">Save plugin connector</button></form><section class="subsection"><h3>Embed shortcodes</h3><p><code>[aaastreamer_player]</code></p><p><code>[aaastreamer_comments]</code></p><p><code>[aaastreamer_account_panel]</code></p></section><section class="subsection"><h3>Connected plugin sites</h3><table><tr><th>Site</th><th>Stream</th><th>Plugin version</th><th>Status</th><th>Comments</th><th>Health</th><th>Last check-in</th><th>Last error</th></tr>${wordpressConnectorSiteRows(store, wordpressSites) || '<tr><td colspan="8">No plugin check-ins yet. Save the connector here, then save settings in the site plugin once.</td></tr>'}</table></section></section>`
+    : `<section><h2>Plugin connector</h2><p>This account does not currently have plugin connector access. Contact an administrator if this stream should be embedded on an external site.</p></section>`;
   const advancedTab = `<section><h2>On-demand display</h2><form method="post" action="/dashboard/sources/ondemand"><label><input type="checkbox" name="enabled" value="true" ${stream.onDemand?.enabled ? 'checked' : ''}> Enable on-demand playback</label><label><input type="checkbox" name="showWhenOffline" value="true" ${stream.onDemand?.showWhenOffline ? 'checked' : ''}> Show to visitors when offline and selected media is available</label><label>On-demand title<input name="title" value="${escapeHtml(stream.onDemand?.title || '')}"></label><button type="submit">Save on-demand settings</button></form></section>`;
   const selectedBody = { overview: overviewTab, media: mediaTab, encoders: encodersTab, destinations: destinationsTab, schedule: scheduleTab, wordpress: wordpressTab, profile: profileTab, support: supportTab, account: accountTab, advanced: advancedTab }[activeTab];
   const body = `<h1>User panel</h1>${reminderHtml}${tabs}${selectedBody}<script>
@@ -3428,14 +3428,14 @@ app.post('/dashboard/wordpress', requireBroadcaster, (req, res) => {
   const user = userById(store, req.user.id);
   const stream = ensureStreamForUser(store, user);
   if (!wordpressConnectorAllowedForUser(store, user)) {
-    res.status(403).send(page('WordPress connector unavailable', '<h1>WordPress connector unavailable</h1><p>This account does not currently have access to the WordPress connector.</p><p><a class="button" href="/dashboard?tab=wordpress">Back to WordPress connector</a></p>', req.user));
+    res.status(403).send(page('Plugin connector unavailable', '<h1>Plugin connector unavailable</h1><p>This account does not currently have access to the plugin connector.</p><p><a class="button" href="/dashboard?tab=wordpress">Back to plugin connector</a></p>', req.user));
     return;
   }
   const siteUrl = safeUrl(req.body.siteUrl);
   const listenPageUrl = safeUrl(req.body.listenPageUrl);
   const restBaseUrl = safeUrl(req.body.restBaseUrl);
   if (!siteUrl) {
-    res.status(400).send(page('WordPress connector not saved', '<h1>WordPress connector not saved</h1><p>Enter a valid WordPress site URL that starts with https:// or http://.</p><p><a class="button" href="/dashboard?tab=wordpress">Back to WordPress connector</a></p>', req.user));
+    res.status(400).send(page('Plugin connector not saved', '<h1>Plugin connector not saved</h1><p>Enter a valid WordPress site URL that starts with https:// or http://.</p><p><a class="button" href="/dashboard?tab=wordpress">Back to plugin connector</a></p>', req.user));
     return;
   }
   store.wordpressConnectors ||= [];
@@ -4301,7 +4301,7 @@ app.get('/admin/streams', requireAdmin, (req, res) => {
 
 app.get('/admin/accounts', requireAdmin, (req, res) => {
   const store = readStore();
-  const accountRows = store.users.map((item) => `<tr><td>${escapeHtml(item.username)}</td><td><form method="post" action="/admin/users/${escapeHtml(item.id)}"><label>Display name<input name="displayName" value="${escapeHtml(item.displayName || '')}"></label></td><td><label>Role<select name="role">${roleOptions(item.role, true)}</select></label></td><td><label><input type="checkbox" name="active" value="true" ${item.active ? 'checked' : ''}> Active</label><label><input type="checkbox" name="wordpressConnectorAccess" value="true" ${item.wordpressConnectorAccess !== false ? 'checked' : ''}> WordPress connector access</label></td><td><label>Notification email<input name="notificationEmail" type="email" value="${escapeHtml(item.notificationEmail || '')}"></label><label>Client ID or client email<input name="clientLookup" value="${escapeHtml(item.whmcsClientId || item.whmcsPortalEmail || '')}"></label><p class="muted">Current client ID: ${escapeHtml(item.whmcsClientId || 'None')}. Client email: ${escapeHtml(item.whmcsPortalEmail || 'None')}.</p></td><td><label>New password<input name="password" type="password" autocomplete="new-password" placeholder="Leave blank to keep current password"></label><button type="submit">Save account</button></form></td></tr>`).join('');
+  const accountRows = store.users.map((item) => `<tr><td>${escapeHtml(item.username)}</td><td><form method="post" action="/admin/users/${escapeHtml(item.id)}"><label>Display name<input name="displayName" value="${escapeHtml(item.displayName || '')}"></label></td><td><label>Role<select name="role">${roleOptions(item.role, true)}</select></label></td><td><label><input type="checkbox" name="active" value="true" ${item.active ? 'checked' : ''}> Active</label><label><input type="checkbox" name="wordpressConnectorAccess" value="true" ${item.wordpressConnectorAccess !== false ? 'checked' : ''}> Plugin connector access</label></td><td><label>Notification email<input name="notificationEmail" type="email" value="${escapeHtml(item.notificationEmail || '')}"></label><label>Client ID or client email<input name="clientLookup" value="${escapeHtml(item.whmcsClientId || item.whmcsPortalEmail || '')}"></label><p class="muted">Current client ID: ${escapeHtml(item.whmcsClientId || 'None')}. Client email: ${escapeHtml(item.whmcsPortalEmail || 'None')}.</p></td><td><label>New password<input name="password" type="password" autocomplete="new-password" placeholder="Leave blank to keep current password"></label><button type="submit">Save account</button></form></td></tr>`).join('');
   const body = `<h1>Admin panel</h1>${adminTabs('accounts')}
 <section><h2>Create user</h2><form method="post" action="/admin/users"><label>Username<input name="username" required></label><label>Display name<input name="displayName"></label><label>Password<input name="password" type="password" required></label><label>Role<select name="role">${roleOptions('user', true)}</select></label><button type="submit">Create user</button></form></section>
 <section><h2>Edit accounts</h2><table><tr><th>Username</th><th>Display name</th><th>Role</th><th>Status</th><th>Linked details</th><th>Password and save</th></tr>${accountRows}</table></section>`;
@@ -4503,10 +4503,10 @@ app.get('/admin/wordpress', requireAdmin, (req, res) => {
 </tr>`;
   }).join('');
   const body = `<h1>Admin panel</h1>${adminTabs('wordpress')}
-<section><h2>WordPress connector settings</h2><form method="post" action="/admin/wordpress/settings"><label><input type="checkbox" name="enabled" value="true" ${settings.enabled ? 'checked' : ''}> Enable WordPress connector service</label><label><input type="checkbox" name="allowUsersByDefault" value="true" ${settings.allowUsersByDefault ? 'checked' : ''}> Allow users by default</label><label><input type="checkbox" name="requireLinkedAccount" value="true" ${settings.requireLinkedAccount ? 'checked' : ''}> Require linked client account before connector use</label><label><input type="checkbox" name="hideCommentsGlobally" value="true" ${settings.hideCommentsGlobally ? 'checked' : ''}> Hide comments on normal AAAStreamer watch pages when WordPress is used</label><button type="submit">Save WordPress connector settings</button></form></section>
+<section><h2>Plugin connector settings</h2><form method="post" action="/admin/wordpress/settings"><label><input type="checkbox" name="enabled" value="true" ${settings.enabled ? 'checked' : ''}> Enable plugin connector service</label><label><input type="checkbox" name="allowUsersByDefault" value="true" ${settings.allowUsersByDefault ? 'checked' : ''}> Allow users by default</label><label><input type="checkbox" name="requireLinkedAccount" value="true" ${settings.requireLinkedAccount ? 'checked' : ''}> Require linked client account before connector use</label><label><input type="checkbox" name="hideCommentsGlobally" value="true" ${settings.hideCommentsGlobally ? 'checked' : ''}> Hide comments on normal AAAStreamer watch pages when a site plugin is used</label><button type="submit">Save plugin connector settings</button></form></section>
 <section><h2>Connector analytics</h2><div class="grid"><article><h3>Installed sites</h3><p><strong>${escapeHtml(String(analytics.installed))}</strong></p></article><article><h3>Enabled sites</h3><p><strong>${escapeHtml(String(analytics.enabled))}</strong></p></article><article><h3>Disabled sites</h3><p><strong>${escapeHtml(String(analytics.disabled))}</strong></p></article><article><h3>Average running status</h3><p><strong>${escapeHtml(String(analytics.average || 0))}</strong> of 10</p></article></div></section>
-<section><h2>Installed WordPress sites</h2><table><tr><th>Site</th><th>Owner</th><th>Stream</th><th>Plugin</th><th>Status</th><th>Comments</th><th>Running status</th><th>Last check-in</th><th>Last error</th><th>Controls</th></tr>${siteRows || '<tr><td colspan="10">No WordPress connector installs have checked in yet.</td></tr>'}</table></section>`;
-  res.send(page('Admin WordPress connector', body, req.user));
+<section><h2>Installed plugin sites</h2><table><tr><th>Site</th><th>Owner</th><th>Stream</th><th>Plugin</th><th>Status</th><th>Comments</th><th>Running status</th><th>Last check-in</th><th>Last error</th><th>Controls</th></tr>${siteRows || '<tr><td colspan="10">No plugin connector installs have checked in yet.</td></tr>'}</table></section>`;
+  res.send(page('Admin plugin connector', body, req.user));
 });
 
 app.post('/admin/wordpress/settings', requireAdmin, (req, res) => {
