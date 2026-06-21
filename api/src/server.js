@@ -498,6 +498,15 @@ function defaultPaymentIntegrationSettings() {
   };
 }
 
+function defaultWordPressConnectorSettings() {
+  return {
+    enabled: true,
+    allowUsersByDefault: true,
+    hideCommentsGlobally: false,
+    requireLinkedAccount: false
+  };
+}
+
 function defaultLicenseSettings() {
   const tier = licenseTierCatalog.find((item) => item.id === process.env.AAASTREAMER_LICENSE_TIER) || licenseTierCatalog.find((item) => item.id === 'self-hosted-starter');
   const internalUse = process.env.AAASTREAMER_INTERNAL_ENTERPRISE === 'true' || tier?.internal === true;
@@ -692,6 +701,7 @@ function normalizeUser(user) {
   };
   user.totpEnabled = user.totpEnabled === true;
   user.passkeys = Array.isArray(user.passkeys) ? user.passkeys : [];
+  user.wordpressConnectorAccess = user.wordpressConnectorAccess !== false;
   return user;
 }
 
@@ -877,6 +887,36 @@ function defaultMediaSettings() {
   };
 }
 
+function normalizeWordPressConnectorSite(site = {}) {
+  if (!site || typeof site !== 'object') return null;
+  const siteUrl = safeUrl(site.siteUrl);
+  const streamSlug = slugify(site.streamSlug || site.streamId || '');
+  if (!siteUrl && !streamSlug) return null;
+  const pluginStatus = ['installed', 'enabled', 'disabled', 'error'].includes(site.pluginStatus) ? site.pluginStatus : (site.enabled === false ? 'disabled' : 'enabled');
+  const healthLevel = clampNumber(site.healthLevel, 1, 10, pluginStatus === 'enabled' ? 7 : 3);
+  return {
+    id: String(site.id || id('wps')).slice(0, 80),
+    userId: String(site.userId || '').slice(0, 80),
+    streamId: String(site.streamId || '').slice(0, 80),
+    streamSlug,
+    siteUrl,
+    restBaseUrl: safeUrl(site.restBaseUrl),
+    listenPageUrl: safeUrl(site.listenPageUrl || site.publicPageUrl),
+    pluginVersion: String(site.pluginVersion || '').slice(0, 40),
+    pluginStatus,
+    enabled: pluginStatus !== 'disabled' && site.enabled !== false,
+    commentsEnabled: site.commentsEnabled !== false,
+    hideCommentsOnStreamPage: site.hideCommentsOnStreamPage === true,
+    accountEnabled: site.accountEnabled !== false,
+    healthLevel,
+    lastCheckInAt: site.lastCheckInAt || '',
+    lastCheckedAt: site.lastCheckedAt || '',
+    lastError: String(site.lastError || '').slice(0, 300),
+    createdAt: site.createdAt || nowIso(),
+    updatedAt: site.updatedAt || site.lastCheckInAt || site.createdAt || nowIso()
+  };
+}
+
 function normalizeStore(store) {
   store.users ||= [];
   store.streams ||= [];
@@ -888,6 +928,7 @@ function normalizeStore(store) {
   store.passkeyChallenges ||= [];
   store.scheduledShows ||= [];
   store.shareLinks ||= [];
+  store.wordpressConnectors ||= [];
   store.settings ||= {};
   store.settings.siteName ||= process.env.AAASTREAMER_SITE_NAME || 'AAAStreamer';
   if (!store.settings.platformBranding) {
@@ -896,6 +937,7 @@ function normalizeStore(store) {
     store.settings.platformBranding = { ...defaultPlatformBranding(), ...store.settings.platformBranding };
   }
   store.settings.paymentIntegration = { ...defaultPaymentIntegrationSettings(), ...(store.settings.paymentIntegration || {}) };
+  store.settings.wordpressConnector = { ...defaultWordPressConnectorSettings(), ...(store.settings.wordpressConnector || {}) };
   store.settings.license = { ...defaultLicenseSettings(), ...(store.settings.license || {}) };
   store.settings.license.reissueLimits = { ...defaultLicenseSettings().reissueLimits, ...(store.settings.license.reissueLimits || {}) };
   if (store.settings.license.internalUse || store.settings.license.deploymentTier === 'internal-enterprise') {
@@ -930,6 +972,7 @@ function normalizeStore(store) {
   }
   store.scheduledShows = (store.scheduledShows || []).map(normalizeScheduledShow).filter(Boolean);
   store.shareLinks = (store.shareLinks || []).filter((link) => link?.token && link?.streamId);
+  store.wordpressConnectors = (store.wordpressConnectors || []).map(normalizeWordPressConnectorSite).filter(Boolean).slice(-1000);
   const now = Date.now();
   store.pendingLogins = (store.pendingLogins || []).filter((item) => item?.token && Date.parse(item.expiresAt || '') > now);
   store.passkeyChallenges = (store.passkeyChallenges || []).filter((item) => item?.challenge && Date.parse(item.expiresAt || '') > now);
@@ -1850,6 +1893,7 @@ function adminTabs(active) {
     ['branding', 'Branding'],
     ['messaging', 'Messaging'],
     ['share-links', 'Share links'],
+    ['wordpress', 'WordPress'],
     ['payments', 'Payments'],
     ['install', 'Install and licensing'],
     ['media', 'Media sources'],
@@ -2143,12 +2187,74 @@ function dashboardTabs(active) {
     ['encoders', 'Encoders'],
     ['destinations', 'Destinations'],
     ['schedule', 'Calendar'],
+    ['wordpress', 'WordPress connector'],
     ['profile', 'Stream profile'],
     ['support', 'Support and payments'],
     ['account', 'Account'],
     ['advanced', 'Advanced']
   ];
   return `<nav class="tabs" role="tablist" aria-label="Dashboard sections">${tabs.map(([idValue, label]) => `<a role="tab" class="tab-button" href="/dashboard?tab=${escapeHtml(idValue)}" ${active === idValue ? 'aria-selected="true" aria-current="page"' : 'aria-selected="false"'}>${escapeHtml(label)}</a>`).join('')}</nav>`;
+}
+
+function wordpressConnectorAllowedForUser(store, user) {
+  const settings = store.settings.wordpressConnector || defaultWordPressConnectorSettings();
+  if (!settings.enabled) return false;
+  if (user?.role === 'admin') return true;
+  if (settings.requireLinkedAccount && !user?.whmcsClientId && !user?.whmcsPortalEmail) return false;
+  return user?.wordpressConnectorAccess !== false && (settings.allowUsersByDefault !== false || canBroadcast(user));
+}
+
+function wordpressConnectorHealth(site) {
+  const last = Date.parse(site.lastCheckInAt || site.updatedAt || '');
+  const hoursOld = Number.isFinite(last) ? (Date.now() - last) / 3600000 : 9999;
+  if (site.pluginStatus === 'error' || site.lastError) return Math.max(1, Math.min(4, site.healthLevel || 3));
+  if (!site.enabled || site.pluginStatus === 'disabled') return Math.max(1, Math.min(5, site.healthLevel || 4));
+  if (hoursOld <= 24) return Math.max(8, site.healthLevel || 9);
+  if (hoursOld <= 168) return Math.max(6, Math.min(8, site.healthLevel || 7));
+  return Math.max(2, Math.min(5, site.healthLevel || 4));
+}
+
+function wordpressConnectorSitesForUser(store, user, stream) {
+  return (store.wordpressConnectors || []).filter((site) =>
+    site.userId === user.id || site.streamId === stream?.id || site.streamSlug === stream?.slug
+  );
+}
+
+function wordpressConnectorAnalytics(store) {
+  const sites = store.wordpressConnectors || [];
+  const installed = sites.length;
+  const enabled = sites.filter((site) => site.enabled && site.pluginStatus !== 'disabled').length;
+  const disabled = installed - enabled;
+  const average = installed
+    ? Math.round(sites.reduce((sum, site) => sum + wordpressConnectorHealth(site), 0) / installed)
+    : 0;
+  return { installed, enabled, disabled, average };
+}
+
+function wordpressConnectorSiteRows(store, sites, includeOwner = false) {
+  return sites.map((site) => {
+    const owner = store.users.find((user) => user.id === site.userId);
+    const stream = store.streams.find((item) => item.id === site.streamId || item.slug === site.streamSlug);
+    return `<tr>
+<td>${site.siteUrl ? `<a href="${escapeHtml(site.siteUrl)}">${escapeHtml(site.siteUrl)}</a>` : 'Unknown site'}</td>
+${includeOwner ? `<td>${escapeHtml(owner?.username || 'Unlinked')}</td>` : ''}
+<td>${escapeHtml(stream?.title || site.streamSlug || 'Unlinked stream')}</td>
+<td>${escapeHtml(site.pluginVersion || 'Unknown')}</td>
+<td>${escapeHtml(site.enabled ? 'Enabled' : 'Disabled')}</td>
+<td>${escapeHtml(site.commentsEnabled ? 'Allowed' : 'Hidden')}</td>
+<td>${escapeHtml(String(wordpressConnectorHealth(site)))} of 10</td>
+<td>${escapeHtml(site.lastCheckInAt || 'Never')}</td>
+<td>${site.lastError ? escapeHtml(site.lastError) : 'None'}</td>
+</tr>`;
+  }).join('');
+}
+
+function wordpressConnectorHidesStreamComments(store, stream) {
+  const settings = store.settings.wordpressConnector || defaultWordPressConnectorSettings();
+  if (settings.hideCommentsGlobally) return true;
+  return (store.wordpressConnectors || []).some((site) =>
+    site.enabled && site.hideCommentsOnStreamPage && (site.streamId === stream.id || site.streamSlug === stream.slug)
+  );
 }
 
 function effectiveSupportSettings(stream, user, settings = {}) {
@@ -2630,6 +2736,60 @@ app.get('/api/media/catalog', requireBroadcaster, (req, res) => {
   res.json({ success: true, folders: mediaCatalog(store, req.user) });
 });
 
+app.post('/api/wordpress/checkin', (req, res) => {
+  const store = readStore();
+  const settings = store.settings.wordpressConnector || defaultWordPressConnectorSettings();
+  if (!settings.enabled) {
+    res.status(403).json({ success: false, error: 'WordPress connector service is disabled.' });
+    return;
+  }
+  const siteUrl = safeUrl(req.body.siteUrl);
+  const streamSlug = slugify(req.body.streamSlug || req.body.streamId || '');
+  if (!siteUrl || !streamSlug) {
+    res.status(400).json({ success: false, error: 'siteUrl and streamSlug are required.' });
+    return;
+  }
+  const stream = store.streams.find((item) => item.slug === streamSlug || item.id === req.body.streamId);
+  const owner = stream ? store.users.find((user) => user.id === stream.ownerId) : null;
+  if (owner && !wordpressConnectorAllowedForUser(store, owner)) {
+    res.status(403).json({ success: false, error: 'This stream owner does not have WordPress connector access.' });
+    return;
+  }
+  store.wordpressConnectors ||= [];
+  const normalizedSiteUrl = siteUrl.replace(/\/+$/, '');
+  let site = store.wordpressConnectors.find((item) =>
+    String(item.siteUrl || '').replace(/\/+$/, '') === normalizedSiteUrl &&
+    (item.streamSlug === streamSlug || item.streamId === stream?.id)
+  );
+  const created = !site;
+  if (!site) {
+    site = { id: id('wps'), createdAt: nowIso() };
+    store.wordpressConnectors.push(site);
+  }
+  Object.assign(site, normalizeWordPressConnectorSite({
+    ...site,
+    userId: owner?.id || site.userId || '',
+    streamId: stream?.id || site.streamId || '',
+    streamSlug,
+    siteUrl,
+    restBaseUrl: req.body.restBaseUrl || site.restBaseUrl || '',
+    listenPageUrl: req.body.listenPageUrl || req.body.publicPageUrl || site.listenPageUrl || '',
+    pluginVersion: req.body.pluginVersion || site.pluginVersion || '',
+    pluginStatus: req.body.enabled === false || req.body.enabled === 'false' ? 'disabled' : 'enabled',
+    enabled: !(req.body.enabled === false || req.body.enabled === 'false'),
+    commentsEnabled: !(req.body.commentsEnabled === false || req.body.commentsEnabled === 'false'),
+    hideCommentsOnStreamPage: req.body.hideCommentsOnStreamPage === true || req.body.hideCommentsOnStreamPage === 'true',
+    accountEnabled: !(req.body.accountEnabled === false || req.body.accountEnabled === 'false'),
+    healthLevel: req.body.enabled === false || req.body.enabled === 'false' ? 4 : 9,
+    lastCheckInAt: nowIso(),
+    lastError: '',
+    updatedAt: nowIso()
+  }));
+  store.events.push({ id: id('evt'), type: created ? 'wordpress_connector_checkin_created' : 'wordpress_connector_checkin', payload: { siteUrl, streamSlug, userId: site.userId || '' }, createdAt: nowIso() });
+  writeStore(store);
+  res.json({ success: true, siteId: site.id, healthLevel: wordpressConnectorHealth(site), commentsHiddenOnStreamPage: wordpressConnectorHidesStreamComments(store, stream || { id: site.streamId, slug: site.streamSlug }) });
+});
+
 function canEditStream(user, stream) {
   return Boolean(user && stream && (user.role === 'admin' || stream.ownerId === user.id));
 }
@@ -2835,7 +2995,8 @@ app.get('/s/:slug', (req, res) => {
   const messaging = normalizeMessagingSettings(store.settings.messaging || {});
   const user = currentUser(req);
   const canEditLinks = canEditStream(user, stream);
-  const canComment = stream.allowComments && (
+  const commentsHiddenByConnector = wordpressConnectorHidesStreamComments(store, stream);
+  const canComment = !commentsHiddenByConnector && stream.allowComments && (
     user ? messaging.loggedInUserMessagesEnabled : messaging.visitorMessagesEnabled
   );
   const heroStyle = stream.backgroundImage ? ` style="background-image:linear-gradient(rgba(16,19,22,.78),rgba(16,19,22,.78)),url('${escapeHtml(stream.backgroundImage)}')"` : '';
@@ -2847,8 +3008,8 @@ app.get('/s/:slug', (req, res) => {
 ${supportBefore}
 ${renderPlaybackPlayer(playbackUrl, stream)}${supportDuring}</div>
 <section><h2>About this stream</h2><p>${escapeHtml(stream.description || 'No description yet.')}</p>${renderExtraContentBox(stream, 'watch')}<h3>Links</h3><div id="streamLinksPanel">${editableLinks(stream, canEditLinks)}</div></section>
-<section><h2>Live comments</h2><div id="comments" class="comments">${comments.map((comment) => renderComment(comment, messaging.reactionsEnabled)).join('')}</div>
-${canComment ? `${!user ? '<p class="notice" role="note">Guest messages include moderation metadata such as approximate network address, browser/device information, and the host used to reach this stream. Broadcasters and moderators may use that information to keep chat safe.</p>' : ''}<form id="commentForm"><label>Name<input name="authorName" ${user ? `value="${escapeHtml(user.displayName || user.username)}" readonly` : 'required'}></label><label>Message type<select name="messageType"><option value="comment">Comment</option><option value="question">Question</option><option value="support">Support message</option></select></label><label>Comment<textarea name="message" required rows="3" maxlength="${escapeHtml(messaging.maxMessageLength || 1000)}"></textarea></label><button type="submit">Post comment</button></form>` : '<p>Comments are disabled for this stream or account type.</p>'}</section>
+<section><h2>Live comments</h2>${commentsHiddenByConnector ? '<p>Comments for this stream are handled on the connected WordPress page.</p>' : `<div id="comments" class="comments">${comments.map((comment) => renderComment(comment, messaging.reactionsEnabled)).join('')}</div>`}
+${canComment ? `${!user ? '<p class="notice" role="note">Guest messages include moderation metadata such as approximate network address, browser/device information, and the host used to reach this stream. Broadcasters and moderators may use that information to keep chat safe.</p>' : ''}<form id="commentForm"><label>Name<input name="authorName" ${user ? `value="${escapeHtml(user.displayName || user.username)}" readonly` : 'required'}></label><label>Message type<select name="messageType"><option value="comment">Comment</option><option value="question">Question</option><option value="support">Support message</option></select></label><label>Comment<textarea name="message" required rows="3" maxlength="${escapeHtml(messaging.maxMessageLength || 1000)}"></textarea></label><button type="submit">Post comment</button></form>` : (!commentsHiddenByConnector ? '<p>Comments are disabled for this stream or account type.</p>' : '')}</section>
 ${supportAfter}
 <script>
 const streamId=${JSON.stringify(stream.id)};
@@ -2857,7 +3018,7 @@ const linksPanel=document.getElementById('streamLinksPanel');
 async function refreshLinks(){if(!linksPanel)return;try{const response=await fetch('/api/streams/'+encodeURIComponent(streamId)+'/links');const payload=await response.json();if(payload.success)linksPanel.innerHTML=payload.html;}catch{}}
 if(linksPanel){linksPanel.addEventListener('click',async(event)=>{const button=event.target.closest('button[data-link-action]');if(!button)return;const action=button.dataset.linkAction;const index=button.dataset.linkIndex;if(action==='remove'&&!confirm('Remove this link from the stream page?'))return;await fetch('/api/streams/'+encodeURIComponent(streamId)+'/links/'+encodeURIComponent(index),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});await refreshLinks();});linksPanel.addEventListener('submit',async(event)=>{if(event.target.id!=='quickLinkForm')return;event.preventDefault();const form=new FormData(event.target);await fetch('/api/streams/'+encodeURIComponent(streamId)+'/links',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:form.get('label'),url:form.get('url'),placement:form.get('placement')})});event.target.reset();await refreshLinks();});}
 const events=new EventSource('/events');
-events.onmessage=(event)=>{try{const msg=JSON.parse(event.data); if(msg.type==='comment' && msg.payload.streamId===streamId){comments.insertAdjacentHTML('beforeend', msg.payload.html); comments.scrollTop=comments.scrollHeight;} if(msg.type==='reaction' && msg.payload.streamId===streamId){const target=document.getElementById('reactions-'+msg.payload.commentId); if(target) target.innerHTML=msg.payload.html;} if(msg.type==='stream_links_updated' && msg.payload.streamId===streamId){refreshLinks();} if(['stream_latency_updated','stream_source_selected','source_queue_selected','source_relay_started','source_relay_stopped','ondemand_settings_updated','stream_support_updated','stream_extra_content_updated'].includes(msg.type) && msg.payload.streamId===streamId){setTimeout(()=>window.location.reload(),500);}}catch{}};
+events.onmessage=(event)=>{try{const msg=JSON.parse(event.data); if(msg.type==='comment' && msg.payload.streamId===streamId && comments){comments.insertAdjacentHTML('beforeend', msg.payload.html); comments.scrollTop=comments.scrollHeight;} if(msg.type==='reaction' && msg.payload.streamId===streamId){const target=document.getElementById('reactions-'+msg.payload.commentId); if(target) target.innerHTML=msg.payload.html;} if(msg.type==='stream_links_updated' && msg.payload.streamId===streamId){refreshLinks();} if(['stream_latency_updated','stream_source_selected','source_queue_selected','source_relay_started','source_relay_stopped','ondemand_settings_updated','stream_support_updated','stream_extra_content_updated'].includes(msg.type) && msg.payload.streamId===streamId){setTimeout(()=>window.location.reload(),500);}}catch{}};
 const form=document.getElementById('commentForm');
 if(form){form.addEventListener('submit', async (e)=>{e.preventDefault(); const data=Object.fromEntries(new FormData(form)); const res=await fetch('/api/streams/'+streamId+'/comments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}); if(res.ok) form.reset();});}
 document.addEventListener('click', async (event)=>{const button=event.target.closest('[data-reaction]'); if(!button)return; const commentId=button.dataset.commentId; const reaction=button.dataset.reaction; const res=await fetch('/api/comments/'+commentId+'/reactions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({streamId,reaction})}); if(res.ok){const data=await res.json(); const target=document.getElementById('reactions-'+commentId); if(target) target.innerHTML=data.html;}});
@@ -3079,7 +3240,7 @@ app.get('/dashboard', (req, res) => {
   stream.support = effectiveSupportSettings(stream, user, store.settings);
   const shareLink = ensureShareLink(store, stream, user.id);
   writeStore(store);
-  const activeTab = ['overview', 'media', 'encoders', 'destinations', 'schedule', 'profile', 'support', 'account', 'advanced'].includes(req.query.tab) ? req.query.tab : 'overview';
+  const activeTab = ['overview', 'media', 'encoders', 'destinations', 'schedule', 'wordpress', 'profile', 'support', 'account', 'advanced'].includes(req.query.tab) ? req.query.tab : 'overview';
   const serverUrl = rtmpUrlFor(stream.streamKey);
   const watchUrl = watchUrlFor(stream);
   const shareUrl = tokenUrlFor(shareLink.token);
@@ -3162,8 +3323,14 @@ app.get('/dashboard', (req, res) => {
 <section><h2>Extra embedded content</h2><form method="post" action="/dashboard/extra-content"><label><input type="checkbox" name="enabled" value="true" ${stream.extraContent?.enabled ? 'checked' : ''}> Enable extra embedded content</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${stream.extraContent?.showOnWatchPage ? 'checked' : ''}> Show on visitor stream page</label><label>Heading<input name="title" value="${escapeHtml(stream.extraContent?.title || 'Additional content')}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(stream.extraContent?.description || '')}</textarea></label><label>Embed HTML<textarea name="embedHtml" rows="8">${escapeHtml(stream.extraContent?.embedHtml || '')}</textarea></label><button type="submit">Save extra content</button></form>${renderExtraContentBox(stream, 'dashboard')}</section>`;
   const support = effectiveSupportSettings(stream, user, store.settings);
   const supportTab = `<section><h2>Support and payment box</h2><p class="muted">Admin streams use the configured default client when the stream field is blank. Linked user accounts use their stored client ID.</p><form method="post" action="/dashboard/support"><label><input type="checkbox" name="enabled" value="true" ${support.enabled ? 'checked' : ''}> Enable support box for this stream</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${support.showOnWatchPage ? 'checked' : ''}> Show support box on the visitor watch page</label><label>Placement<select name="placement"><option value="before" ${support.placement === 'before' ? 'selected' : ''}>Before stream player</option><option value="during" ${support.placement === 'during' ? 'selected' : ''}>Beside stream player area</option><option value="after" ${!['before', 'during'].includes(support.placement) ? 'selected' : ''}>After comments and stream details</option></select></label><label>Heading<input name="title" value="${escapeHtml(support.title || 'Support this stream')}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(support.description || '')}</textarea></label><label>PayPal URL<input name="paypalUrl" value="${escapeHtml(support.paypalUrl || '')}" placeholder="https://paypal.me/example"></label><label>Stripe payment link<input name="stripeUrl" value="${escapeHtml(support.stripeUrl || '')}" placeholder="https://buy.stripe.com/..."></label><label>Stripe Connect account ID<input name="stripeConnectAccountId" value="${escapeHtml(support.stripeConnectAccountId || '')}" placeholder="acct_..."></label><label>Client ID or client email for invoice payments<input name="whmcsLookup" value="${escapeHtml(support.whmcsClientId || user.whmcsClientId || user.whmcsPortalEmail || '')}" placeholder="${escapeHtml(user.role === 'admin' ? paymentSettings.whmcsDefaultClientId || 'Admin default not set' : user.whmcsClientId || 'Linked client ID or email')}"></label><label>Cash App URL<input name="cashAppUrl" value="${escapeHtml(support.cashAppUrl || '')}" placeholder="https://cash.app/$name"></label><label>Apple Pay or payment URL<input name="applePayUrl" value="${escapeHtml(support.applePayUrl || '')}" placeholder="https://example.com/apple-pay"></label><label>Payment notes<textarea name="paymentNotes" rows="3">${escapeHtml(support.paymentNotes || '')}</textarea></label><label>Payment or donation embed HTML<textarea name="embedHtml" rows="6">${escapeHtml(support.embedHtml || '')}</textarea></label><button type="submit">Save support settings</button></form>${renderSupportBox({ ...stream, support }, 'dashboard')}</section>`;
+  const wordpressAllowed = wordpressConnectorAllowedForUser(store, user);
+  const wordpressSites = wordpressConnectorSitesForUser(store, user, stream);
+  const primaryWordPressSite = wordpressSites[0] || normalizeWordPressConnectorSite({ streamId: stream.id, streamSlug: stream.slug, userId: user.id, siteUrl: '', listenPageUrl: '', enabled: true });
+  const wordpressTab = wordpressAllowed
+    ? `<section><h2>WordPress connector</h2><p class="muted">Connect your WordPress site to this stream so a page on your site can embed the player, account tools, and comments while AAAStreamer remains the streaming authority.</p><form method="post" action="/dashboard/wordpress"><label>WordPress site URL<input name="siteUrl" value="${escapeHtml(primaryWordPressSite.siteUrl || '')}" placeholder="https://example.com"></label><label>WordPress listen page URL<input name="listenPageUrl" value="${escapeHtml(primaryWordPressSite.listenPageUrl || '')}" placeholder="https://example.com/listen"></label><label>Plugin REST base URL<input name="restBaseUrl" value="${escapeHtml(primaryWordPressSite.restBaseUrl || '')}" placeholder="https://example.com/index.php?rest_route=/aaastreamer/v1"></label><label><input type="checkbox" name="enabled" value="true" ${primaryWordPressSite.enabled ? 'checked' : ''}> Enable this WordPress site connection</label><label><input type="checkbox" name="commentsEnabled" value="true" ${primaryWordPressSite.commentsEnabled ? 'checked' : ''}> Allow comments from the WordPress stream page</label><label><input type="checkbox" name="hideCommentsOnStreamPage" value="true" ${primaryWordPressSite.hideCommentsOnStreamPage ? 'checked' : ''}> Hide comments on the normal AAAStreamer watch page for this stream</label><button type="submit">Save WordPress connector</button></form><section class="subsection"><h3>Embed shortcodes</h3><p><code>[aaastreamer_player]</code></p><p><code>[aaastreamer_comments]</code></p><p><code>[aaastreamer_account_panel]</code></p></section><section class="subsection"><h3>Connected WordPress sites</h3><table><tr><th>Site</th><th>Stream</th><th>Plugin version</th><th>Status</th><th>Comments</th><th>Health</th><th>Last check-in</th><th>Last error</th></tr>${wordpressConnectorSiteRows(store, wordpressSites) || '<tr><td colspan="8">No WordPress plugin check-ins yet. Save the connector here, then save settings in the WordPress plugin once.</td></tr>'}</table></section></section>`
+    : `<section><h2>WordPress connector</h2><p>This account does not currently have WordPress connector access. Contact an administrator if this stream should be embedded on a WordPress site.</p></section>`;
   const advancedTab = `<section><h2>On-demand display</h2><form method="post" action="/dashboard/sources/ondemand"><label><input type="checkbox" name="enabled" value="true" ${stream.onDemand?.enabled ? 'checked' : ''}> Enable on-demand playback</label><label><input type="checkbox" name="showWhenOffline" value="true" ${stream.onDemand?.showWhenOffline ? 'checked' : ''}> Show to visitors when offline and selected media is available</label><label>On-demand title<input name="title" value="${escapeHtml(stream.onDemand?.title || '')}"></label><button type="submit">Save on-demand settings</button></form></section>`;
-  const selectedBody = { overview: overviewTab, media: mediaTab, encoders: encodersTab, destinations: destinationsTab, schedule: scheduleTab, profile: profileTab, support: supportTab, account: accountTab, advanced: advancedTab }[activeTab];
+  const selectedBody = { overview: overviewTab, media: mediaTab, encoders: encodersTab, destinations: destinationsTab, schedule: scheduleTab, wordpress: wordpressTab, profile: profileTab, support: supportTab, account: accountTab, advanced: advancedTab }[activeTab];
   const body = `<h1>User panel</h1>${reminderHtml}${tabs}${selectedBody}<script>
 const copyStatus=document.getElementById('copyStatus');
 const confirmationPreferences=${JSON.stringify(user.confirmationPreferences || {})};
@@ -3256,6 +3423,51 @@ app.post('/dashboard/stream', requireBroadcaster, (req, res) => {
   stream.updatedAt = nowIso();
   writeStore(store);
   res.redirect('/dashboard?tab=profile');
+});
+
+app.post('/dashboard/wordpress', requireBroadcaster, (req, res) => {
+  const store = readStore();
+  const user = userById(store, req.user.id);
+  const stream = ensureStreamForUser(store, user);
+  if (!wordpressConnectorAllowedForUser(store, user)) {
+    res.status(403).send(page('WordPress connector unavailable', '<h1>WordPress connector unavailable</h1><p>This account does not currently have access to the WordPress connector.</p><p><a class="button" href="/dashboard?tab=wordpress">Back to WordPress connector</a></p>', req.user));
+    return;
+  }
+  const siteUrl = safeUrl(req.body.siteUrl);
+  const listenPageUrl = safeUrl(req.body.listenPageUrl);
+  const restBaseUrl = safeUrl(req.body.restBaseUrl);
+  if (!siteUrl) {
+    res.status(400).send(page('WordPress connector not saved', '<h1>WordPress connector not saved</h1><p>Enter a valid WordPress site URL that starts with https:// or http://.</p><p><a class="button" href="/dashboard?tab=wordpress">Back to WordPress connector</a></p>', req.user));
+    return;
+  }
+  store.wordpressConnectors ||= [];
+  const normalizedSiteUrl = siteUrl.replace(/\/+$/, '');
+  let site = store.wordpressConnectors.find((item) =>
+    item.userId === user.id && (item.streamId === stream.id || item.streamSlug === stream.slug || String(item.siteUrl || '').replace(/\/+$/, '') === normalizedSiteUrl)
+  );
+  const created = !site;
+  if (!site) {
+    site = { id: id('wps'), createdAt: nowIso() };
+    store.wordpressConnectors.push(site);
+  }
+  Object.assign(site, {
+    userId: user.id,
+    streamId: stream.id,
+    streamSlug: stream.slug,
+    siteUrl,
+    listenPageUrl,
+    restBaseUrl,
+    enabled: req.body.enabled === 'true',
+    pluginStatus: req.body.enabled === 'true' ? 'enabled' : 'disabled',
+    commentsEnabled: req.body.commentsEnabled === 'true',
+    hideCommentsOnStreamPage: req.body.hideCommentsOnStreamPage === 'true',
+    healthLevel: req.body.enabled === 'true' ? 7 : 4,
+    updatedAt: nowIso()
+  });
+  Object.assign(site, normalizeWordPressConnectorSite(site));
+  store.events.push({ id: id('evt'), type: created ? 'wordpress_connector_added' : 'wordpress_connector_updated', payload: { username: user.username, streamId: stream.id, siteUrl }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/dashboard?tab=wordpress');
 });
 
 app.post('/dashboard/encoders', requireBroadcaster, (req, res) => {
@@ -4076,7 +4288,7 @@ app.get('/admin/streams', requireAdmin, (req, res) => {
 
 app.get('/admin/accounts', requireAdmin, (req, res) => {
   const store = readStore();
-  const accountRows = store.users.map((item) => `<tr><td>${escapeHtml(item.username)}</td><td><form method="post" action="/admin/users/${escapeHtml(item.id)}"><label>Display name<input name="displayName" value="${escapeHtml(item.displayName || '')}"></label></td><td><label>Role<select name="role">${roleOptions(item.role, true)}</select></label></td><td><label><input type="checkbox" name="active" value="true" ${item.active ? 'checked' : ''}> Active</label></td><td><label>Notification email<input name="notificationEmail" type="email" value="${escapeHtml(item.notificationEmail || '')}"></label><label>Client ID or client email<input name="clientLookup" value="${escapeHtml(item.whmcsClientId || item.whmcsPortalEmail || '')}"></label><p class="muted">Current client ID: ${escapeHtml(item.whmcsClientId || 'None')}. Client email: ${escapeHtml(item.whmcsPortalEmail || 'None')}.</p></td><td><label>New password<input name="password" type="password" autocomplete="new-password" placeholder="Leave blank to keep current password"></label><button type="submit">Save account</button></form></td></tr>`).join('');
+  const accountRows = store.users.map((item) => `<tr><td>${escapeHtml(item.username)}</td><td><form method="post" action="/admin/users/${escapeHtml(item.id)}"><label>Display name<input name="displayName" value="${escapeHtml(item.displayName || '')}"></label></td><td><label>Role<select name="role">${roleOptions(item.role, true)}</select></label></td><td><label><input type="checkbox" name="active" value="true" ${item.active ? 'checked' : ''}> Active</label><label><input type="checkbox" name="wordpressConnectorAccess" value="true" ${item.wordpressConnectorAccess !== false ? 'checked' : ''}> WordPress connector access</label></td><td><label>Notification email<input name="notificationEmail" type="email" value="${escapeHtml(item.notificationEmail || '')}"></label><label>Client ID or client email<input name="clientLookup" value="${escapeHtml(item.whmcsClientId || item.whmcsPortalEmail || '')}"></label><p class="muted">Current client ID: ${escapeHtml(item.whmcsClientId || 'None')}. Client email: ${escapeHtml(item.whmcsPortalEmail || 'None')}.</p></td><td><label>New password<input name="password" type="password" autocomplete="new-password" placeholder="Leave blank to keep current password"></label><button type="submit">Save account</button></form></td></tr>`).join('');
   const body = `<h1>Admin panel</h1>${adminTabs('accounts')}
 <section><h2>Create user</h2><form method="post" action="/admin/users"><label>Username<input name="username" required></label><label>Display name<input name="displayName"></label><label>Password<input name="password" type="password" required></label><label>Role<select name="role">${roleOptions('user', true)}</select></label><button type="submit">Create user</button></form></section>
 <section><h2>Edit accounts</h2><table><tr><th>Username</th><th>Display name</th><th>Role</th><th>Status</th><th>Linked details</th><th>Password and save</th></tr>${accountRows}</table></section>`;
@@ -4255,6 +4467,64 @@ app.get('/admin/share-links', requireAdmin, (req, res) => {
   }).join('');
   const body = `<h1>Admin panel</h1>${adminTabs('share-links')}<section><h2>Tracked share links</h2><p class="muted">Token links are the default public sharing format. Direct stream URLs remain available for desktop clients, API calls, and advanced users, but are hidden by default in public-facing copy/share flows.</p><table><tr><th>Stream</th><th>Owner</th><th>Token URL</th><th>Direct URL</th><th>Uses</th><th>Last used</th></tr>${rows || '<tr><td colspan="6">No tracked share links have been generated yet.</td></tr>'}</table></section>`;
   res.send(page('Admin share links', body, req.user));
+});
+
+app.get('/admin/wordpress', requireAdmin, (req, res) => {
+  const store = readStore();
+  const settings = store.settings.wordpressConnector || defaultWordPressConnectorSettings();
+  const analytics = wordpressConnectorAnalytics(store);
+  const siteRows = (store.wordpressConnectors || []).map((site) => {
+    const owner = store.users.find((user) => user.id === site.userId);
+    const stream = store.streams.find((item) => item.id === site.streamId || item.slug === site.streamSlug);
+    return `<tr>
+<td>${site.siteUrl ? `<a href="${escapeHtml(site.siteUrl)}">${escapeHtml(site.siteUrl)}</a>` : 'Unknown site'}${site.listenPageUrl ? `<br><a href="${escapeHtml(site.listenPageUrl)}">Open WordPress stream page</a>` : ''}</td>
+<td>${escapeHtml(owner?.username || 'Unlinked')}</td>
+<td>${escapeHtml(stream?.title || site.streamSlug || 'Unlinked stream')}</td>
+<td>${escapeHtml(site.pluginVersion || 'Unknown')}</td>
+<td>${escapeHtml(site.enabled ? 'Enabled' : 'Disabled')}</td>
+<td>${escapeHtml(site.commentsEnabled ? 'Allowed' : 'Hidden')}</td>
+<td>${escapeHtml(String(wordpressConnectorHealth(site)))} of 10</td>
+<td>${escapeHtml(site.lastCheckInAt || 'Never')}</td>
+<td>${escapeHtml(site.lastError || 'None')}</td>
+<td><form method="post" action="/admin/wordpress/sites/${escapeHtml(site.id)}"><label>Status<select name="pluginStatus"><option value="enabled" ${site.enabled ? 'selected' : ''}>enabled</option><option value="disabled" ${!site.enabled ? 'selected' : ''}>disabled</option><option value="error" ${site.pluginStatus === 'error' ? 'selected' : ''}>error</option></select></label><label><input type="checkbox" name="commentsEnabled" value="true" ${site.commentsEnabled ? 'checked' : ''}> Comments allowed</label><label><input type="checkbox" name="hideCommentsOnStreamPage" value="true" ${site.hideCommentsOnStreamPage ? 'checked' : ''}> Hide comments on AAAStreamer watch page</label><button type="submit">Save site controls</button></form></td>
+</tr>`;
+  }).join('');
+  const body = `<h1>Admin panel</h1>${adminTabs('wordpress')}
+<section><h2>WordPress connector settings</h2><form method="post" action="/admin/wordpress/settings"><label><input type="checkbox" name="enabled" value="true" ${settings.enabled ? 'checked' : ''}> Enable WordPress connector service</label><label><input type="checkbox" name="allowUsersByDefault" value="true" ${settings.allowUsersByDefault ? 'checked' : ''}> Allow users by default</label><label><input type="checkbox" name="requireLinkedAccount" value="true" ${settings.requireLinkedAccount ? 'checked' : ''}> Require linked client account before connector use</label><label><input type="checkbox" name="hideCommentsGlobally" value="true" ${settings.hideCommentsGlobally ? 'checked' : ''}> Hide comments on normal AAAStreamer watch pages when WordPress is used</label><button type="submit">Save WordPress connector settings</button></form></section>
+<section><h2>Connector analytics</h2><div class="grid"><article><h3>Installed sites</h3><p><strong>${escapeHtml(String(analytics.installed))}</strong></p></article><article><h3>Enabled sites</h3><p><strong>${escapeHtml(String(analytics.enabled))}</strong></p></article><article><h3>Disabled sites</h3><p><strong>${escapeHtml(String(analytics.disabled))}</strong></p></article><article><h3>Average running status</h3><p><strong>${escapeHtml(String(analytics.average || 0))}</strong> of 10</p></article></div></section>
+<section><h2>Installed WordPress sites</h2><table><tr><th>Site</th><th>Owner</th><th>Stream</th><th>Plugin</th><th>Status</th><th>Comments</th><th>Running status</th><th>Last check-in</th><th>Last error</th><th>Controls</th></tr>${siteRows || '<tr><td colspan="10">No WordPress connector installs have checked in yet.</td></tr>'}</table></section>`;
+  res.send(page('Admin WordPress connector', body, req.user));
+});
+
+app.post('/admin/wordpress/settings', requireAdmin, (req, res) => {
+  const store = readStore();
+  store.settings.wordpressConnector = {
+    ...defaultWordPressConnectorSettings(),
+    ...(store.settings.wordpressConnector || {}),
+    enabled: req.body.enabled === 'true',
+    allowUsersByDefault: req.body.allowUsersByDefault === 'true',
+    requireLinkedAccount: req.body.requireLinkedAccount === 'true',
+    hideCommentsGlobally: req.body.hideCommentsGlobally === 'true'
+  };
+  store.events.push({ id: id('evt'), type: 'wordpress_connector_settings_updated', payload: { enabled: store.settings.wordpressConnector.enabled }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/admin/wordpress');
+});
+
+app.post('/admin/wordpress/sites/:siteId', requireAdmin, (req, res) => {
+  const store = readStore();
+  const site = (store.wordpressConnectors || []).find((item) => item.id === req.params.siteId);
+  if (site) {
+    site.pluginStatus = ['enabled', 'disabled', 'error'].includes(req.body.pluginStatus) ? req.body.pluginStatus : site.pluginStatus;
+    site.enabled = site.pluginStatus === 'enabled';
+    site.commentsEnabled = req.body.commentsEnabled === 'true';
+    site.hideCommentsOnStreamPage = req.body.hideCommentsOnStreamPage === 'true';
+    site.healthLevel = wordpressConnectorHealth(site);
+    site.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'wordpress_connector_site_updated', payload: { siteId: site.id, siteUrl: site.siteUrl, pluginStatus: site.pluginStatus }, createdAt: nowIso() });
+    writeStore(store);
+  }
+  res.redirect('/admin/wordpress');
 });
 
 app.get('/admin/payments', requireAdmin, (req, res) => {
@@ -4735,6 +5005,7 @@ app.post('/admin/users/:userId', requireAdmin, async (req, res) => {
   user.whmcsPortalEmail = linkedWhmcs?.email || (lookup.includes('@') ? lookup.slice(0, 180) : user.whmcsPortalEmail || '');
   user.whmcsClientId = linkedWhmcs?.clientId || (/^\d+$/.test(lookup) ? lookup.replace(/[^0-9]/g, '').slice(0, 20) : user.whmcsClientId || '');
   user.active = user.id === req.user.id ? true : req.body.active === 'true';
+  user.wordpressConnectorAccess = req.body.wordpressConnectorAccess === 'true';
   const password = String(req.body.password || '');
   if (password) {
     if (password.length < 8) {

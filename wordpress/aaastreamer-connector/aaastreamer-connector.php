@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AAAStreamer Connector
  * Description: Connects a WordPress site to an AAAStreamer account, provides an accessible stream player, and keeps listener comments inside WordPress moderation.
- * Version: 0.1.0
+ * Version: 0.1.1
  * Author: Devine Creations
  * License: GPL-2.0-or-later
  * Text Domain: aaastreamer-connector
@@ -23,6 +23,7 @@ final class AAAStreamer_Connector {
         add_action('wp_enqueue_scripts', [__CLASS__, 'enqueue_frontend']);
         add_action('admin_enqueue_scripts', [__CLASS__, 'enqueue_admin']);
         add_action('rest_api_init', [__CLASS__, 'register_rest_routes']);
+        add_action('updated_option_' . self::OPTION, [__CLASS__, 'settings_updated'], 10, 3);
         add_filter('comments_open', [__CLASS__, 'comments_open_for_stream_page'], 9999, 2);
         add_shortcode('aaastreamer_player', [__CLASS__, 'render_player_shortcode']);
         add_shortcode('aaastreamer_account_panel', [__CLASS__, 'render_account_panel_shortcode']);
@@ -40,9 +41,12 @@ final class AAAStreamer_Connector {
             'pls_url' => 'https://soulfoodradio.media/listen.pls',
             'direct_stream_url' => '',
             'public_page_url' => 'https://aaastreamer.devinecreations.net/s/soulfoodradio-media',
+            'wordpress_page_url' => '',
             'account_dashboard_url' => 'https://aaastreamer.devinecreations.net/dashboard',
             'wordpress_sso_enabled' => '1',
             'account_enabled' => '1',
+            'comments_enabled' => '1',
+            'hide_comments_on_stream_page' => '0',
             'api_token' => '',
             'iframe_admin' => '0',
         ];
@@ -89,6 +93,8 @@ final class AAAStreamer_Connector {
         $next['enabled'] = empty($input['enabled']) ? '0' : '1';
         $next['account_enabled'] = empty($input['account_enabled']) ? '0' : '1';
         $next['wordpress_sso_enabled'] = empty($input['wordpress_sso_enabled']) ? '0' : '1';
+        $next['comments_enabled'] = empty($input['comments_enabled']) ? '0' : '1';
+        $next['hide_comments_on_stream_page'] = empty($input['hide_comments_on_stream_page']) ? '0' : '1';
         $next['iframe_admin'] = empty($input['iframe_admin']) ? '0' : '1';
         $next['api_base'] = esc_url_raw(trim((string)($input['api_base'] ?? $current['api_base'])));
         $next['stream_slug'] = sanitize_title((string)($input['stream_slug'] ?? $current['stream_slug']));
@@ -97,15 +103,23 @@ final class AAAStreamer_Connector {
         $next['pls_url'] = esc_url_raw(trim((string)($input['pls_url'] ?? '')));
         $next['direct_stream_url'] = esc_url_raw(trim((string)($input['direct_stream_url'] ?? '')));
         $next['public_page_url'] = esc_url_raw(trim((string)($input['public_page_url'] ?? '')));
+        $next['wordpress_page_url'] = esc_url_raw(trim((string)($input['wordpress_page_url'] ?? '')));
         $next['account_dashboard_url'] = esc_url_raw(trim((string)($input['account_dashboard_url'] ?? '')));
         $token = (string)($input['api_token'] ?? '');
         $next['api_token'] = $token === '********' ? (string)$current['api_token'] : sanitize_text_field($token);
         return $next;
     }
 
+    public static function settings_updated($old_value, $value, string $option): void {
+        if ($option !== self::OPTION || !is_array($value)) {
+            return;
+        }
+        self::send_checkin($value);
+    }
+
     public static function enqueue_frontend(): void {
-        wp_register_style('aaastreamer-connector', plugins_url('assets/aaastreamer-connector.css', __FILE__), [], '0.1.0');
-        wp_register_script('aaastreamer-connector', plugins_url('assets/aaastreamer-connector.js', __FILE__), [], '0.1.0', true);
+        wp_register_style('aaastreamer-connector', plugins_url('assets/aaastreamer-connector.css', __FILE__), [], '0.1.1');
+        wp_register_script('aaastreamer-connector', plugins_url('assets/aaastreamer-connector.js', __FILE__), [], '0.1.1', true);
     }
 
     public static function enqueue_admin(string $hook): void {
@@ -257,6 +271,10 @@ final class AAAStreamer_Connector {
         if (!$post_id) {
             return '';
         }
+        $settings = self::settings();
+        if ($settings['comments_enabled'] !== '1') {
+            return '<section class="aaastreamer-comments"><h2>' . esc_html__('Listener comments', 'aaastreamer-connector') . '</h2><p>' . esc_html__('Comments are hidden for this WordPress stream page right now.', 'aaastreamer-connector') . '</p></section>';
+        }
         ob_start();
         ?>
         <section class="aaastreamer-comments" aria-labelledby="aaastreamer-comments-title">
@@ -290,6 +308,10 @@ final class AAAStreamer_Connector {
     }
 
     public static function comments_open_for_stream_page(bool $open, int $post_id): bool {
+        $settings = self::settings();
+        if ($settings['comments_enabled'] !== '1') {
+            return false;
+        }
         if ((string)get_post_meta($post_id, '_aaastreamer_comments_enabled', true) === '1') {
             return true;
         }
@@ -324,6 +346,8 @@ final class AAAStreamer_Connector {
                     <?php self::checkbox_row('enabled', __('Show listen player on WordPress page', 'aaastreamer-connector'), $settings); ?>
                     <?php self::checkbox_row('account_enabled', __('Enable linked SoulFoodRadio AAAStreamer account', 'aaastreamer-connector'), $settings); ?>
                     <?php self::checkbox_row('wordpress_sso_enabled', __('Allow login with WordPress for this linked AAAStreamer account', 'aaastreamer-connector'), $settings); ?>
+                    <?php self::checkbox_row('comments_enabled', __('Allow comments on the WordPress stream page', 'aaastreamer-connector'), $settings); ?>
+                    <?php self::checkbox_row('hide_comments_on_stream_page', __('Hide comments on the normal AAAStreamer stream page', 'aaastreamer-connector'), $settings); ?>
                     <?php self::checkbox_row('iframe_admin', __('Show embedded AAAStreamer dashboard panel when supported by the AAAStreamer site', 'aaastreamer-connector'), $settings); ?>
                 </table>
 
@@ -336,6 +360,7 @@ final class AAAStreamer_Connector {
                     <?php self::text_row('pls_url', __('PLS URL', 'aaastreamer-connector'), $settings, 'url'); ?>
                     <?php self::text_row('direct_stream_url', __('Direct stream URL override', 'aaastreamer-connector'), $settings, 'url'); ?>
                     <?php self::text_row('public_page_url', __('Public stream page URL', 'aaastreamer-connector'), $settings, 'url'); ?>
+                    <?php self::text_row('wordpress_page_url', __('WordPress listen page URL', 'aaastreamer-connector'), $settings, 'url'); ?>
                     <?php self::text_row('account_dashboard_url', __('AAAStreamer dashboard URL', 'aaastreamer-connector'), $settings, 'url'); ?>
                     <?php self::password_row('api_token', __('AAAStreamer API token', 'aaastreamer-connector'), $settings); ?>
                 </table>
@@ -473,6 +498,34 @@ final class AAAStreamer_Connector {
             return sprintf(__('Stream status: %s', 'aaastreamer-connector'), sanitize_text_field((string)$status['error']));
         }
         return __('Stream status: not available right now.', 'aaastreamer-connector');
+    }
+
+    private static function send_checkin(array $settings): void {
+        $api = rtrim((string)($settings['api_base'] ?? ''), '/');
+        if ($api === '' || empty($settings['stream_slug'])) {
+            return;
+        }
+        $payload = [
+            'siteUrl' => home_url('/'),
+            'restBaseUrl' => rest_url(self::REST_NAMESPACE),
+            'listenPageUrl' => !empty($settings['wordpress_page_url']) ? (string)$settings['wordpress_page_url'] : home_url('/'),
+            'publicPageUrl' => (string)($settings['public_page_url'] ?? ''),
+            'streamSlug' => (string)$settings['stream_slug'],
+            'pluginVersion' => '0.1.1',
+            'enabled' => ($settings['enabled'] ?? '0') === '1',
+            'accountEnabled' => ($settings['account_enabled'] ?? '0') === '1',
+            'commentsEnabled' => ($settings['comments_enabled'] ?? '0') === '1',
+            'hideCommentsOnStreamPage' => ($settings['hide_comments_on_stream_page'] ?? '0') === '1',
+        ];
+        $headers = ['Content-Type' => 'application/json'];
+        if (!empty($settings['api_token'])) {
+            $headers['Authorization'] = 'Bearer ' . $settings['api_token'];
+        }
+        wp_remote_post($api . '/api/wordpress/checkin', [
+            'timeout' => 6,
+            'headers' => $headers,
+            'body' => wp_json_encode($payload),
+        ]);
     }
 
     private static function base64url(string $value): string {
