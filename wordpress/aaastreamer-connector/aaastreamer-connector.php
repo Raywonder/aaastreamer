@@ -24,6 +24,7 @@ final class AAAStreamer_Connector {
         add_action('admin_enqueue_scripts', [__CLASS__, 'enqueue_admin']);
         add_action('rest_api_init', [__CLASS__, 'register_rest_routes']);
         add_action('updated_option_' . self::OPTION, [__CLASS__, 'settings_updated'], 10, 3);
+        add_filter('preprocess_comment', [__CLASS__, 'prepare_stream_comment']);
         add_filter('comments_open', [__CLASS__, 'comments_open_for_stream_page'], 9999, 2);
         add_shortcode('aaastreamer_player', [__CLASS__, 'render_player_shortcode']);
         add_shortcode('aaastreamer_account_panel', [__CLASS__, 'render_account_panel_shortcode']);
@@ -41,6 +42,7 @@ final class AAAStreamer_Connector {
             'pls_url' => 'https://soulfoodradio.media/listen.pls',
             'direct_stream_url' => '',
             'public_page_url' => 'https://aaastreamer.devinecreations.net/s/soulfoodradio-media',
+            'show_public_page_link' => '0',
             'wordpress_page_url' => '',
             'account_dashboard_url' => 'https://aaastreamer.devinecreations.net/dashboard',
             'wordpress_sso_enabled' => '1',
@@ -103,6 +105,7 @@ final class AAAStreamer_Connector {
         $next['pls_url'] = esc_url_raw(trim((string)($input['pls_url'] ?? '')));
         $next['direct_stream_url'] = esc_url_raw(trim((string)($input['direct_stream_url'] ?? '')));
         $next['public_page_url'] = esc_url_raw(trim((string)($input['public_page_url'] ?? '')));
+        $next['show_public_page_link'] = empty($input['show_public_page_link']) ? '0' : '1';
         $next['wordpress_page_url'] = esc_url_raw(trim((string)($input['wordpress_page_url'] ?? '')));
         $next['account_dashboard_url'] = esc_url_raw(trim((string)($input['account_dashboard_url'] ?? '')));
         $token = (string)($input['api_token'] ?? '');
@@ -233,9 +236,11 @@ final class AAAStreamer_Connector {
                 <audio id="<?php echo esc_attr($player_id); ?>" class="aaastreamer-audio" controls preload="none" src="<?php echo esc_url($stream_url); ?>">
                     <?php esc_html_e('Your browser does not support the audio player. Use the stream page link below.', 'aaastreamer-connector'); ?>
                 </audio>
-                <p class="aaastreamer-actions">
-                    <a class="aaastreamer-button" href="<?php echo esc_url($settings['public_page_url']); ?>"><?php esc_html_e('Open full stream page', 'aaastreamer-connector'); ?></a>
-                </p>
+                <?php if ($settings['show_public_page_link'] === '1' && $settings['public_page_url'] !== '') : ?>
+                    <p class="aaastreamer-actions">
+                        <a class="aaastreamer-button" href="<?php echo esc_url($settings['public_page_url']); ?>"><?php esc_html_e('Open full stream page', 'aaastreamer-connector'); ?></a>
+                    </p>
+                <?php endif; ?>
                 <?php if ($atts['show_status'] === '1') : ?>
                     <p class="aaastreamer-status" role="status">
                         <?php echo esc_html(self::status_label($status)); ?>
@@ -279,7 +284,6 @@ final class AAAStreamer_Connector {
         ?>
         <section class="aaastreamer-comments" aria-labelledby="aaastreamer-comments-title">
             <h2 id="aaastreamer-comments-title"><?php esc_html_e('Listener comments', 'aaastreamer-connector'); ?></h2>
-            <p><?php esc_html_e('Comments are moderated through this WordPress dashboard.', 'aaastreamer-connector'); ?></p>
             <?php
             $comments = get_comments([
                 'post_id' => $post_id,
@@ -292,19 +296,75 @@ final class AAAStreamer_Connector {
                     'style' => 'ol',
                     'short_ping' => true,
                     'avatar_size' => 48,
+                    'callback' => [__CLASS__, 'render_comment_item'],
                 ], $comments);
                 echo '</ol>';
             } else {
                 echo '<p>' . esc_html__('No comments yet.', 'aaastreamer-connector') . '</p>';
             }
+            $commenter = wp_get_current_commenter();
+            $current_user = wp_get_current_user();
+            $author_value = '';
+            if (is_user_logged_in() && $current_user instanceof WP_User) {
+                $author_value = $current_user->display_name ?: $current_user->user_login;
+            } elseif (!empty($commenter['comment_author'])) {
+                $author_value = (string)$commenter['comment_author'];
+            }
             comment_form([
                 'title_reply' => __('Leave a comment', 'aaastreamer-connector'),
                 'comment_notes_before' => '<p class="comment-notes">' . esc_html__('Your comment may be held for moderation before it appears.', 'aaastreamer-connector') . '</p>',
+                'comment_notes_after' => '',
+                'fields' => is_user_logged_in() ? [] : [
+                    'author' => '<p class="comment-form-author"><label for="author">' . esc_html__('Name', 'aaastreamer-connector') . ' <span class="required" aria-hidden="true">*</span></label> <input id="author" name="author" type="text" value="' . esc_attr($author_value) . '" size="30" maxlength="245" autocomplete="name" required></p>',
+                    'email' => '',
+                    'url' => '',
+                    'cookies' => '',
+                ],
+                'logged_in_as' => is_user_logged_in() ? '<p class="logged-in-as">' . sprintf(
+                    esc_html__('Commenting as %s.', 'aaastreamer-connector'),
+                    esc_html($author_value)
+                ) . '</p>' : '',
+                'comment_field' => '<p class="comment-form-comment"><label for="comment">' . esc_html__('Comment', 'aaastreamer-connector') . ' <span class="required" aria-hidden="true">*</span></label> <textarea id="comment" name="comment" cols="45" rows="6" maxlength="65525" required></textarea></p><input type="hidden" name="aaastreamer_comment" value="1">',
             ], $post_id);
             ?>
         </section>
         <?php
         return (string)ob_get_clean();
+    }
+
+    public static function render_comment_item(WP_Comment $comment, array $args, int $depth): void {
+        $tag = ('div' === ($args['style'] ?? 'ol')) ? 'div' : 'li';
+        $author_name = get_comment_author($comment);
+        $author_link = '';
+        if (!empty($comment->user_id)) {
+            $user = get_user_by('id', (int)$comment->user_id);
+            if ($user instanceof WP_User) {
+                $author_name = $user->display_name ?: $user->user_login;
+                $author_link = get_author_posts_url((int)$comment->user_id);
+            }
+        }
+        ?>
+        <<?php echo esc_attr($tag); ?> id="comment-<?php comment_ID(); ?>" <?php comment_class('', $comment); ?>>
+            <article id="div-comment-<?php comment_ID(); ?>" class="comment-body">
+                <footer class="comment-meta">
+                    <div class="comment-author vcard">
+                        <?php if ($author_link !== '') : ?>
+                            <a class="url" href="<?php echo esc_url($author_link); ?>"><?php echo esc_html($author_name); ?></a>
+                        <?php else : ?>
+                            <span class="fn"><?php echo esc_html($author_name); ?></span>
+                        <?php endif; ?>
+                    </div>
+                    <div class="comment-metadata">
+                        <time datetime="<?php echo esc_attr(get_comment_time('c', false, $comment)); ?>">
+                            <?php echo esc_html(get_comment_date('', $comment)); ?>
+                        </time>
+                    </div>
+                </footer>
+                <div class="comment-content">
+                    <?php comment_text($comment); ?>
+                </div>
+            </article>
+        <?php
     }
 
     public static function comments_open_for_stream_page(bool $open, int $post_id): bool {
@@ -348,6 +408,7 @@ final class AAAStreamer_Connector {
                     <?php self::checkbox_row('wordpress_sso_enabled', __('Allow login with WordPress for this linked AAAStreamer account', 'aaastreamer-connector'), $settings); ?>
                     <?php self::checkbox_row('comments_enabled', __('Allow comments on the WordPress stream page', 'aaastreamer-connector'), $settings); ?>
                     <?php self::checkbox_row('hide_comments_on_stream_page', __('Hide comments on the normal AAAStreamer stream page', 'aaastreamer-connector'), $settings); ?>
+                    <?php self::checkbox_row('show_public_page_link', __('Show a link to the full AAAStreamer stream page', 'aaastreamer-connector'), $settings); ?>
                     <?php self::checkbox_row('iframe_admin', __('Show embedded AAAStreamer dashboard panel when supported by the AAAStreamer site', 'aaastreamer-connector'), $settings); ?>
                 </table>
 
@@ -428,6 +489,10 @@ final class AAAStreamer_Connector {
     }
 
     private static function resolve_stream_url(array $settings): string {
+        $status = self::fetch_stream_status($settings);
+        if (!empty($status['success']) && !empty($status['stream']) && is_array($status['stream']) && !empty($status['stream']['playbackUrl'])) {
+            return esc_url_raw((string)$status['stream']['playbackUrl']);
+        }
         if (!empty($settings['direct_stream_url'])) {
             return (string)$settings['direct_stream_url'];
         }
@@ -491,6 +556,9 @@ final class AAAStreamer_Connector {
             $stream = is_array($status['stream']) ? $status['stream'] : [];
             if (!empty($stream['isLive']) || !empty($stream['live'])) {
                 return __('Stream status: live.', 'aaastreamer-connector');
+            }
+            if (!empty($stream['hasOnDemandPlayback']) || !empty($stream['continuousOnDemandRelay'])) {
+                return __('Stream status: on-demand audio is available.', 'aaastreamer-connector');
             }
             return __('Stream status: configured but not live right now.', 'aaastreamer-connector');
         }

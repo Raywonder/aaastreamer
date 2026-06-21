@@ -1406,11 +1406,13 @@ function streamIsPubliclyListable(stream, store) {
 }
 
 function streamPlaybackUrl(stream, store) {
+  const source = firstPlayableSource(stream, store);
+  if (source?.type === 'urlRelay') return playableSourceUrl(source, store);
   if (isLive(stream)) return stream.hlsUrl || hlsUrlFor(stream.activeEncoderKey || stream.streamKey);
   if (shouldRunContinuousOnDemandRelay(stream, store)) {
     return hlsUrlFor(stream.streamKey);
   }
-  if (streamHasOnDemand(stream, store)) return playableSourceUrl(firstPlayableSource(stream, store), store);
+  if (source && streamHasOnDemand(stream, store)) return playableSourceUrl(source, store);
   return '';
 }
 
