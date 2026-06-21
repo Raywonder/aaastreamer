@@ -185,6 +185,8 @@ VoiceLink-facing endpoints:
   offline grace, internal licensing, and product-positioning strategy.
 - [docs/AAAStreamer.md](/Users/admin/git/Raywonder/aaastreamer/docs/AAAStreamer.md)
   Product and deployment notes moved from the original root markdown file.
+- [docs/USER-MANUAL.md](/Users/admin/git/Raywonder/aaastreamer/docs/USER-MANUAL.md)
+  Logged-in user, broadcaster, admin, connector, updater, and support-agent manual.
 - [docker-compose.yml](/Users/admin/git/Raywonder/aaastreamer/docker-compose.yml)
   Server deployment entrypoint.
 - [nginx/nginx.conf](/Users/admin/git/Raywonder/aaastreamer/nginx/nginx.conf)

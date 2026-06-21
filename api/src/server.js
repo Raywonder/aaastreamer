@@ -34,9 +34,15 @@ app.use((err, _req, res, next) => {
 const port = Number(process.env.AAASTREAMER_PORT || 8095);
 const maxUploadBytes = Number(process.env.AAASTREAMER_MAX_UPLOAD_BYTES || 75 * 1024 * 1024);
 const maxBulkUploads = Math.max(1, Math.min(25, Number(process.env.AAASTREAMER_MAX_BULK_UPLOADS || 12) || 12));
-const repoRoot = fs.existsSync(path.resolve(process.cwd(), 'api/src/server.js')) ? process.cwd() : path.resolve(process.cwd(), '..');
+const cwd = process.cwd();
+const repoRoot = fs.existsSync(path.resolve(cwd, 'api/src/server.js'))
+  ? cwd
+  : fs.existsSync(path.resolve(cwd, 'src/server.js')) && fs.existsSync(path.resolve(cwd, 'docs'))
+    ? cwd
+    : path.resolve(cwd, '..');
 const dataDir = path.resolve(process.env.AAASTREAMER_DATA_DIR || path.join(process.cwd(), 'data'));
 const dataFile = path.join(dataDir, 'aaastreamer.json');
+const manualMarkdownPath = path.join(repoRoot, 'docs', 'USER-MANUAL.md');
 const hlsPath = process.env.HLS_PATH || '/tmp/hls';
 const publicUrl = (process.env.AAASTREAMER_PUBLIC_URL || '').replace(/\/+$/, '');
 const hlsBaseUrl = (process.env.AAASTREAMER_HLS_BASE_URL || publicUrl || '').replace(/\/+$/, '');
@@ -1682,7 +1688,7 @@ function page(title, body, user = null) {
   const branding = settings.platformBranding || defaultPlatformBranding();
   const adminLink = user?.role === 'admin' ? '<a href="/admin">Admin</a>' : '';
   const nav = user
-    ? `<a href="/dashboard">Dashboard</a>${adminLink}<a href="/whats-new?manual=true">What's new</a><form method="post" action="/logout"><button type="submit">Log out</button></form>`
+    ? `<a href="/dashboard">Dashboard</a>${adminLink}<a href="/manual">Manual</a><a href="/whats-new?manual=true">What's new</a><form method="post" action="/logout"><button type="submit">Log out</button></form>`
     : `<a href="/login">Log in</a>${settings.registrationsEnabled ? '<a href="/signup">Sign up</a>' : ''}`;
   return `<!doctype html>
 <html lang="en">
@@ -1715,6 +1721,101 @@ function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   }[char]));
+}
+
+function renderManualInline(value) {
+  return escapeHtml(value)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+}
+
+function renderManualMarkdown(markdown) {
+  const lines = String(markdown || '').split(/\r?\n/);
+  const html = [];
+  let paragraph = [];
+  let listType = '';
+  let inCode = false;
+  let codeLines = [];
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    html.push(`<p>${renderManualInline(paragraph.join(' '))}</p>`);
+    paragraph = [];
+  };
+  const closeList = () => {
+    if (!listType) return;
+    html.push(`</${listType}>`);
+    listType = '';
+  };
+  const openList = (type) => {
+    if (listType === type) return;
+    closeList();
+    listType = type;
+    html.push(`<${type}>`);
+  };
+  for (const line of lines) {
+    if (line.trim().startsWith('```')) {
+      flushParagraph();
+      closeList();
+      if (inCode) {
+        html.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+        codeLines = [];
+        inCode = false;
+      } else {
+        inCode = true;
+      }
+      continue;
+    }
+    if (inCode) {
+      codeLines.push(line);
+      continue;
+    }
+    if (!line.trim()) {
+      flushParagraph();
+      closeList();
+      continue;
+    }
+    const heading = line.match(/^(#{1,4})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      closeList();
+      const level = Math.min(4, heading[1].length + 1);
+      html.push(`<h${level}>${renderManualInline(heading[2])}</h${level}>`);
+      continue;
+    }
+    const bullet = line.match(/^\s*-\s+(.+)$/);
+    if (bullet) {
+      flushParagraph();
+      openList('ul');
+      html.push(`<li>${renderManualInline(bullet[1])}</li>`);
+      continue;
+    }
+    const ordered = line.match(/^\s*\d+\.\s+(.+)$/);
+    if (ordered) {
+      flushParagraph();
+      openList('ol');
+      html.push(`<li>${renderManualInline(ordered[1])}</li>`);
+      continue;
+    }
+    paragraph.push(line.trim());
+  }
+  flushParagraph();
+  closeList();
+  if (inCode) {
+    html.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+  }
+  return html.join('\n');
+}
+
+function manualBody(user) {
+  let markdown = '';
+  try {
+    markdown = fs.readFileSync(manualMarkdownPath, 'utf8');
+  } catch {
+    markdown = '# AAAStreamer User Manual\n\nThe manual file is not available in this install.';
+  }
+  const dashboardLink = user ? '<p><a class="button" href="/dashboard">Back to dashboard</a></p>' : '';
+  return `<article class="manual">${renderManualMarkdown(markdown)}${dashboardLink}</article>`;
 }
 
 function isSafeUrl(value) {
@@ -3153,6 +3254,15 @@ app.post('/signup', (req, res) => {
   writeStore(loggedIn);
   res.setHeader('Set-Cookie', `${sessionCookieName}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax`);
   res.redirect('/dashboard?tab=profile');
+});
+
+app.get('/manual', (req, res) => {
+  const user = currentUser(req);
+  if (!user) {
+    res.redirect('/login');
+    return;
+  }
+  res.send(page('AAAStreamer manual', manualBody(user), user));
 });
 
 app.post('/login', (req, res) => {
