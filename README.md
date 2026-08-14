@@ -46,6 +46,7 @@ management.
 - live visitor comments with server-sent event updates
 - server-ready Docker deployment
 - VoiceLink integration points for live streaming modules
+- native-client API v1 starter routes and a wxPython smoke client spike
 
 ## What users can do now
 
@@ -94,6 +95,12 @@ Streamers can also upload one or more supported audio/video files into the
 configured upload folder, select approved server media with checkboxes, use a
 check-all control, add selected media into a playback queue, and select HTTP or
 HTTPS media URLs as relay sources when admins allow it.
+
+For large libraries, the streamer media tab includes a paged server-media
+browser. Streamers can search titles, filenames, folders, and paths; filter by
+folder or media type; jump by first letter or number; sort by title, folder,
+file path, or newest first; review a preview; and check the visible page before
+starting playback or adding files to the queue.
 
 The dashboard can start the selected server media file or URL relay as an RTMP
 source using `ffmpeg`. A single selected source loops for 24/7 style streams;
@@ -187,6 +194,11 @@ VoiceLink-facing endpoints:
   Product and deployment notes moved from the original root markdown file.
 - [docs/USER-MANUAL.md](/Users/admin/git/Raywonder/aaastreamer/docs/USER-MANUAL.md)
   Logged-in user, broadcaster, admin, connector, updater, and support-agent manual.
+- [docs/NATIVE-CLIENT.md](/Users/admin/git/Raywonder/aaastreamer/docs/NATIVE-CLIENT.md)
+  Official native Windows/macOS client direction, API needs, accessibility rules,
+  and release phases.
+- [clients/wxpython-smoke/README.md](/Users/admin/git/Raywonder/aaastreamer/clients/wxpython-smoke/README.md)
+  Cross-platform native smoke-client spike for the `/api/client/v1` contract.
 - [docker-compose.yml](/Users/admin/git/Raywonder/aaastreamer/docker-compose.yml)
   Server deployment entrypoint.
 - [nginx/nginx.conf](/Users/admin/git/Raywonder/aaastreamer/nginx/nginx.conf)

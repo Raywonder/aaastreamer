@@ -65,18 +65,21 @@ const appVersion = process.env.AAASTREAMER_VERSION || '0.1.3';
 const updateManifestUrl = process.env.AAASTREAMER_UPDATE_MANIFEST_URL || 'https://raw.githubusercontent.com/Raywonder/aaastreamer/main/api/package.json';
 const audioBitrates = ['96k', '128k', '160k', '192k', '256k', '320k'];
 const licenseTierCatalog = [
-  { id: 'hosted-starter', model: 'hosted', name: 'AAAStreamer Hosted Starter', setupCents: 0, monthlyCents: 1499, description: 'Hosted starter station for creators who want Devine Creations to run the infrastructure.' },
-  { id: 'hosted-professional', model: 'hosted', name: 'AAAStreamer Hosted Professional', setupCents: 0, monthlyCents: 4999, description: 'Hosted station with more creator, scheduling, and moderation room.' },
-  { id: 'hosted-network', model: 'hosted', name: 'AAAStreamer Hosted Network', setupCents: 0, monthlyCents: 9900, description: 'Hosted network plan for larger channels, teams, or multiple shows.' },
-  { id: 'self-hosted-starter', model: 'self-hosted', name: 'AAAStreamer Self-Hosted Starter', setupCents: 9900, monthlyCents: 999, description: 'Customer-owned install with license validation and standard update tracking.' },
-  { id: 'self-hosted-professional', model: 'self-hosted', name: 'AAAStreamer Self-Hosted Professional', setupCents: 9900, monthlyCents: 4999, description: 'Customer-owned install with higher usage allowance and stronger managed-support options.' },
-  { id: 'managed-starter', model: 'managed', name: 'AAAStreamer Managed Starter', setupCents: 0, monthlyCents: 14900, description: 'Customer-owned infrastructure managed by Devine Creations.' },
-  { id: 'managed-professional', model: 'managed', name: 'AAAStreamer Managed Professional', setupCents: 0, monthlyCents: 29900, description: 'Managed deployment for active stations with more support and update handling.' },
-  { id: 'managed-network', model: 'managed', name: 'AAAStreamer Managed Network', setupCents: 0, monthlyCents: 49900, description: 'Managed deployment for larger broadcaster networks.' },
-  { id: 'enterprise-network', model: 'enterprise', name: 'AAAStreamer Enterprise / Networks', setupCents: null, monthlyCents: null, customPricing: true, description: 'Custom enterprise pricing and deployment terms.' },
-  { id: 'internal-enterprise', model: 'enterprise', name: 'AAAStreamer Internal Enterprise', setupCents: 0, monthlyCents: 0, internal: true, unlimited: true, description: 'Unrestricted internal Devine Creations/TappedIn infrastructure license.' }
+  { id: 'hosted-starter', model: 'hosted', name: 'AAAStreamer Hosted Starter', setupCents: 0, monthlyCents: 1499, desktopClientIncluded: true, proClientIncluded: false, description: 'Hosted starter station for creators who want Devine Creations to run the infrastructure.' },
+  { id: 'hosted-professional', model: 'hosted', name: 'AAAStreamer Hosted Professional', setupCents: 0, monthlyCents: 4999, desktopClientIncluded: true, proClientIncluded: true, description: 'Hosted station with more creator, scheduling, and moderation room.' },
+  { id: 'hosted-network', model: 'hosted', name: 'AAAStreamer Hosted Network', setupCents: 0, monthlyCents: 9900, desktopClientIncluded: true, proClientIncluded: true, description: 'Hosted network plan for larger channels, teams, or multiple shows.' },
+  { id: 'self-hosted-starter', model: 'self-hosted', name: 'AAAStreamer Self-Hosted Starter', setupCents: 9900, monthlyCents: 999, desktopClientIncluded: true, proClientIncluded: false, description: 'Customer-owned install with license validation and standard update tracking.' },
+  { id: 'self-hosted-professional', model: 'self-hosted', name: 'AAAStreamer Self-Hosted Professional', setupCents: 9900, monthlyCents: 4999, desktopClientIncluded: true, proClientIncluded: true, description: 'Customer-owned install with higher usage allowance and stronger managed-support options.' },
+  { id: 'managed-starter', model: 'managed', name: 'AAAStreamer Managed Starter', setupCents: 0, monthlyCents: 14900, desktopClientIncluded: true, proClientIncluded: false, description: 'Customer-owned infrastructure managed by Devine Creations.' },
+  { id: 'managed-professional', model: 'managed', name: 'AAAStreamer Managed Professional', setupCents: 0, monthlyCents: 29900, desktopClientIncluded: true, proClientIncluded: true, description: 'Managed deployment for active stations with more support and update handling.' },
+  { id: 'managed-network', model: 'managed', name: 'AAAStreamer Managed Network', setupCents: 0, monthlyCents: 49900, desktopClientIncluded: true, proClientIncluded: true, description: 'Managed deployment for larger broadcaster networks.' },
+  { id: 'enterprise-network', model: 'enterprise', name: 'AAAStreamer Enterprise / Networks', setupCents: null, monthlyCents: null, desktopClientIncluded: true, proClientIncluded: true, customPricing: true, description: 'Custom enterprise pricing and deployment terms.' },
+  { id: 'internal-enterprise', model: 'enterprise', name: 'AAAStreamer Internal Enterprise', setupCents: 0, monthlyCents: 0, desktopClientIncluded: true, proClientIncluded: true, internal: true, unlimited: true, description: 'Unrestricted internal Devine Creations/TappedIn infrastructure license.' }
 ];
 const sourceProcesses = new Map();
+const mediaCatalogCache = new Map();
+const mediaCatalogCacheMs = Math.max(0, Number(process.env.AAASTREAMER_MEDIA_CATALOG_CACHE_MS || 120000) || 120000);
+const scanMediaMetadata = process.env.AAASTREAMER_SCAN_MEDIA_METADATA === 'true';
 const mediaExtensions = new Map([
   ['.aac', 'audio'], ['.aif', 'audio'], ['.aiff', 'audio'], ['.alac', 'audio'], ['.flac', 'audio'],
   ['.m4a', 'audio'], ['.mp3', 'audio'], ['.ogg', 'audio'], ['.opus', 'audio'], ['.wav', 'audio'],
@@ -161,6 +164,16 @@ app.use('/hls', express.static(hlsPath, {
     res.setHeader('Accept-Ranges', 'bytes');
   }
 }));
+
+app.get('/assets/aaa-login-stage.png', (_req, res) => {
+  const assetPath = path.join(dataDir, 'aaa-login-stage.png');
+  if (!fs.existsSync(assetPath)) {
+    res.status(404).send('Asset not found');
+    return;
+  }
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.sendFile(assetPath);
+});
 
 function nowIso() {
   return new Date().toISOString();
@@ -302,6 +315,7 @@ function ensureDataStore() {
         siteName: process.env.AAASTREAMER_SITE_NAME || 'AAAStreamer',
         platformBranding: defaultPlatformBranding(),
         paymentIntegration: defaultPaymentIntegrationSettings(),
+        nativeClients: defaultNativeClientSettings(),
         license: defaultLicenseSettings(),
         dns: defaultDnsSettings(),
         social: defaultSocialSettings(),
@@ -542,6 +556,47 @@ function defaultLicenseSettings() {
   };
 }
 
+function defaultNativeClientSettings() {
+  const centralBase = (process.env.AAASTREAMER_CLIENT_DOWNLOAD_BASE_URL || 'https://devine-creations.com/downloads/aaastreamer').replace(/\/+$/, '');
+  return {
+    downloadsEnabled: process.env.AAASTREAMER_CLIENT_DOWNLOADS_ENABLED !== 'false',
+    centralDownloadBaseUrl: centralBase,
+    windowsStableUrl: process.env.AAASTREAMER_CLIENT_WINDOWS_URL || `${centralBase}/windows/latest`,
+    macStableUrl: process.env.AAASTREAMER_CLIENT_MAC_URL || `${centralBase}/macos/latest`,
+    linuxStableUrl: process.env.AAASTREAMER_CLIENT_LINUX_URL || `${centralBase}/linux/latest`,
+    minimumApiVersion: 1,
+    authCodeMinutes: 10,
+    accessTokenDays: 90,
+    defaultPermissions: {
+      viewDashboard: true,
+      manageProfile: true,
+      manageSources: true,
+      manageSchedule: true,
+      manageDestinations: true,
+      manageChat: true,
+      manageAccount: true,
+      adminTools: false
+    }
+  };
+}
+
+function normalizeNativeClientSettings(settings = {}) {
+  const defaults = defaultNativeClientSettings();
+  return {
+    ...defaults,
+    ...settings,
+    downloadsEnabled: settings.downloadsEnabled !== false,
+    centralDownloadBaseUrl: safeUrl(settings.centralDownloadBaseUrl) || defaults.centralDownloadBaseUrl,
+    windowsStableUrl: safeUrl(settings.windowsStableUrl) || defaults.windowsStableUrl,
+    macStableUrl: safeUrl(settings.macStableUrl) || defaults.macStableUrl,
+    linuxStableUrl: safeUrl(settings.linuxStableUrl) || defaults.linuxStableUrl,
+    minimumApiVersion: clampNumber(settings.minimumApiVersion, 1, 20, defaults.minimumApiVersion),
+    authCodeMinutes: clampNumber(settings.authCodeMinutes, 2, 60, defaults.authCodeMinutes),
+    accessTokenDays: clampNumber(settings.accessTokenDays, 1, 365, defaults.accessTokenDays),
+    defaultPermissions: normalizeClientPermissions(settings.defaultPermissions, defaults.defaultPermissions)
+  };
+}
+
 function defaultDnsSettings() {
   return {
     provider: process.env.AAASTREAMER_DNS_PROVIDER || '',
@@ -714,7 +769,120 @@ function normalizeUser(user) {
   user.totpEnabled = user.totpEnabled === true;
   user.passkeys = Array.isArray(user.passkeys) ? user.passkeys : [];
   user.wordpressConnectorAccess = user.wordpressConnectorAccess !== false;
+  user.nativeClientPermissions = normalizeClientPermissions(user.nativeClientPermissions || {});
   return user;
+}
+
+function normalizeClientPermissions(value = {}, defaults = null) {
+  const base = defaults || {
+    viewDashboard: true,
+    manageProfile: true,
+    manageSources: true,
+    manageSchedule: true,
+    manageDestinations: true,
+    manageChat: true,
+    manageAccount: true,
+    adminTools: false
+  };
+  return Object.fromEntries(Object.entries(base).map(([key, fallback]) => [key, value[key] ?? fallback ? true : false]));
+}
+
+function clientPermissionsForUser(store, user) {
+  const defaults = store.settings?.nativeClients?.defaultPermissions || defaultNativeClientSettings().defaultPermissions;
+  const permissions = normalizeClientPermissions(user?.nativeClientPermissions || {}, defaults);
+  if (!canBroadcast(user)) {
+    permissions.manageSources = false;
+    permissions.manageSchedule = false;
+    permissions.manageDestinations = false;
+    permissions.manageChat = false;
+  }
+  if (user?.role !== 'admin') permissions.adminTools = false;
+  return permissions;
+}
+
+function normalizeConnectedClient(client = {}) {
+  const permissions = normalizeClientPermissions(client.permissions || {});
+  return {
+    id: String(client.id || id('cli')).slice(0, 80),
+    userId: String(client.userId || '').slice(0, 80),
+    clientId: String(client.clientId || '').trim().slice(0, 120),
+    clientName: String(client.clientName || 'AAAStreamer client').trim().slice(0, 120),
+    platform: ['windows', 'macos', 'linux', 'ios', 'android', 'web', 'unknown'].includes(client.platform) ? client.platform : 'unknown',
+    version: String(client.version || '').trim().slice(0, 80),
+    tokenHash: String(client.tokenHash || '').slice(0, 128),
+    permissions,
+    status: ['authorized', 'revoked'].includes(client.status) ? client.status : 'authorized',
+    lastSeenAt: client.lastSeenAt || '',
+    createdAt: client.createdAt || nowIso(),
+    expiresAt: client.expiresAt || '',
+    userAgent: String(client.userAgent || '').slice(0, 240),
+    supportedInputs: Array.isArray(client.supportedInputs) ? client.supportedInputs.map((item) => String(item).slice(0, 40)).slice(0, 20) : [],
+    supportedOutputs: Array.isArray(client.supportedOutputs) ? client.supportedOutputs.map((item) => String(item).slice(0, 40)).slice(0, 20) : []
+  };
+}
+
+function normalizePendingClientAuthorization(auth = {}) {
+  return {
+    id: String(auth.id || id('cau')).slice(0, 80),
+    pollTokenHash: String(auth.pollTokenHash || '').slice(0, 128),
+    userCode: String(auth.userCode || '').replace(/[^A-Z0-9]/g, '').slice(0, 16),
+    clientId: String(auth.clientId || '').trim().slice(0, 120),
+    clientName: String(auth.clientName || 'AAAStreamer client').trim().slice(0, 120),
+    platform: ['windows', 'macos', 'linux', 'ios', 'android', 'web', 'unknown'].includes(auth.platform) ? auth.platform : 'unknown',
+    version: String(auth.version || '').trim().slice(0, 80),
+    status: ['pending', 'approved', 'expired', 'denied'].includes(auth.status) ? auth.status : 'pending',
+    userId: String(auth.userId || '').slice(0, 80),
+    deviceId: String(auth.deviceId || '').slice(0, 80),
+    createdAt: auth.createdAt || nowIso(),
+    expiresAt: auth.expiresAt || new Date(Date.now() + defaultNativeClientSettings().authCodeMinutes * 60 * 1000).toISOString(),
+    approvedAt: auth.approvedAt || '',
+    accessToken: auth.accessToken || ''
+  };
+}
+
+function hashClientToken(token) {
+  return crypto.createHash('sha256').update(String(token || '')).digest('hex');
+}
+
+function nativeClientDownloadsPayload(store, user = null) {
+  const settings = store.settings.nativeClients || defaultNativeClientSettings();
+  const license = store.settings.license || defaultLicenseSettings();
+  const tier = licenseTierCatalog.find((item) => item.id === license.deploymentTier) || {};
+  const query = new URLSearchParams({
+    product: license.whmcsProductCode || license.deploymentTier || 'aaastreamer',
+    install: license.installId || license.installDomain || 'local',
+    tier: license.deploymentTier || 'self-hosted-starter'
+  }).toString();
+  const appendLicenseContext = (url) => url ? `${url}${url.includes('?') ? '&' : '?'}${query}` : '';
+  return {
+    enabled: settings.downloadsEnabled && tier.desktopClientIncluded !== false,
+    licenseAttached: Boolean(license.clientLinked || license.licensingEnabled || license.installId || license.whmcsProductCode),
+    licenseLabel: license.installDomain || license.whmcsProductCode || license.deploymentTier || 'This AAAStreamer server',
+    userCanUseProClient: user?.role === 'admin' || tier.proClientIncluded === true,
+    centralDownloadBaseUrl: settings.centralDownloadBaseUrl,
+    packages: [
+      { id: 'windows', platform: 'Windows', url: appendLicenseContext(settings.windowsStableUrl), included: true },
+      { id: 'macos', platform: 'macOS', url: appendLicenseContext(settings.macStableUrl), included: true },
+      { id: 'linux', platform: 'Linux', url: appendLicenseContext(settings.linuxStableUrl), included: user?.role === 'admin' || tier.proClientIncluded === true }
+    ].filter((item) => item.url)
+  };
+}
+
+function connectedClientsForUser(store, user) {
+  return (store.connectedClients || []).filter((client) => client.status === 'authorized' && (user?.role === 'admin' || client.userId === user?.id));
+}
+
+function connectedClientStats(store, user = null) {
+  const clients = connectedClientsForUser(store, user);
+  const activeCutoff = Date.now() - 15 * 60 * 1000;
+  return {
+    authorized: clients.length,
+    activeNow: clients.filter((client) => Date.parse(client.lastSeenAt || '') >= activeCutoff).length,
+    byPlatform: clients.reduce((acc, client) => {
+      acc[client.platform] = (acc[client.platform] || 0) + 1;
+      return acc;
+    }, {})
+  };
 }
 
 function userById(store, userId) {
@@ -942,6 +1110,8 @@ function normalizeStore(store) {
   store.scheduledShows ||= [];
   store.shareLinks ||= [];
   store.wordpressConnectors ||= [];
+  store.connectedClients ||= [];
+  store.pendingClientAuthorizations ||= [];
   store.settings ||= {};
   store.settings.siteName ||= process.env.AAASTREAMER_SITE_NAME || 'AAAStreamer';
   if (!store.settings.platformBranding) {
@@ -950,6 +1120,7 @@ function normalizeStore(store) {
     store.settings.platformBranding = { ...defaultPlatformBranding(), ...store.settings.platformBranding };
   }
   store.settings.paymentIntegration = { ...defaultPaymentIntegrationSettings(), ...(store.settings.paymentIntegration || {}) };
+  store.settings.nativeClients = normalizeNativeClientSettings(store.settings.nativeClients || {});
   store.settings.wordpressConnector = { ...defaultWordPressConnectorSettings(), ...(store.settings.wordpressConnector || {}) };
   store.settings.license = { ...defaultLicenseSettings(), ...(store.settings.license || {}) };
   store.settings.license.reissueLimits = { ...defaultLicenseSettings().reissueLimits, ...(store.settings.license.reissueLimits || {}) };
@@ -989,6 +1160,11 @@ function normalizeStore(store) {
   store.wordpressConnectors = (store.wordpressConnectors || []).map(normalizeWordPressConnectorSite).filter(Boolean).slice(-1000);
   const now = Date.now();
   store.pendingLogins = (store.pendingLogins || []).filter((item) => item?.token && Date.parse(item.expiresAt || '') > now);
+  store.pendingClientAuthorizations = (store.pendingClientAuthorizations || [])
+    .map(normalizePendingClientAuthorization)
+    .filter((item) => item.status === 'approved' || Date.parse(item.expiresAt || '') > now)
+    .slice(-500);
+  store.connectedClients = (store.connectedClients || []).map(normalizeConnectedClient).filter((item) => item.tokenHash && item.userId).slice(-2000);
   store.passkeyChallenges = (store.passkeyChallenges || []).filter((item) => item?.challenge && Date.parse(item.expiresAt || '') > now);
   for (const stream of store.streams) normalizeStream(stream);
   pruneComments(store);
@@ -1015,6 +1191,7 @@ function normalizeStream(stream) {
   stream.currentSource = normalizeStreamSource(stream.currentSource);
   stream.relaySources = (stream.relaySources || []).map(normalizeStreamSource).filter(Boolean);
   stream.sourceQueue = (stream.sourceQueue || []).map(normalizeStreamSource).filter(Boolean);
+  stream.currentPlayback = normalizeCurrentPlayback(stream.currentPlayback);
   stream.activeEncoders ||= {};
   return stream;
 }
@@ -1074,6 +1251,26 @@ function normalizeStreamSource(source) {
     enableAt: source.enableAt || '',
     autoEnabled: source.autoEnabled === true,
     createdAt: source.createdAt || nowIso()
+  };
+}
+
+function normalizeCurrentPlayback(playback) {
+  if (!playback || typeof playback !== 'object') return null;
+  return {
+    sourceId: String(playback.sourceId || '').slice(0, 80),
+    sourceType: ['localMedia', 'urlRelay', 'rtmp'].includes(playback.sourceType) ? playback.sourceType : '',
+    mediaType: ['audio', 'video'].includes(playback.mediaType) ? playback.mediaType : '',
+    title: String(playback.title || playback.label || '').trim().slice(0, 180),
+    label: String(playback.label || playback.title || '').trim().slice(0, 180),
+    artist: String(playback.artist || '').trim().slice(0, 180),
+    album: String(playback.album || '').trim().slice(0, 180),
+    fileName: String(playback.fileName || '').trim().slice(0, 240),
+    folderLabel: String(playback.folderLabel || '').trim().slice(0, 160),
+    urlHost: String(playback.urlHost || '').trim().slice(0, 180),
+    durationSeconds: Number(playback.durationSeconds || 0) || 0,
+    startedAt: playback.startedAt || '',
+    updatedAt: playback.updatedAt || playback.startedAt || '',
+    status: ['starting', 'playing', 'ended', 'stopped'].includes(playback.status) ? playback.status : 'playing'
   };
 }
 
@@ -1299,6 +1496,15 @@ function safeUser(user) {
   return safe;
 }
 
+function clientSafeUser(user) {
+  if (!user) return null;
+  const { passwordHash, streamKey, recoveryCodeHash, totpSecret, passkeys, passkeyChallenges, ...safe } = user;
+  safe.hasStreamKey = Boolean(streamKey);
+  safe.totpEnabled = user.totpEnabled === true;
+  safe.passkeyCount = Array.isArray(passkeys) ? passkeys.length : 0;
+  return safe;
+}
+
 function normalizedPayload(req) {
   return { ...req.query, ...(req.body || {}) };
 }
@@ -1425,17 +1631,25 @@ function shouldAutoResumeSourceRelay(stream, store) {
   return Boolean(firstPlayableSource(stream, store));
 }
 
+function shouldRunSourceRelayForPlayback(stream, store, explicit = false) {
+  const behavior = normalizeStreamMediaBehavior(stream?.mediaBehavior);
+  if (behavior.continuousPlayback === false || behavior.playbackMode === 'disabled') return false;
+  if (!explicit && !playbackRecoveryEnabled(store)) return false;
+  if (isLive(stream) || shouldRunContinuousOnDemandRelay(stream, store)) return Boolean(firstPlayableSource(stream, store));
+  return explicit && Boolean(stream?.currentSource && playableSourceUrl(stream.currentSource, store));
+}
+
 function streamIsPubliclyListable(stream, store) {
   return stream.visibility === 'public' && (isLive(stream) || streamHasOnDemand(stream, store));
 }
 
 function streamPlaybackUrl(stream, store) {
   const source = firstPlayableSource(stream, store);
-  if (source?.type === 'urlRelay') return playableSourceUrl(source, store);
   if (isLive(stream)) return stream.hlsUrl || hlsUrlFor(stream.activeEncoderKey || stream.streamKey);
   if (shouldRunContinuousOnDemandRelay(stream, store)) {
     return hlsUrlFor(stream.streamKey);
   }
+  if (source?.type === 'urlRelay') return playableSourceUrl(source, store);
   if (source && streamHasOnDemand(stream, store)) return playableSourceUrl(source, store);
   return '';
 }
@@ -1458,6 +1672,8 @@ function publicStreamSummary(stream, store, includePrivate = false) {
     hasOnDemandPlayback: streamHasOnDemand(stream, store),
     continuousOnDemandRelay,
     relayRunning: sourceProcesses.has(stream.id),
+    nowPlaying: publicPlaybackMetadata(stream),
+    nowPlayingHtml: nowPlayingClientHtml(publicPlaybackMetadata(stream)),
     watchUrl: watchUrlFor(stream),
     playbackUrl: playbackUrl || null,
     hlsUrl: isLive(stream) || continuousOnDemandRelay ? (stream.hlsUrl || hlsUrlFor(stream.activeEncoderKey || stream.streamKey)) : null,
@@ -1555,6 +1771,106 @@ function playableSourceUrl(source, store) {
   return '';
 }
 
+function playbackMetadataForSource(source, store, mediaInfo = null) {
+  if (!source) return null;
+  const title = mediaInfo?.title || source.label || 'Media source';
+  const base = {
+    sourceId: source.id || '',
+    sourceType: source.type || '',
+    mediaType: source.mediaType || '',
+    title,
+    label: source.label || title,
+    artist: mediaInfo?.artist || '',
+    album: mediaInfo?.album || '',
+    durationSeconds: Number(mediaInfo?.durationSeconds || 0) || 0,
+    startedAt: nowIso(),
+    updatedAt: nowIso(),
+    status: 'playing'
+  };
+  if (source.type === 'localMedia') {
+    const folder = resolveMediaFolder(store, source.folderId);
+    return normalizeCurrentPlayback({
+      ...base,
+      fileName: path.basename(source.relativePath || ''),
+      folderLabel: folder?.label || '',
+      title: title || path.basename(source.relativePath || '').replace(/\.[^.]+$/, '')
+    });
+  }
+  if (source.type === 'urlRelay') {
+    let urlHost = '';
+    try {
+      urlHost = new URL(source.url).host;
+    } catch {
+      urlHost = '';
+    }
+    return normalizeCurrentPlayback({
+      ...base,
+      urlHost,
+      title: title || urlHost || 'URL relay'
+    });
+  }
+  return normalizeCurrentPlayback(base);
+}
+
+function metadataForSource(source, store) {
+  if (source?.type !== 'localMedia') return null;
+  const target = safeMediaPath(resolveMediaFolder(store, source.folderId), source.relativePath);
+  if (!target || !fs.existsSync(target)) return null;
+  return probeMediaFile(target);
+}
+
+async function refreshJellyfinNowPlaying() {
+  let store;
+  try { store = readStore(); } catch { return; }
+  const changed = [];
+  for (const stream of store.streams || []) {
+    const source = stream?.currentSource;
+    if (source?.type !== 'urlRelay' || source.url !== 'http://172.17.0.1:8003/jellyfin-radio') continue;
+    try {
+      const response = await fetch('http://172.17.0.1:8003/status-json.xsl', { signal: AbortSignal.timeout(4000) });
+      if (!response.ok) continue;
+      const payload = await response.json();
+      const sources = Array.isArray(payload?.icestats?.source) ? payload.icestats.source : [payload?.icestats?.source];
+      const icecastSource = sources.find((item) => String(item?.listenurl || '').includes('/jellyfin-radio'));
+      const title = String(icecastSource?.title || "").trim();
+      if (!title) continue;
+      const existing = normalizeCurrentPlayback(stream.currentPlayback) || {};
+      if (existing.title === title && existing.status === "playing") continue;
+      stream.currentPlayback = normalizeCurrentPlayback({ ...existing, sourceId: source.id, sourceType: source.type, mediaType: "audio", title, label: title, artist: "", album: "", status: "playing", updatedAt: nowIso() });
+      stream.updatedAt = nowIso();
+      changed.push(stream.id);
+    } catch {}
+  }
+  if (!changed.length) return;
+  writeStore(store);
+  for (const streamId of changed) broadcast({ type: "now_playing_updated", payload: { streamId } });
+}
+
+function publicPlaybackMetadata(stream) {
+  const playback = normalizeCurrentPlayback(stream?.currentPlayback);
+  const source = stream?.currentSource;
+  if (playback) {
+    return {
+      ...playback,
+      relayRunning: stream?.id ? sourceProcesses.has(stream.id) : false,
+      queueCount: stream?.sourceQueue?.length || 0
+    };
+  }
+  if (!source) return null;
+  return {
+    ...normalizeCurrentPlayback({
+      sourceId: source.id,
+      sourceType: source.type,
+      mediaType: source.mediaType,
+      title: source.label || 'Media source',
+      label: source.label || 'Media source',
+      status: sourceProcesses.has(stream.id) ? 'playing' : 'starting'
+    }),
+    relayRunning: stream?.id ? sourceProcesses.has(stream.id) : false,
+    queueCount: stream?.sourceQueue?.length || 0
+  };
+}
+
 function mediaCatalog(store, user = null) {
   const settings = store.settings.mediaLibrary || defaultMediaSettings();
   if (!settings.enabled) return [];
@@ -1565,8 +1881,36 @@ function mediaCatalog(store, user = null) {
     .map((folder) => ({
       ...folder,
       path: isAdmin ? folder.path : undefined,
-      files: scanMediaFolder(folder, maxDepth)
+      files: cachedScanMediaFolder(folder, maxDepth)
     }));
+}
+
+function mediaFolderCacheKey(folder, maxDepth) {
+  return JSON.stringify({
+    id: folder.id,
+    path: folder.path,
+    maxDepth,
+    allowAudio: folder.allowAudio !== false,
+    allowVideo: folder.allowVideo !== false,
+    scanMediaMetadata
+  });
+}
+
+function cachedScanMediaFolder(folder, maxDepth) {
+  const key = mediaFolderCacheKey(folder, maxDepth);
+  const cached = mediaCatalogCache.get(key);
+  if (cached && Date.now() - cached.createdAt < mediaCatalogCacheMs) return cached.files;
+  const files = scanMediaFolder(folder, maxDepth);
+  mediaCatalogCache.set(key, { createdAt: Date.now(), files });
+  if (mediaCatalogCache.size > 200) {
+    const oldest = [...mediaCatalogCache.entries()].sort((a, b) => a[1].createdAt - b[1].createdAt)[0];
+    if (oldest) mediaCatalogCache.delete(oldest[0]);
+  }
+  return files;
+}
+
+function clearMediaCatalogCache() {
+  mediaCatalogCache.clear();
 }
 
 function canServeMediaFile(store, folderId, relativePath, user = null) {
@@ -1617,7 +1961,7 @@ function scanMediaFolder(folder, maxDepth) {
       if (mediaType === 'video' && !folder.allowVideo) continue;
       const relativePath = path.relative(root, fullPath).split(path.sep).join('/');
       const stat = fs.statSync(fullPath);
-      const metadata = probeMediaFile(fullPath);
+      const metadata = scanMediaMetadata ? probeMediaFile(fullPath) : null;
       files.push({
         folderId: folder.id,
         relativePath,
@@ -1683,13 +2027,15 @@ function ensureStreamForUser(store, user, body = {}) {
   return stream;
 }
 
-function page(title, body, user = null) {
+function page(title, body, user = null, options = {}) {
   const settings = readStore().settings;
   const branding = settings.platformBranding || defaultPlatformBranding();
   const adminLink = user?.role === 'admin' ? '<a href="/admin">Admin</a>' : '';
   const nav = user
     ? `<a href="/dashboard">Dashboard</a>${adminLink}<a href="/manual">Manual</a><a href="/whats-new?manual=true">What's new</a><form method="post" action="/logout"><button type="submit">Log out</button></form>`
-    : `<a href="/login">Log in</a>${settings.registrationsEnabled ? '<a href="/signup">Sign up</a>' : ''}`;
+    : options.publicNav === 'visitor-only'
+      ? ''
+      : `<a href="/login">Log in</a>${settings.registrationsEnabled ? '<a href="/signup">Sign up</a>' : ''}`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1712,9 +2058,64 @@ video{width:100%;max-height:65vh;background:black}.grid{display:grid;grid-templa
 .reaction-list{display:flex;gap:.4rem;flex-wrap:wrap;margin:.35rem 0}.reaction-list button{padding:.3rem .45rem;background:#26313d}.message-meta{font-size:.92rem;color:#b8c1ca}.support-box iframe,.extra-content-box iframe,.embed-content iframe{max-width:100%;border:0}.support-box form{margin:.5rem 0}.extra-content-box summary{cursor:pointer;font-weight:bold}
 .field-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.5rem;align-items:end;margin:.75rem 0}.field-row label{margin:0}.inline-form{display:inline}.notice{margin:.75rem 0;color:#d7ecff}.link-list{padding-left:1.25rem}.public-hero{background-size:cover;background-position:center;border-radius:6px;padding:1rem;border:1px solid #303944}
 .subsection{background:#121820}.preset-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:.75rem}.preset-card{border:1px solid #3a4654;border-radius:6px;padding:.85rem;background:#0c0f12}.preset-card h3{margin-top:0}
+.media-browser{border:1px solid #303944;background:#121820;padding:1rem;margin:1rem 0;border-radius:6px}.media-browser-controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.75rem;align-items:end}.media-browser-controls label{margin:0}.media-browser-actions{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin:.75rem 0}.letter-nav{display:flex;gap:.3rem;flex-wrap:wrap;margin:.75rem 0}.letter-nav a{border:1px solid #4b5968;border-radius:4px;padding:.38rem .55rem;text-decoration:none}.letter-nav a[aria-current="page"]{background:#2c75c9;color:#fff}.media-page-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:.75rem;margin:1rem 0}.media-item-card{border:1px solid #3a4654;background:#0c0f12;border-radius:6px;padding:.85rem}.media-item-card h4{font-size:1rem;margin:.1rem 0 .35rem}.media-item-card label{margin:0}.media-item-card dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:.25rem .55rem;margin:.6rem 0}.media-item-card dt{color:#b8c1ca}.media-item-card dd{margin:0;word-break:break-word}.pager{display:flex;align-items:center;justify-content:space-between;gap:.75rem;flex-wrap:wrap;margin:.75rem 0}.pager-links{display:flex;gap:.45rem;flex-wrap:wrap}.folder-path{color:#d7ecff}.media-empty{border:1px dashed #4b5968;border-radius:6px;padding:1rem;color:#b8c1ca}
+.media-review-layer{position:fixed;inset:0;z-index:1000;background:rgba(7,10,14,.88);display:flex;align-items:center;justify-content:center;padding:1rem}
+.media-review-layer[hidden]{display:none}.media-review-panel{width:min(860px,100%);background:#121820;border:1px solid #4b5968;border-radius:6px;padding:1rem;box-shadow:0 1rem 3rem rgba(0,0,0,.45)}
+.media-review-head{display:flex;justify-content:space-between;gap:1rem;align-items:center}.media-review-head h2{margin:0;font-size:1.2rem}.media-review-panel audio,.media-review-panel video{width:100%;max-height:70vh;margin-top:1rem;background:#000}
+.now-playing{border:1px solid #3a4654;background:#0c0f12;border-radius:6px;padding:.85rem;margin:.85rem 0}.now-playing h2{font-size:1.1rem;margin:.1rem 0 .4rem}.now-playing dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:.25rem .6rem;margin:.5rem 0}.now-playing dt{color:#b8c1ca}.now-playing dd{margin:0;word-break:break-word}.player-volume-controls{display:grid;grid-template-columns:auto minmax(12rem,1fr) auto;gap:.65rem;align-items:center;margin:.7rem 0 1rem;padding:.55rem .7rem;border:1px solid #3a4654;border-radius:6px;background:#121820}.player-volume-controls label{margin:0;font-weight:600}.player-volume-controls input[type=range]{width:100%;margin:0;accent-color:#2c75c9}.player-volume-controls output{min-width:3.5rem;text-align:right;color:#d7ecff}
 </style>
 </head>
-<body><header><div><strong>${escapeHtml(branding.platformName || settings.siteName || 'AAAStreamer')}</strong>${branding.tagline ? `<div class="muted">${escapeHtml(branding.tagline)}</div>` : ''}</div><nav>${nav}<a href="/">Visitor page</a></nav></header><main>${body}</main></body></html>`;
+<body class="${escapeHtml(options.bodyClass || '')}"><header><div><strong>${escapeHtml(branding.platformName || settings.siteName || 'AAAStreamer')}</strong>${branding.tagline ? `<div class="muted">${escapeHtml(branding.tagline)}</div>` : ''}</div><nav>${nav}<a href="/">Visitor page</a></nav></header><main>${body}</main><script>
+(function(){
+  const tabNavs = Array.from(document.querySelectorAll('.tabs'));
+  if (!tabNavs.length) return;
+  const prefetched = new Set();
+  const prefetch = (href) => {
+    if (!href || prefetched.has(href)) return;
+    prefetched.add(href);
+    const link = document.createElement('link');
+    link.rel = 'prefetch';
+    link.href = href;
+    document.head.appendChild(link);
+    if (window.fetch) fetch(href, { credentials: 'same-origin' }).catch(() => {});
+  };
+  const focusActiveContent = () => {
+    const hasTabTarget = new URLSearchParams(window.location.search).has('tab') || !!window.location.hash;
+    if (!hasTabTarget) return;
+    const target = window.location.hash
+      ? document.getElementById(window.location.hash.slice(1))
+      : document.querySelector('main section h2, main section, main h1, main');
+    if (!target) return;
+    if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
+    target.focus({ preventScroll: true });
+  };
+  window.requestAnimationFrame(focusActiveContent);
+  tabNavs.forEach((tabNav) => {
+    const links = Array.from(tabNav.querySelectorAll('a[href]'));
+    links.forEach((link, index) => {
+      link.addEventListener('pointerenter', () => prefetch(link.href), { passive: true });
+      link.addEventListener('focus', () => prefetch(link.href));
+      link.addEventListener('pointerdown', () => prefetch(link.href), { passive: true });
+      link.addEventListener('keydown', (event) => {
+        if (event.key === ' ') {
+          event.preventDefault();
+          link.click();
+          return;
+        }
+        let next = -1;
+        if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = (index + 1) % links.length;
+        else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = (index - 1 + links.length) % links.length;
+        else if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = links.length - 1;
+        if (next < 0) return;
+        event.preventDefault();
+        links[next].focus();
+        window.location.href = links[next].href;
+      });
+    });
+  });
+})();
+</script></body></html>`;
 }
 
 function escapeHtml(value) {
@@ -2010,6 +2411,7 @@ function adminTabs(active) {
   const tabs = [
     ['streams', 'Streams'],
     ['accounts', 'Accounts'],
+    ['clients', 'Clients'],
     ['signups', 'Signups'],
     ['branding', 'Branding'],
     ['messaging', 'Messaging'],
@@ -2079,6 +2481,31 @@ function embedCodeFor(stream) {
   return `<iframe title="${escapeHtml(stream.title)}" src="${escapeHtml(src)}" width="800" height="450" allow="autoplay; fullscreen" allowfullscreen></iframe>`;
 }
 
+function renderNowPlaying(stream) {
+  const playback = publicPlaybackMetadata(stream);
+  if (!playback) return '<section id="nowPlaying" class="now-playing" aria-live="off"><h2>Now playing</h2><p class="muted">No media source is selected yet.</p></section>';
+  const title = playback.title || playback.label || 'Media source';
+  const details = [
+    ['Title', title],
+    playback.artist ? ['Artist', playback.artist] : null,
+    playback.album ? ['Album', playback.album] : null,
+    playback.durationSeconds ? ['Duration', formatDuration(playback.durationSeconds)] : null
+  ].filter(Boolean).map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join('');
+  return `<section id="nowPlaying" class="now-playing" aria-live="off"><h2>Now playing</h2><dl>${details}</dl></section>`;
+}
+
+function nowPlayingClientHtml(playback) {
+  if (!playback) return '<h2>Now playing</h2><p class="muted">No media source is selected yet.</p>';
+  const title = playback.title || playback.label || 'Media source';
+  const rows = [
+    ['Title', title],
+    playback.artist ? ['Artist', playback.artist] : null,
+    playback.album ? ['Album', playback.album] : null,
+    playback.durationSeconds ? ['Duration', formatDuration(playback.durationSeconds)] : null
+  ].filter(Boolean).map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join('');
+  return `<h2>Now playing</h2><dl>${rows}</dl>`;
+}
+
 function isHlsUrl(url) {
   return /\.m3u8(?:$|[?#])/i.test(String(url || ''));
 }
@@ -2094,12 +2521,21 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
   const playerBuffer = Number(stream.latencySettings?.playerBufferSeconds || 10);
   const reconnectBuffer = Number(stream.latencySettings?.reconnectBufferSeconds || 10);
   const volumeKey = `aaastreamer:volume:${stream?.id || stream?.streamKey || playerId}`;
-  const commonAttrs = `id="${escapeHtml(playerId)}" controls playsinline${autoplay} preload="auto" data-volume-key="${escapeHtml(volumeKey)}" data-target-latency="${escapeHtml(targetLatency)}" data-player-buffer="${escapeHtml(playerBuffer)}" data-reconnect-buffer="${escapeHtml(reconnectBuffer)}"`;
+  const commonAttrs = `id="${escapeHtml(playerId)}" controls playsinline${autoplay} preload="auto" data-stream-id="${escapeHtml(stream?.id || '')}" data-current-playback-url="${escapeHtml(playbackUrl)}" data-volume-key="${escapeHtml(volumeKey)}" data-target-latency="${escapeHtml(targetLatency)}" data-player-buffer="${escapeHtml(playerBuffer)}" data-reconnect-buffer="${escapeHtml(reconnectBuffer)}"`;
+  const volumeControls = `<div class="player-volume-controls"><label for="${escapeHtml(playerId)}Volume">Volume</label><input id="${escapeHtml(playerId)}Volume" type="range" min="0" max="100" step="1" value="100" aria-label="Volume"><output id="${escapeHtml(playerId)}VolumeValue" for="${escapeHtml(playerId)}Volume">100%</output></div>`;
   const volumeScript = `<script>
 (() => {
   const player = document.getElementById(${JSON.stringify(playerId)});
+  const slider = document.getElementById(${JSON.stringify(`${playerId}Volume`)});
+  const output = document.getElementById(${JSON.stringify(`${playerId}VolumeValue`)});
   if (!player) return;
   const key = player.dataset.volumeKey;
+  const updateSlider = () => {
+    const percent = Math.round(Math.max(0, Math.min(1, player.volume)) * 100);
+    if (slider) slider.value = String(percent);
+    if (output) output.value = percent + '%';
+    if (output) output.textContent = percent + '%';
+  };
   try {
     const saved = key ? localStorage.getItem(key) : null;
     if (saved !== null) {
@@ -2107,23 +2543,67 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
       if (Number.isFinite(value) && value >= 0 && value <= 1) player.volume = value;
     }
   } catch {}
+  updateSlider();
+  if (slider) slider.addEventListener('input', () => {
+    const value = Math.max(0, Math.min(1, Number(slider.value) / 100));
+    player.muted = false;
+    player.volume = value;
+    updateSlider();
+  });
   player.addEventListener('volumechange', () => {
     try {
       if (key) localStorage.setItem(key, String(player.volume));
     } catch {}
+    updateSlider();
   });
 })();
 </script>`;
   if (!isHlsUrl(playbackUrl)) {
-    return `<video ${commonAttrs} src="${escapeHtml(playbackUrl)}"></video>${volumeScript}`;
+    return `<video ${commonAttrs} src="${escapeHtml(playbackUrl)}"></video>${volumeControls}${volumeScript}<script>
+(() => {
+  const player = document.getElementById(${JSON.stringify(playerId)});
+  if (!player) return;
+  let lastEnsureAt = 0;
+  const updateNowPlaying = (payload) => {
+    const panel = document.getElementById('nowPlaying');
+    if (panel && payload?.stream?.nowPlayingHtml) panel.innerHTML = payload.stream.nowPlayingHtml;
+  };
+  const ensurePlayback = async (reason) => {
+    const streamId = player.dataset.streamId;
+    if (!streamId) return;
+    const now = Date.now();
+    if (now - lastEnsureAt < 5000) return;
+    lastEnsureAt = now;
+    try {
+      const response = await fetch('/api/streams/' + encodeURIComponent(streamId) + '/playback/ensure', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason })
+      });
+      const payload = await response.json();
+      updateNowPlaying(payload);
+      const nextUrl = payload?.stream?.playbackUrl;
+      if (nextUrl && nextUrl !== player.dataset.currentPlaybackUrl) {
+        player.dataset.currentPlaybackUrl = nextUrl;
+        player.src = nextUrl;
+        player.load();
+        player.play().catch(() => {});
+      }
+    } catch {}
+  };
+  player.addEventListener('play', () => ensurePlayback('viewer_play'));
+  player.addEventListener('stalled', () => ensurePlayback('viewer_stalled'));
+  player.addEventListener('error', () => ensurePlayback('viewer_error'));
+})();
+</script>`;
   }
-  return `<video ${commonAttrs} data-hls-src="${escapeHtml(playbackUrl)}"></video><p id="${escapeHtml(statusId)}" class="muted" role="status">Loading live stream.</p>${volumeScript}<script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script><script>
+  return `<video ${commonAttrs} data-hls-src="${escapeHtml(playbackUrl)}"></video>${volumeControls}<p id="${escapeHtml(statusId)}" class="muted" role="status">Loading live stream.</p>${volumeScript}<script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script><script>
 (() => {
   const player = document.getElementById(${JSON.stringify(playerId)});
   const status = document.getElementById(${JSON.stringify(statusId)});
   const setStatus = (text) => { if (status) status.textContent = text; };
   if (!player) return;
-  const source = player.dataset.hlsSrc;
+  let source = player.dataset.hlsSrc;
   const targetLatency = Math.max(2, Number(player.dataset.targetLatency || 6) || 6);
   const playerBuffer = Math.max(targetLatency, Number(player.dataset.playerBuffer || 10) || 10);
   const reconnectDelay = Math.max(2000, (Number(player.dataset.reconnectBuffer || 10) || 10) * 1000);
@@ -2132,6 +2612,8 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
   let lastProgressAt = Date.now();
   let lastNativeTime = 0;
   let hlsRecoveryAt = 0;
+  let lastEnsureAt = 0;
+  let hls = null;
   const isAppleNativeHls = player.canPlayType('application/vnd.apple.mpegurl') && /Safari|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
   const nativeBufferFloor = isAppleNativeHls ? Math.max(playerBuffer, 24) : playerBuffer;
   const markProgress = () => {
@@ -2140,6 +2622,50 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
   };
   const shouldHardRecover = () => Date.now() - lastProgressAt >= nativeBufferFloor * 1000;
   const refreshSource = () => source + (source.includes('?') ? '&' : '?') + 'refresh=' + Date.now();
+  const updateNowPlaying = (payload) => {
+    const panel = document.getElementById('nowPlaying');
+    if (panel && payload?.stream?.nowPlayingHtml) panel.innerHTML = payload.stream.nowPlayingHtml;
+  };
+  const ensurePlayback = async (reason) => {
+    const streamId = player.dataset.streamId;
+    if (!streamId) return;
+    const now = Date.now();
+    if (now - lastEnsureAt < 5000) return;
+    lastEnsureAt = now;
+    try {
+      const response = await fetch('/api/streams/' + encodeURIComponent(streamId) + '/playback/ensure', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason })
+      });
+      const payload = await response.json();
+      updateNowPlaying(payload);
+      const nextUrl = payload?.stream?.playbackUrl;
+      if (nextUrl && nextUrl !== source) {
+        source = nextUrl;
+        player.dataset.hlsSrc = nextUrl;
+        player.dataset.currentPlaybackUrl = nextUrl;
+        if (hls) {
+          hls.loadSource(nextUrl);
+          hls.startLoad(-1);
+        } else {
+          player.src = refreshSource();
+          player.load();
+        }
+        player.play().catch(() => {});
+      } else if (nextUrl && hls) {
+        hls.startLoad(-1);
+      }
+    } catch {}
+  };
+  const retryExistingPlay = () => {
+    if (!player.paused) return;
+    if (hls) hls.startLoad(-1);
+    ensurePlayback('viewer_control_retry');
+    player.play().then(() => setStatus('')).catch(() => {});
+  };
+  player.addEventListener('click', () => setTimeout(retryExistingPlay, 0));
+  player.addEventListener('keyup', (event) => { if (event.key === ' ' || event.key === 'Enter') setTimeout(retryExistingPlay, 0); });
   const retryNative = (force = false) => {
     clearTimeout(retryTimer);
     retryTimer = setTimeout(() => {
@@ -2160,15 +2686,16 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
   ['playing', 'timeupdate', 'progress', 'canplay'].forEach((eventName) => player.addEventListener(eventName, markProgress));
   if (player.canPlayType('application/vnd.apple.mpegurl')) {
     player.src = source;
+    player.addEventListener('play', () => ensurePlayback('viewer_play'));
     player.addEventListener('waiting', () => setStatus('Buffering live stream.'));
     player.addEventListener('playing', () => { nativeRetryCount = 0; markProgress(); setStatus(''); });
     player.addEventListener('pause', () => clearTimeout(retryTimer));
-    player.addEventListener('stalled', () => retryNative(false));
-    player.addEventListener('error', () => retryNative(true));
+    player.addEventListener('stalled', () => { ensurePlayback('viewer_stalled'); retryNative(false); });
+    player.addEventListener('error', () => { ensurePlayback('viewer_error'); retryNative(true); });
     player.addEventListener('emptied', () => { if (nativeRetryCount < 5) retryNative(true); });
     setStatus('');
   } else if (window.Hls && Hls.isSupported()) {
-    const hls = new Hls({
+    hls = new Hls({
       enableWorker: true,
       lowLatencyMode: false,
       liveSyncDuration: targetLatency,
@@ -2195,6 +2722,7 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
       hlsRecoveryAt = now;
       if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
         setStatus('Reconnecting to the live stream.');
+        ensurePlayback('hls_network_error');
         hls.startLoad(-1);
       } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
         setStatus('Recovering live stream playback.');
@@ -2207,7 +2735,8 @@ function renderPlaybackPlayer(playbackUrl, stream, options = {}) {
         player.play().catch(() => {});
       }
     });
-    player.addEventListener('stalled', () => { if (shouldHardRecover()) hls.startLoad(-1); else setStatus('Buffering live stream.'); });
+    player.addEventListener('play', () => ensurePlayback('viewer_play'));
+    player.addEventListener('stalled', () => { ensurePlayback('viewer_stalled'); if (shouldHardRecover()) hls.startLoad(-1); else setStatus('Buffering live stream.'); });
     hls.loadSource(source);
     hls.attachMedia(player);
     player.addEventListener('waiting', () => setStatus('Buffering live stream.'));
@@ -2304,6 +2833,7 @@ function sourcePresetCards(stream, serverUrl) {
 function dashboardTabs(active) {
   const tabs = [
     ['overview', 'Overview'],
+    ['downloads', 'Downloads'],
     ['media', 'Media management'],
     ['encoders', 'Encoders'],
     ['destinations', 'Destinations'],
@@ -2315,6 +2845,32 @@ function dashboardTabs(active) {
     ['advanced', 'Advanced']
   ];
   return `<nav class="tabs" role="tablist" aria-label="Dashboard sections">${tabs.map(([idValue, label]) => `<a role="tab" class="tab-button" href="/dashboard?tab=${escapeHtml(idValue)}" ${active === idValue ? 'aria-selected="true" aria-current="page"' : 'aria-selected="false"'}>${escapeHtml(label)}</a>`).join('')}</nav>`;
+}
+
+function nativeClientDownloadsHtml(store, user) {
+  const downloads = nativeClientDownloadsPayload(store, user);
+  const permissions = clientPermissionsForUser(store, user);
+  const stats = connectedClientStats(store, user);
+  const clients = connectedClientsForUser(store, user);
+  const downloadRows = downloads.packages.map((item) => `<tr><td>${escapeHtml(item.platform)}</td><td>${item.included ? 'Included' : 'Admin/pro tier'}</td><td><a class="button" href="${escapeHtml(item.url)}">Download</a></td></tr>`).join('');
+  const clientRows = clients.map((client) => `<tr><td>${escapeHtml(client.clientName)}</td><td>${escapeHtml(client.platform)}</td><td>${escapeHtml(client.version || 'unknown')}</td><td>${escapeHtml(client.lastSeenAt || 'Never')}</td><td>${escapeHtml(Object.entries(client.permissions).filter(([, enabled]) => enabled).map(([key]) => key).join(', ') || 'No actions')}</td><td><form method="post" action="/dashboard/clients/${escapeHtml(client.id)}/revoke"><button type="submit" class="danger">Revoke</button></form></td></tr>`).join('');
+  return `<section><h2>Native client downloads</h2><p class="muted">Install packages come from the central AAAStreamer download location and are attached to this server's installed license. Client users authorize with this account; they do not need to know or enter the license key.</p>${downloads.enabled ? `<table><tr><th>Platform</th><th>License</th><th>Action</th></tr>${downloadRows || '<tr><td colspan="3">No client packages are configured yet.</td></tr>'}</table>` : '<p>Native client downloads are not enabled for this license tier yet.</p>'}<p>Attached license: <strong>${escapeHtml(downloads.licenseLabel)}</strong>.</p></section>
+<section><h2>Client access</h2><p>Authorized clients: <strong>${escapeHtml(stats.authorized)}</strong>. Active recently: <strong>${escapeHtml(stats.activeNow)}</strong>.</p><p>Allowed actions: ${escapeHtml(Object.entries(permissions).filter(([, enabled]) => enabled).map(([key]) => key).join(', ') || 'View only')}.</p><p><a class="button" href="/client/authorize">Authorize a client manually</a></p></section>
+<section><h2>Connected clients</h2><table><tr><th>Name</th><th>Platform</th><th>Version</th><th>Last seen</th><th>Allowed</th><th>Action</th></tr>${clientRows || '<tr><td colspan="6">No native clients are connected yet.</td></tr>'}</table></section>`;
+}
+
+function adminNativeClientsHtml(store) {
+  const stats = connectedClientStats(store, { role: 'admin' });
+  const downloads = nativeClientDownloadsPayload(store, { role: 'admin' });
+  const clientRows = (store.connectedClients || []).map((client) => {
+    const owner = userById(store, client.userId);
+    return `<tr><td>${escapeHtml(client.clientName)}</td><td>${escapeHtml(owner?.username || client.userId)}</td><td>${escapeHtml(client.platform)}</td><td>${escapeHtml(client.version || 'unknown')}</td><td>${escapeHtml(client.status)}</td><td>${escapeHtml(client.lastSeenAt || 'Never')}</td><td>${escapeHtml(Object.entries(client.permissions).filter(([, enabled]) => enabled).map(([key]) => key).join(', ') || 'No actions')}</td><td><form method="post" action="/admin/clients/${escapeHtml(client.id)}/revoke"><button type="submit" class="danger">Revoke</button></form></td></tr>`;
+  }).join('');
+  const byPlatform = Object.entries(stats.byPlatform).map(([platform, count]) => `${platform}: ${count}`).join(', ') || 'none';
+  return `<h1>Admin panel</h1>${adminTabs('clients')}
+<section><h2>Native client fleet</h2><p>Authorized clients: <strong>${escapeHtml(stats.authorized)}</strong>. Active recently: <strong>${escapeHtml(stats.activeNow)}</strong>. Platforms: ${escapeHtml(byPlatform)}.</p><p class="muted">These are authorized clients that can stream to or manage this connected AAAStreamer server according to account and admin permissions.</p></section>
+<section><h2>Download center</h2><p>Central download base: <code>${escapeHtml(downloads.centralDownloadBaseUrl)}</code>.</p><p>License-attached downloads: <strong>${downloads.enabled ? 'enabled' : 'disabled'}</strong>.</p></section>
+<section><h2>Connected authorized clients</h2><table><tr><th>Client</th><th>User</th><th>Platform</th><th>Version</th><th>Status</th><th>Last seen</th><th>Allowed</th><th>Action</th></tr>${clientRows || '<tr><td colspan="8">No native clients have authorized yet.</td></tr>'}</table></section>`;
 }
 
 function wordpressConnectorAllowedForUser(store, user) {
@@ -2403,16 +2959,147 @@ function mediaCatalogCheckboxes(store, user, stream) {
       });
       const key = sourceQueueKey(source);
       const previewUrl = `/dashboard/media/preview/${encodeURIComponent(file.folderId)}/${file.relativePath.split(/[\\/]+/).map(encodeURIComponent).join('/')}`;
+      const duration = Number(file.durationSeconds || 0);
+      const latestStart = Math.max(60, duration - 300);
+      const earliestStart = Math.min(60, latestStart);
+      const startAt = duration > 180 ? Math.floor(earliestStart + Math.random() * Math.max(1, latestStart - earliestStart)) : 0;
+      const previewStreamUrl = `/dashboard/media/preview-stream/${encodeURIComponent(file.folderId)}/${file.relativePath.split(/[\\/]+/).map(encodeURIComponent).join('/')}?start=${encodeURIComponent(startAt)}`;
       const chapterText = file.chapters?.length ? `${file.chapters.length} chapters` : 'No chapters detected';
       const usage = key === currentKey
         ? (relayRunning ? 'Currently playing' : 'Selected current source')
         : queuedKeys.has(key)
           ? 'Queued'
           : 'Not used';
-      rows.push(`<tr><td><input type="checkbox" name="localMedia" value="${escapeHtml(`${file.folderId}|${file.relativePath}`)}" ${queuedKeys.has(key) || key === currentKey ? 'checked' : ''} aria-label="Select ${escapeHtml(file.label)} for the playback queue"></td><td>${escapeHtml(file.label)}</td><td>${escapeHtml(file.fileName || path.basename(file.relativePath))}</td><td>${escapeHtml(folder.label)}</td><td>${escapeHtml(file.mediaType)}</td><td>${escapeHtml(formatDuration(file.durationSeconds))}</td><td>${escapeHtml(formatBytes(file.size))}</td><td>${escapeHtml(chapterText)}</td><td>${escapeHtml(usage)}</td><td><form method="get" action="${escapeHtml(previewUrl)}" target="_blank"><button type="submit">Play one-minute preview</button></form></td></tr>`);
+      rows.push(`<tr><td><input type="checkbox" name="localMedia" value="${escapeHtml(`${file.folderId}|${file.relativePath}`)}" ${queuedKeys.has(key) || key === currentKey ? 'checked' : ''} aria-label="Select ${escapeHtml(file.label)} for the playback queue"></td><td>${escapeHtml(file.label)}</td><td>${escapeHtml(file.fileName || path.basename(file.relativePath))}</td><td>${escapeHtml(folder.label)}</td><td>${escapeHtml(file.mediaType)}</td><td>${escapeHtml(formatDuration(file.durationSeconds))}</td><td>${escapeHtml(formatBytes(file.size))}</td><td>${escapeHtml(chapterText)}</td><td>${escapeHtml(usage)}</td><td><a class="button media-preview-button" href="${escapeHtml(previewUrl)}" data-preview-src="${escapeHtml(previewStreamUrl)}" data-preview-type="${escapeHtml(file.mediaType)}" data-preview-title="${escapeHtml(file.label)}">Review media</a></td></tr>`);
     }
   }
   return rows.join('') || '<tr><td colspan="10">No media files are available from enabled folders.</td></tr>';
+}
+
+function mediaBrowserUrl(filters, updates = {}) {
+  const params = new URLSearchParams({ tab: 'media' });
+  const next = { ...filters, ...updates };
+  const queryKeys = { folderId: 'folder', search: 'q' };
+  for (const [key, value] of Object.entries(next)) {
+    if (value === undefined || value === null || value === '' || value === 'all') continue;
+    params.set(queryKeys[key] || key, String(value));
+  }
+  return `/dashboard?${params.toString()}`;
+}
+
+function normalizeMediaBrowserFilters(query = {}) {
+  const folderId = String(query.folder || 'all').trim() || 'all';
+  const type = ['audio', 'video'].includes(query.type) ? query.type : 'all';
+  const sort = ['title', 'folder', 'file', 'modified'].includes(query.sort) ? query.sort : 'title';
+  const search = String(query.q || '').trim().slice(0, 120);
+  let letter = String(query.letter || 'all').trim().toUpperCase();
+  if (!/^[A-Z0-9]$/.test(letter)) letter = 'all';
+  const pageSize = clampNumber(query.pageSize, 12, 96, 24);
+  const page = Math.max(1, Number.parseInt(query.page || '1', 10) || 1);
+  return { folderId, type, sort, search, letter, pageSize, page };
+}
+
+function mediaCatalogItems(store, user) {
+  return mediaCatalog(store, user).flatMap((folder) => (folder.files || []).map((file) => {
+    const segments = String(file.relativePath || '').split('/');
+    const directory = segments.length > 1 ? segments.slice(0, -1).join('/') : '';
+    const title = file.label || file.fileName || path.basename(file.relativePath || '');
+    const searchable = [title, file.fileName, folder.label, directory, file.relativePath, file.mediaType].filter(Boolean).join(' ').toLowerCase();
+    return {
+      ...file,
+      folderLabel: folder.label,
+      directory,
+      title,
+      searchable,
+      sortTitle: String(title).toLocaleLowerCase(),
+      sortFolder: `${String(folder.label || '').toLocaleLowerCase()}/${String(directory || '').toLocaleLowerCase()}`,
+      sortFile: String(file.relativePath || '').toLocaleLowerCase()
+    };
+  }));
+}
+
+function mediaLetterFor(item) {
+  const text = String(item.title || item.fileName || item.relativePath || '').trim();
+  const char = text.charAt(0).toUpperCase();
+  return /^[A-Z]$/.test(char) ? char : /^[0-9]$/.test(char) ? '0' : '#';
+}
+
+function sortMediaItems(items, sort) {
+  const sorted = [...items];
+  sorted.sort((a, b) => {
+    if (sort === 'folder') {
+      return a.sortFolder.localeCompare(b.sortFolder) || a.sortTitle.localeCompare(b.sortTitle);
+    }
+    if (sort === 'file') {
+      return a.sortFile.localeCompare(b.sortFile);
+    }
+    if (sort === 'modified') {
+      return String(b.modifiedAt || '').localeCompare(String(a.modifiedAt || '')) || a.sortTitle.localeCompare(b.sortTitle);
+    }
+    return a.sortTitle.localeCompare(b.sortTitle) || a.sortFolder.localeCompare(b.sortFolder) || a.sortFile.localeCompare(b.sortFile);
+  });
+  return sorted;
+}
+
+function mediaCatalogBrowser(store, user, stream, query = {}) {
+  const filters = normalizeMediaBrowserFilters(query);
+  const allItems = mediaCatalogItems(store, user);
+  const folders = mediaCatalog(store, user);
+  const queuedKeys = new Set((stream?.sourceQueue || []).map(sourceQueueKey));
+  const currentKey = sourceQueueKey(stream?.currentSource);
+  const relayRunning = stream?.id ? sourceProcesses.has(stream.id) : false;
+  const letters = new Set(allItems.map(mediaLetterFor));
+  let items = allItems.filter((item) => {
+    if (filters.folderId !== 'all' && item.folderId !== filters.folderId) return false;
+    if (filters.type !== 'all' && item.mediaType !== filters.type) return false;
+    if (filters.letter !== 'all' && mediaLetterFor(item) !== filters.letter) return false;
+    if (filters.search && !item.searchable.includes(filters.search.toLowerCase())) return false;
+    return true;
+  });
+  items = sortMediaItems(items, filters.sort);
+  const total = items.length;
+  const totalPages = Math.max(1, Math.ceil(total / filters.pageSize));
+  const currentPage = Math.min(filters.page, totalPages);
+  const start = (currentPage - 1) * filters.pageSize;
+  const pageItems = items.slice(start, start + filters.pageSize);
+  const folderOptions = [`<option value="all">All folders</option>`]
+    .concat(folders.map((folder) => `<option value="${escapeHtml(folder.id)}" ${filters.folderId === folder.id ? 'selected' : ''}>${escapeHtml(folder.label)}</option>`))
+    .join('');
+  const letterLinks = ['all', '0', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')].map((letter) => {
+    const label = letter === 'all' ? 'All' : letter === '0' ? '0-9' : letter;
+    const disabled = letter !== 'all' && !letters.has(letter);
+    const href = disabled ? '#' : mediaBrowserUrl(filters, { letter, page: 1 });
+    return `<a href="${escapeHtml(href)}" ${filters.letter === letter ? 'aria-current="page"' : ''} ${disabled ? 'aria-disabled="true" tabindex="-1"' : ''}>${escapeHtml(label)}</a>`;
+  }).join('');
+  const pageSummary = total
+    ? `Showing ${start + 1}-${Math.min(start + filters.pageSize, total)} of ${total} matching files`
+    : 'No matching files';
+  const pager = `<div class="pager"><span>${escapeHtml(pageSummary)}</span><span>Page ${currentPage} of ${totalPages}</span><span class="pager-links">${currentPage > 1 ? `<a class="button secondary" href="${escapeHtml(mediaBrowserUrl(filters, { page: currentPage - 1 }))}">Previous</a>` : ''}${currentPage < totalPages ? `<a class="button secondary" href="${escapeHtml(mediaBrowserUrl(filters, { page: currentPage + 1 }))}">Next</a>` : ''}</span></div>`;
+  const cards = pageItems.map((file) => {
+    const source = normalizeStreamSource({
+      type: 'localMedia',
+      folderId: file.folderId,
+      relativePath: file.relativePath,
+      label: file.title,
+      mediaType: file.mediaType
+    });
+    const key = sourceQueueKey(source);
+    const previewUrl = `/dashboard/media/preview/${encodeURIComponent(file.folderId)}/${file.relativePath.split(/[\\/]+/).map(encodeURIComponent).join('/')}`;
+    const duration = Number(file.durationSeconds || 0);
+    const latestStart = Math.max(60, duration - 300);
+    const earliestStart = Math.min(60, latestStart);
+    const startAt = duration > 180 ? Math.floor(earliestStart + Math.random() * Math.max(1, latestStart - earliestStart)) : 0;
+    const previewStreamUrl = `/dashboard/media/preview-stream/${encodeURIComponent(file.folderId)}/${file.relativePath.split(/[\\/]+/).map(encodeURIComponent).join('/')}?start=${encodeURIComponent(startAt)}`;
+    const chapterText = file.chapters?.length ? `${file.chapters.length} chapters` : 'No chapters';
+    const usage = key === currentKey
+      ? (relayRunning ? 'Currently playing' : 'Selected current source')
+      : queuedKeys.has(key)
+        ? 'Queued'
+        : 'Not used';
+    const folderPath = file.directory ? `${file.folderLabel} / ${file.directory}` : file.folderLabel;
+    return `<article class="media-item-card"><label><input type="checkbox" name="localMedia" value="${escapeHtml(`${file.folderId}|${file.relativePath}`)}" ${queuedKeys.has(key) || key === currentKey ? 'checked' : ''}> Add ${escapeHtml(file.title)} to selection</label><h4>${escapeHtml(file.title)}</h4><dl><dt>Folder</dt><dd class="folder-path">${escapeHtml(folderPath)}</dd><dt>File</dt><dd>${escapeHtml(file.fileName || path.basename(file.relativePath))}</dd><dt>Type</dt><dd>${escapeHtml(file.mediaType)}</dd><dt>Duration</dt><dd>${escapeHtml(formatDuration(file.durationSeconds))}</dd><dt>Size</dt><dd>${escapeHtml(formatBytes(file.size))}</dd><dt>Chapters</dt><dd>${escapeHtml(chapterText)}</dd><dt>Status</dt><dd>${escapeHtml(usage)}</dd></dl><a class="button media-preview-button" href="${escapeHtml(previewUrl)}" data-preview-src="${escapeHtml(previewStreamUrl)}" data-preview-type="${escapeHtml(file.mediaType)}" data-preview-title="${escapeHtml(file.title)}">Review media</a></article>`;
+  }).join('');
+  return `<div class="media-browser" id="serverMediaSource"><h3>Browse server media</h3><form method="get" action="/dashboard" class="media-browser-controls"><input type="hidden" name="tab" value="media"><label>Search title, file, or folder<input name="q" value="${escapeHtml(filters.search)}" placeholder="Movie, show, folder, file name"></label><label>Folder<select name="folder">${folderOptions}</select></label><label>Type<select name="type"><option value="all">Audio and video</option><option value="audio" ${filters.type === 'audio' ? 'selected' : ''}>Audio only</option><option value="video" ${filters.type === 'video' ? 'selected' : ''}>Video only</option></select></label><label>Sort<select name="sort"><option value="title" ${filters.sort === 'title' ? 'selected' : ''}>Title A-Z</option><option value="folder" ${filters.sort === 'folder' ? 'selected' : ''}>Folder, then title</option><option value="file" ${filters.sort === 'file' ? 'selected' : ''}>File path A-Z</option><option value="modified" ${filters.sort === 'modified' ? 'selected' : ''}>Newest first</option></select></label><label>Per page<select name="pageSize"><option value="12" ${filters.pageSize === 12 ? 'selected' : ''}>12</option><option value="24" ${filters.pageSize === 24 ? 'selected' : ''}>24</option><option value="48" ${filters.pageSize === 48 ? 'selected' : ''}>48</option><option value="96" ${filters.pageSize === 96 ? 'selected' : ''}>96</option></select></label><button type="submit">Apply filters</button></form><nav class="letter-nav" aria-label="Browse media by first letter">${letterLinks}</nav><form method="post" action="/dashboard/sources/select" data-confirm-kind="live" data-confirm-message="Start playing or queue the selected media for this stream?"><input type="hidden" name="sourceType" value="localMedia"><div class="media-browser-actions"><button type="button" id="checkAllMedia">Check this page</button><button type="button" id="uncheckAllMedia" class="secondary">Uncheck this page</button><button type="submit">Start playing or queue selected media</button></div>${pager}${cards ? `<div id="mediaCatalog" class="media-page-list">${cards}</div>` : '<div id="mediaCatalog" class="media-empty">No media matched these filters. Try All letters, another folder, or a shorter search.</div>'}${pager}<p class="muted">Selected media becomes the current source or is added to the playback queue, depending on your media playback settings. Filters only change what is shown on this page; they do not delete or move files.</p></form></div>`;
 }
 
 function mediaLibraryFolderRows(store, user) {
@@ -2476,11 +3163,12 @@ function sourceFromRequest(req, store, user) {
     const target = safeMediaPath(folder, relativePath);
     const mediaType = target ? mediaTypeFor(target) : null;
     if (!target || !fs.existsSync(target) || !mediaType) return null;
+    const metadata = probeMediaFile(target);
     return normalizeStreamSource({
       type: 'localMedia',
       folderId,
       relativePath,
-      label: path.basename(relativePath),
+      label: metadata?.title || path.basename(relativePath).replace(/\.[^.]+$/, '').replace(/[\\/_.-]+/g, ' '),
       mediaType,
       enabled: true
     });
@@ -2599,6 +3287,15 @@ function advanceStreamSourceQueue(streamId) {
   writeStore(store);
   try {
     startSourceProcess(stream, nextSource, store);
+    const latestStore = readStore();
+    const latestStream = latestStore.streams.find((item) => item.id === stream.id);
+    if (latestStream) {
+      latestStream.currentPlayback = playbackMetadataForSource(nextSource, latestStore, metadataForSource(nextSource, latestStore));
+      latestStream.hlsUrl = hlsUrlFor(latestStream.streamKey);
+      latestStream.updatedAt = nowIso();
+      writeStore(latestStore);
+      broadcast({ type: 'source_relay_queue_advanced', payload: { streamId: latestStream.id, sourceId: nextSource.id, label: nextSource.label } });
+    }
     return true;
   } catch (error) {
     appendEvent('source_relay_queue_error', { streamId, message: error.message });
@@ -2626,7 +3323,7 @@ function startSourceProcess(stream, source, store) {
     videoFilters.push(`fade=t=out:st=${fadeStart}:d=${Math.min(behavior.fadeOutSeconds, 10)}`);
   }
   const outputKey = stream.streamKey;
-  const output = `rtmp://127.0.0.1:1935/${rtmpAppName}/${outputKey}`;
+  const output = `rtmp://${rtmpHost}:1935/${rtmpAppName}/${outputKey}`;
   const sampleRate = String(stream.encoderSettings?.sampleRate || '48000');
   const keyframeSeconds = clampNumber(stream.encoderSettings?.keyframeIntervalSeconds, 1, 10, 2);
   const keyframeFrames = Math.max(24, Math.round(keyframeSeconds * 30));
@@ -2667,6 +3364,7 @@ function startSourceProcess(stream, source, store) {
     output
   );
   const child = childProcess.spawn(ffmpegPath(), args, { stdio: ['ignore', 'ignore', 'pipe'] });
+  stream.currentPlayback = playbackMetadataForSource(source, store, mediaInfo);
   sourceProcesses.set(stream.id, child);
   child.stderr.on('data', (data) => {
     appendEvent('source_relay_log', { streamId: stream.id, message: String(data).slice(0, 500) });
@@ -2675,9 +3373,32 @@ function startSourceProcess(stream, source, store) {
     if (sourceProcesses.get(stream.id) === child) {
       sourceProcesses.delete(stream.id);
     }
+    try {
+      const exitStore = readStore();
+      const exitStream = exitStore.streams.find((item) => item.id === stream.id);
+      if (exitStream?.currentPlayback?.sourceId === source.id) {
+        exitStream.currentPlayback = normalizeCurrentPlayback({
+          ...exitStream.currentPlayback,
+          status: child.aaastreamerStopping ? 'stopped' : 'ended',
+          updatedAt: nowIso()
+        });
+        writeStore(exitStore);
+      }
+    } catch {}
     appendEvent('source_relay_exit', { streamId: stream.id, code, signal });
     if (!child.aaastreamerStopping && hasQueue) {
       setTimeout(() => advanceStreamSourceQueue(stream.id), 1000);
+    } else if (!child.aaastreamerStopping) {
+      setTimeout(() => {
+        try {
+          const retryStore = readStore();
+          const retryStream = retryStore.streams.find((item) => item.id === stream.id);
+          if (!retryStream || sourceProcesses.has(retryStream.id)) return;
+          ensureSourceRelayForStream(retryStore, retryStream, 'source_relay_exit_retry');
+        } catch (error) {
+          appendEvent('source_relay_retry_failed', { streamId: stream.id, message: error.message });
+        }
+      }, 3000);
     }
   });
   return child;
@@ -2782,10 +3503,22 @@ function ensureContinuousOnDemandRelays() {
 }
 
 function ensureContinuousOnDemandRelayForStream(store, stream, reason = 'playback_request') {
+  return ensureSourceRelayForStream(store, stream, reason, { continuousOnDemandOnly: true });
+}
+
+function ensureSourceRelayForStream(store, stream, reason = 'playback_request', options = {}) {
   normalizeStream(stream);
-  if (!shouldRunContinuousOnDemandRelay(stream, store)) return false;
+  const continuousOnDemandOnly = options.continuousOnDemandOnly === true;
+  const explicit = options.explicit === true;
+  if (continuousOnDemandOnly) {
+    if (!shouldRunContinuousOnDemandRelay(stream, store)) return false;
+  } else if (!shouldRunSourceRelayForPlayback(stream, store, explicit)) {
+    return false;
+  }
   if (sourceProcesses.has(stream.id)) return true;
-  const source = firstPlayableSource(stream, store);
+  const source = explicit && stream.currentSource && playableSourceUrl(stream.currentSource, store)
+    ? stream.currentSource
+    : firstPlayableSource(stream, store);
   if (!source) return false;
   if (stream.currentSource?.id !== source.id) {
     const previousSource = stream.currentSource;
@@ -2798,11 +3531,21 @@ function ensureContinuousOnDemandRelayForStream(store, stream, reason = 'playbac
     startSourceProcess(stream, source, store);
     stream.hlsUrl = hlsUrlFor(stream.streamKey);
     stream.updatedAt = nowIso();
-    store.events.push({ id: id('evt'), type: 'ondemand_relay_ensured', payload: { streamId: stream.id, sourceId: source.id, label: source.label, reason }, createdAt: nowIso() });
+    store.events.push({
+      id: id('evt'),
+      type: continuousOnDemandOnly || shouldRunContinuousOnDemandRelay(stream, store) ? 'ondemand_relay_ensured' : 'source_relay_ensured',
+      payload: { streamId: stream.id, sourceId: source.id, label: source.label, reason },
+      createdAt: nowIso()
+    });
     writeStore(store);
     return true;
   } catch (error) {
-    store.events.push({ id: id('evt'), type: 'ondemand_relay_ensure_failed', payload: { streamId: stream.id, message: error.message, reason }, createdAt: nowIso() });
+    store.events.push({
+      id: id('evt'),
+      type: continuousOnDemandOnly || shouldRunContinuousOnDemandRelay(stream, store) ? 'ondemand_relay_ensure_failed' : 'source_relay_ensure_failed',
+      payload: { streamId: stream.id, message: error.message, reason },
+      createdAt: nowIso()
+    });
     writeStore(store);
     return false;
   }
@@ -2831,6 +3574,107 @@ function healthPayload() {
   };
 }
 
+function clientCapabilitiesFor(user = null) {
+  return {
+    nativeClientApiVersion: 1,
+    authenticated: Boolean(user),
+    canBroadcast: canBroadcast(user),
+    canModerate: Boolean(user && ['admin', 'moderator'].includes(user.role)),
+    canAdmin: user?.role === 'admin',
+    features: {
+      events: true,
+      streamSummaries: true,
+      mediaCatalog: canBroadcast(user),
+      comments: true,
+      passkeys: true,
+      totp: true,
+      streamControl: false,
+      adminControl: false
+    }
+  };
+}
+
+function clientBrandingPayload(store) {
+  const branding = store.settings.platformBranding || defaultPlatformBranding();
+  return {
+    platformName: branding.platformName || store.settings.siteName || 'AAAStreamer',
+    subHeading: branding.subHeading || '',
+    slogan: branding.slogan || '',
+    tagline: branding.tagline || '',
+    description: branding.description || ''
+  };
+}
+
+function clientStreamSummary(store, stream, user) {
+  const includePrivate = user?.role === 'admin' || stream.ownerId === user?.id;
+  return publicStreamSummary(stream, store, includePrivate);
+}
+
+function clientVisibleStreams(store, user) {
+  return store.streams
+    .filter((stream) => user?.role === 'admin' || stream.ownerId === user?.id || streamIsPubliclyListable(stream, store))
+    .map((stream) => {
+      ensureContinuousOnDemandRelayForStream(store, stream, 'client_api_streams');
+      return stream;
+    })
+    .map((stream) => clientStreamSummary(store, stream, user));
+}
+
+function clientBootstrapPayload(req) {
+  const store = readStore();
+  const user = currentUser(req);
+  return {
+    success: true,
+    service: healthPayload(),
+    branding: clientBrandingPayload(store),
+    user: clientSafeUser(user),
+    capabilities: clientCapabilitiesFor(user)
+  };
+}
+
+function bearerClient(req, store = readStore()) {
+  const header = String(req.get('authorization') || '');
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  if (!match) return null;
+  const tokenHash = hashClientToken(match[1]);
+  const client = (store.connectedClients || []).find((item) => item.tokenHash === tokenHash && item.status === 'authorized');
+  if (!client) return null;
+  const user = userById(store, client.userId);
+  if (!user || !user.active) return null;
+  return { client, user };
+}
+
+function requireClientBearer(req, res, next) {
+  const store = readStore();
+  const auth = bearerClient(req, store);
+  if (!auth) {
+    res.status(401).json({ success: false, error: 'Authorized client token required' });
+    return;
+  }
+  req.clientDevice = auth.client;
+  req.user = auth.user;
+  req.store = store;
+  next();
+}
+
+function requireNativeClientUser(req, res, next) {
+  const cookieUser = currentUser(req);
+  if (cookieUser) {
+    req.user = cookieUser;
+    return next();
+  }
+  const store = readStore();
+  const auth = bearerClient(req, store);
+  if (!auth) {
+    res.status(401).json({ success: false, error: 'Sign in or authorized client token required' });
+    return;
+  }
+  req.clientDevice = auth.client;
+  req.user = auth.user;
+  req.store = store;
+  next();
+}
+
 app.get('/healthz', (_req, res) => {
   res.json(healthPayload());
 });
@@ -2841,6 +3685,136 @@ app.get('/health', (_req, res) => {
 
 app.get('/api/health', (_req, res) => {
   res.json(healthPayload());
+});
+
+app.get('/api/client/v1/health', (_req, res) => {
+  res.json({ success: true, service: healthPayload(), capabilities: clientCapabilitiesFor(null) });
+});
+
+app.get('/api/client/v1/bootstrap', (req, res) => {
+  res.json(clientBootstrapPayload(req));
+});
+
+app.get('/api/client/v1/downloads', (req, res) => {
+  const store = readStore();
+  const user = currentUser(req);
+  res.json({ success: true, downloads: nativeClientDownloadsPayload(store, user), capabilities: clientCapabilitiesFor(user) });
+});
+
+app.get('/api/client/v1/session/me', (req, res) => {
+  const user = currentUser(req);
+  res.json({ success: true, user: clientSafeUser(user), capabilities: clientCapabilitiesFor(user) });
+});
+
+app.get('/api/client/v1/device/me', requireClientBearer, (req, res) => {
+  res.json({
+    success: true,
+    user: clientSafeUser(req.user),
+    device: { ...req.clientDevice, tokenHash: undefined },
+    permissions: req.clientDevice.permissions,
+    capabilities: clientCapabilitiesFor(req.user)
+  });
+});
+
+app.post('/api/client/v1/device/check-in', requireClientBearer, (req, res) => {
+  const store = req.store;
+  const client = store.connectedClients.find((item) => item.id === req.clientDevice.id);
+  if (client) {
+    client.lastSeenAt = nowIso();
+    client.version = String(req.body?.version || client.version || '').trim().slice(0, 80);
+    client.userAgent = String(req.get('user-agent') || client.userAgent || '').slice(0, 240);
+    client.supportedInputs = Array.isArray(req.body?.supportedInputs) ? req.body.supportedInputs.map((item) => String(item).slice(0, 40)).slice(0, 20) : client.supportedInputs;
+    client.supportedOutputs = Array.isArray(req.body?.supportedOutputs) ? req.body.supportedOutputs.map((item) => String(item).slice(0, 40)).slice(0, 20) : client.supportedOutputs;
+    store.events.push({ id: id('evt'), type: 'native_client_check_in', payload: { clientId: client.id, userId: client.userId, platform: client.platform }, createdAt: nowIso() });
+    writeStore(store);
+  }
+  res.json({ success: true, service: healthPayload(), permissions: client?.permissions || req.clientDevice.permissions, capabilities: clientCapabilitiesFor(req.user) });
+});
+
+app.post('/api/client/v1/auth/start', (req, res) => {
+  const store = readStore();
+  const settings = store.settings.nativeClients || defaultNativeClientSettings();
+  const rawPollToken = crypto.randomBytes(24).toString('base64url');
+  const userCode = crypto.randomBytes(5).toString('hex').toUpperCase();
+  const auth = normalizePendingClientAuthorization({
+    pollTokenHash: hashClientToken(rawPollToken),
+    userCode,
+    clientId: String(req.body?.clientId || req.get('x-client-id') || '').trim().slice(0, 120),
+    clientName: String(req.body?.clientName || 'AAAStreamer native client').trim().slice(0, 120),
+    platform: String(req.body?.platform || 'unknown').trim().toLowerCase(),
+    version: String(req.body?.version || '').trim().slice(0, 80),
+    expiresAt: new Date(Date.now() + settings.authCodeMinutes * 60 * 1000).toISOString()
+  });
+  store.pendingClientAuthorizations.push(auth);
+  store.events.push({ id: id('evt'), type: 'native_client_auth_started', payload: { authId: auth.id, platform: auth.platform }, createdAt: nowIso() });
+  writeStore(store);
+  const base = publicUrl || '';
+  res.json({
+    success: true,
+    userCode: auth.userCode,
+    pollToken: rawPollToken,
+    expiresAt: auth.expiresAt,
+    authorizeUrl: `${base}/client/authorize?code=${encodeURIComponent(auth.userCode)}`
+  });
+});
+
+app.get('/api/client/v1/auth/poll/:pollToken', (req, res) => {
+  const store = readStore();
+  const auth = store.pendingClientAuthorizations.find((item) => item.pollTokenHash === hashClientToken(req.params.pollToken));
+  if (!auth) {
+    res.status(404).json({ success: false, status: 'not_found' });
+    return;
+  }
+  if (Date.parse(auth.expiresAt || '') <= Date.now() && auth.status === 'pending') auth.status = 'expired';
+  if (auth.status !== 'approved') {
+    writeStore(store);
+    res.json({ success: true, status: auth.status, expiresAt: auth.expiresAt });
+    return;
+  }
+  const client = store.connectedClients.find((item) => item.id === auth.deviceId);
+  const accessToken = auth.accessToken || null;
+  if (auth.accessToken) {
+    delete auth.accessToken;
+    writeStore(store);
+  }
+  res.json({
+    success: true,
+    status: 'approved',
+    accessToken,
+    device: client ? { ...client, tokenHash: undefined } : null,
+    service: healthPayload(),
+    downloads: nativeClientDownloadsPayload(store, userById(store, auth.userId)),
+    capabilities: clientCapabilitiesFor(userById(store, auth.userId))
+  });
+});
+
+app.get('/api/client/v1/events', requireNativeClientUser, (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.write(`data: ${JSON.stringify({ type: 'connected', user: clientSafeUser(req.user), capabilities: clientCapabilitiesFor(req.user) })}\n\n`);
+  sseClients.add(res);
+  req.on('close', () => sseClients.delete(res));
+});
+
+app.get('/api/client/v1/streams', requireNativeClientUser, (req, res) => {
+  const store = req.store || readStore();
+  res.json({ success: true, streams: clientVisibleStreams(store, req.user) });
+});
+
+app.get('/api/client/v1/streams/:streamId', requireNativeClientUser, (req, res) => {
+  const store = req.store || readStore();
+  const stream = store.streams.find((item) => item.id === req.params.streamId || item.slug === req.params.streamId);
+  if (!stream) {
+    res.status(404).json({ success: false, error: 'Stream not found' });
+    return;
+  }
+  if (req.user.role !== 'admin' && stream.ownerId !== req.user.id && !streamIsPubliclyListable(stream, store)) {
+    res.status(404).json({ success: false, error: 'Stream not found' });
+    return;
+  }
+  ensureContinuousOnDemandRelayForStream(store, stream, 'client_api_stream');
+  res.json({ success: true, stream: clientStreamSummary(store, stream, req.user) });
 });
 
 app.get('/events', (req, res) => {
@@ -3128,7 +4102,7 @@ app.get('/s/:slug', (req, res) => {
   const body = `<div class="public-hero"${heroStyle}><h1>${escapeHtml(stream.title)}</h1>
 <p>Status: <strong class="status-${escapeHtml(stream.status)}">${escapeHtml(playableStatus)}</strong></p>
 ${supportBefore}
-${renderPlaybackPlayer(playbackUrl, stream)}${supportDuring}</div>
+${renderPlaybackPlayer(playbackUrl, stream)}${renderNowPlaying(stream)}${supportDuring}</div>
 <section><h2>About this stream</h2><p>${escapeHtml(stream.description || 'No description yet.')}</p>${renderExtraContentBox(stream, 'watch')}<h3>Links</h3><div id="streamLinksPanel">${editableLinks(stream, canEditLinks)}</div></section>
 <section><h2>Live comments</h2>${commentsHiddenByConnector ? '<p>Comments for this stream are handled on the connected WordPress page.</p>' : `<div id="comments" class="comments">${comments.map((comment) => renderComment(comment, messaging.reactionsEnabled)).join('')}</div>`}
 ${canComment ? `${!user ? '<p class="notice" role="note">Guest messages include moderation metadata such as approximate network address, browser/device information, and the host used to reach this stream. Broadcasters and moderators may use that information to keep chat safe.</p>' : ''}<form id="commentForm"><label>Name<input name="authorName" ${user ? `value="${escapeHtml(user.displayName || user.username)}" readonly` : 'required'}></label><label>Message type<select name="messageType"><option value="comment">Comment</option><option value="question">Question</option><option value="support">Support message</option></select></label><label>Comment<textarea name="message" required rows="3" maxlength="${escapeHtml(messaging.maxMessageLength || 1000)}"></textarea></label><button type="submit">Post comment</button></form>` : (!commentsHiddenByConnector ? '<p>Comments are disabled for this stream or account type.</p>' : '')}</section>
@@ -3137,10 +4111,13 @@ ${supportAfter}
 const streamId=${JSON.stringify(stream.id)};
 const comments=document.getElementById('comments');
 const linksPanel=document.getElementById('streamLinksPanel');
+const nowPlayingPanel=document.getElementById('nowPlaying');
 async function refreshLinks(){if(!linksPanel)return;try{const response=await fetch('/api/streams/'+encodeURIComponent(streamId)+'/links');const payload=await response.json();if(payload.success)linksPanel.innerHTML=payload.html;}catch{}}
+async function refreshStreamStatus(){try{const response=await fetch('/api/streams/'+encodeURIComponent(streamId));const payload=await response.json();if(payload.success&&payload.stream?.nowPlayingHtml&&nowPlayingPanel)nowPlayingPanel.innerHTML=payload.stream.nowPlayingHtml;}catch{}}
 if(linksPanel){linksPanel.addEventListener('click',async(event)=>{const button=event.target.closest('button[data-link-action]');if(!button)return;const action=button.dataset.linkAction;const index=button.dataset.linkIndex;if(action==='remove'&&!confirm('Remove this link from the stream page?'))return;await fetch('/api/streams/'+encodeURIComponent(streamId)+'/links/'+encodeURIComponent(index),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});await refreshLinks();});linksPanel.addEventListener('submit',async(event)=>{if(event.target.id!=='quickLinkForm')return;event.preventDefault();const form=new FormData(event.target);await fetch('/api/streams/'+encodeURIComponent(streamId)+'/links',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:form.get('label'),url:form.get('url'),placement:form.get('placement')})});event.target.reset();await refreshLinks();});}
 const events=new EventSource('/events');
-events.onmessage=(event)=>{try{const msg=JSON.parse(event.data); if(msg.type==='comment' && msg.payload.streamId===streamId && comments){comments.insertAdjacentHTML('beforeend', msg.payload.html); comments.scrollTop=comments.scrollHeight;} if(msg.type==='reaction' && msg.payload.streamId===streamId){const target=document.getElementById('reactions-'+msg.payload.commentId); if(target) target.innerHTML=msg.payload.html;} if(msg.type==='stream_links_updated' && msg.payload.streamId===streamId){refreshLinks();} if(['stream_latency_updated','stream_source_selected','source_queue_selected','source_relay_started','source_relay_stopped','ondemand_settings_updated','stream_support_updated','stream_extra_content_updated'].includes(msg.type) && msg.payload.streamId===streamId){setTimeout(()=>window.location.reload(),500);}}catch{}};
+events.onmessage=(event)=>{try{const msg=JSON.parse(event.data); if(msg.type==='comment' && msg.payload.streamId===streamId && comments){comments.insertAdjacentHTML('beforeend', msg.payload.html); comments.scrollTop=comments.scrollHeight;} if(msg.type==='reaction' && msg.payload.streamId===streamId){const target=document.getElementById('reactions-'+msg.payload.commentId); if(target) target.innerHTML=msg.payload.html;} if(msg.type==='stream_links_updated' && msg.payload.streamId===streamId){refreshLinks();} if(['source_relay_queue_advanced','source_relay_exit','ondemand_relay_ensured','source_relay_started','source_relay_action_started'].includes(msg.type) && msg.payload.streamId===streamId){setTimeout(refreshStreamStatus,500);} if(['stream_latency_updated','stream_source_selected','source_queue_selected','source_relay_stopped','ondemand_settings_updated','stream_support_updated','stream_extra_content_updated'].includes(msg.type) && msg.payload.streamId===streamId){setTimeout(()=>window.location.reload(),500);}}catch{}};
+setInterval(refreshStreamStatus,15000);
 const form=document.getElementById('commentForm');
 if(form){form.addEventListener('submit', async (e)=>{e.preventDefault(); const data=Object.fromEntries(new FormData(form)); const res=await fetch('/api/streams/'+streamId+'/comments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}); if(res.ok) form.reset();});}
 document.addEventListener('click', async (event)=>{const button=event.target.closest('[data-reaction]'); if(!button)return; const commentId=button.dataset.commentId; const reaction=button.dataset.reaction; const res=await fetch('/api/comments/'+commentId+'/reactions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({streamId,reaction})}); if(res.ok){const data=await res.json(); const target=document.getElementById('reactions-'+commentId); if(target) target.innerHTML=data.html;}});
@@ -3179,14 +4156,64 @@ app.get('/login', (req, res) => {
     res.redirect('/dashboard');
     return;
   }
-  res.send(page('Log in', `<h1>Log in</h1><form method="post" action="/login"><label>Username<input id="loginUsername" name="username" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button type="submit">Log in</button></form><p><button type="button" id="passkeyLogin">Log in with passkey</button></p><p id="passkeyLoginStatus" class="notice" role="status" aria-live="polite"></p><p><a href="/forgot-password">Forgot your login details?</a></p><script>
+  res.send(page('Log in to AAAStreamer', `<style>
+.login-page{min-height:100vh;background:#050914;color:#f8fbff}
+.login-page header{position:relative;z-index:2;padding:1.15rem clamp(1.25rem,4vw,4rem);background:#050914;border-color:#26354e}
+.login-page header strong{font-size:clamp(1.35rem,2vw,1.85rem);letter-spacing:-.025em}.login-page header strong::first-letter{color:#1687ff}
+.login-page header .muted{display:none}.login-page header a{font-size:1rem;color:#e9f4ff;text-decoration:none;padding:.65rem .8rem;border-radius:.4rem}.login-page header a:hover{text-decoration:underline}.login-page header a:focus-visible{outline:3px solid #2ed7ff;outline-offset:3px}
+.login-page main{max-width:none;margin:0;padding:0}
+.login-shell{position:relative;isolation:isolate;min-height:calc(100vh - 78px);display:grid;grid-template-columns:minmax(0,1.15fr) minmax(22rem,.85fr);align-items:center;gap:clamp(2rem,5vw,6rem);padding:clamp(2rem,5vw,5rem) clamp(1.25rem,5vw,5.5rem);overflow:hidden}
+.login-shell::before{content:"";position:absolute;z-index:-2;inset:0;background:url('/assets/aaa-login-stage.png') center/cover no-repeat}
+.login-shell::after{content:"";position:absolute;z-index:-1;inset:0;background:linear-gradient(90deg,rgba(5,9,20,.95) 0%,rgba(5,9,20,.67) 47%,rgba(5,9,20,.91) 100%)}
+.login-story{max-width:43rem;margin:0;padding:0;background:transparent;border:0;border-radius:0;text-shadow:0 2px 18px rgba(0,0,0,.72)}
+.login-story h1{max-width:11ch;margin:0 0 1.25rem;font-size:clamp(2.65rem,5.4vw,5.4rem);line-height:.98;letter-spacing:-.055em}.login-story h1 span{display:block;color:#2f9cff}
+.login-lead{max-width:38rem;margin:0 0 2rem;font-size:clamp(1.12rem,1.7vw,1.38rem);line-height:1.55;color:#e9f4ff}
+.platform-points{display:grid;gap:1rem;max-width:39rem;margin:0;padding:0;list-style:none}.platform-points li{display:grid;grid-template-columns:2.6rem 1fr;gap:.85rem;align-items:start;font-size:1.05rem;line-height:1.45;color:#d9e9f8}.platform-points svg{width:2rem;height:2rem;color:#2ed7ff;stroke:currentColor;fill:none;stroke-width:1.8}
+.hosting-note{max-width:39rem;margin-top:2rem;padding-top:1.4rem;border-top:1px solid rgba(187,214,239,.35)}.hosting-note strong{display:block;font-size:1.15rem}.hosting-note p{margin:.45rem 0;color:#c7d8e8;line-height:1.5}.hosting-note a{font-weight:700;color:#4ca7ff}
+.login-panel{box-sizing:border-box;width:min(100%,31rem);justify-self:end;margin:0;padding:clamp(1.5rem,3vw,2.6rem);background:rgba(6,17,36,.96);border:1px solid #405476;border-radius:1rem;box-shadow:0 1.8rem 5rem rgba(0,0,0,.5)}
+.login-panel h2{margin:0 0 .45rem;font-size:clamp(2rem,3.5vw,3.15rem);letter-spacing:-.035em}.login-panel-intro{margin:0 0 1.6rem;color:#bdcee0;line-height:1.5}
+.login-panel label{margin:1rem 0 .45rem;font-size:1rem;font-weight:700}.login-panel input{min-height:3.35rem;padding:.8rem 1rem;background:#071225;border:1px solid #6d7f99;border-radius:.5rem;color:#fff;font:inherit}.login-panel input:focus{outline:3px solid #2ed7ff;outline-offset:2px;border-color:#2ed7ff}
+.login-panel button{width:100%;min-height:3.45rem;margin:1.15rem 0 0;border-radius:.5rem;font:700 1.05rem/1.2 Arial,Helvetica,sans-serif}.login-submit{background:#147cff}.login-submit:hover{background:#3292ff}.login-panel button:focus-visible,.login-panel a:focus-visible{outline:3px solid #2ed7ff;outline-offset:3px}
+.login-divider{display:flex;align-items:center;gap:1rem;margin:1.2rem 0;color:#aebed0}.login-divider::before,.login-divider::after{content:"";height:1px;flex:1;background:#52627a}
+.passkey-button{display:flex!important;align-items:center;justify-content:center;gap:.7rem;margin:0!important;background:transparent!important;border:2px solid #1687ff!important}.passkey-button:hover{background:#0c2342!important}.passkey-button svg{width:1.45rem;height:1.45rem;stroke:currentColor;fill:none;stroke-width:2}
+.login-panel .notice{min-height:1.5rem;margin:.8rem 0 0;color:#d7ecff}.login-help{margin:1rem 0 0}.login-help a{color:#58adff}.login-foot{grid-column:1/-1;align-self:end;display:flex;justify-content:space-between;gap:1rem;margin-top:1rem;padding-top:1.25rem;border-top:1px solid rgba(187,214,239,.26);font-size:.92rem;color:#aebed0}.login-foot a{color:#d7ecff}
+@media(max-width:900px){.login-shell{grid-template-columns:1fr;padding-top:2.5rem}.login-story{max-width:46rem}.login-story h1{max-width:12ch}.login-panel{justify-self:start;width:min(100%,38rem)}.login-foot{margin-top:0}}
+@media(max-width:560px){.login-page header{padding:.9rem 1rem}.login-page header strong{font-size:1.2rem}.login-page header a{font-size:.95rem}.login-shell{padding:2rem 1rem;gap:1.6rem}.login-shell::before{background-position:62% center}.login-shell::after{background:rgba(5,9,20,.84)}.login-story h1{font-size:2.65rem}.platform-points li{grid-template-columns:2.25rem 1fr;font-size:1rem}.login-panel{padding:1.35rem;border-radius:.75rem}.login-foot{display:block;line-height:1.55}.login-foot span{display:block}.login-foot span+span{margin-top:.35rem}}
+@media(prefers-reduced-motion:reduce){.login-page *, .login-page *::before, .login-page *::after{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
+</style>
+<div class="login-shell">
+  <section class="login-story" aria-labelledby="aaa-login-promise">
+    <h1 id="aaa-login-promise">Your stream.<br>Your audience.<span>Your content.</span></h1>
+    <p class="login-lead">The main streaming platform from Devine Creations and TappedIn. Host live and on-demand content in a space built for your organization.</p>
+    <ul class="platform-points">
+      <li><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M6 25V14m20 11V14M10 20a8 8 0 0 1 12 0M13 16a4 4 0 0 1 6 0M16 9v17"/></svg><span>Built for dependable live broadcasts and on-demand programming.</span></li>
+      <li><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 5h18v22H7zM13 11l8 5-8 5z"/></svg><span>Your hosted space, your identity, and your content remain yours.</span></li>
+      <li><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3l11 5v8c0 7-4.7 11.1-11 13-6.3-1.9-11-6-11-13V8zM11 16l3 3 7-7"/></svg><span>Managed by Devine Creations and TappedIn with creator ownership kept clear.</span></li>
+    </ul>
+    <div class="hosting-note"><strong>Need your own hosted streaming platform?</strong><p>AAAStreamer can be hosted for creators, organizations, and networks that want a space for content they own and control.</p><a href="https://devine-creations.com/">Explore hosted AAAStreamer at Devine Creations</a></div>
+  </section>
+  <section class="login-panel" aria-labelledby="login-heading">
+    <h2 id="login-heading">Log in</h2>
+    <p class="login-panel-intro">Continue to your streams, schedule, media, and administration tools.</p>
+    <form method="post" action="/login">
+      <label for="loginUsername">Username</label><input id="loginUsername" name="username" autocomplete="username" required>
+      <label for="loginPassword">Password</label><input id="loginPassword" name="password" type="password" autocomplete="current-password" required>
+      <button class="login-submit" type="submit">Continue</button>
+    </form>
+    <div class="login-divider" aria-hidden="true">or</div>
+    <button class="passkey-button" type="button" id="passkeyLogin"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="8" r="4"/><path d="M4 21v-3a4 4 0 0 1 4-4h3m4-1a4 4 0 1 1 4 4v4m0-4h3m-3 2h2"/></svg>Log in with a passkey</button>
+    <p id="passkeyLoginStatus" class="notice" role="status" aria-live="polite"></p>
+    <p class="login-help"><a href="/forgot-password">Forgot your login details?</a></p>
+  </section>
+  <footer class="login-foot"><span>AAAStreamer by Devine Creations and TappedIn.</span><span>Hosted customers retain ownership of their content.</span></footer>
+</div><script>
 function b64uToBuffer(value){const b64=String(value).replace(/-/g,'+').replace(/_/g,'/');const bin=atob(b64.padEnd(Math.ceil(b64.length/4)*4,'='));return Uint8Array.from(bin,c=>c.charCodeAt(0)).buffer;}
 function bufferToB64u(buffer){const bytes=new Uint8Array(buffer);let bin='';bytes.forEach(b=>bin+=String.fromCharCode(b));return btoa(bin).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');}
 function publicKeyRequestFromJSON(options){options.challenge=b64uToBuffer(options.challenge);if(options.allowCredentials){options.allowCredentials=options.allowCredentials.map(c=>({...c,id:b64uToBuffer(c.id)}));}return options;}
 function credentialToJSON(credential){return {id:credential.id,rawId:bufferToB64u(credential.rawId),type:credential.type,response:{authenticatorData:bufferToB64u(credential.response.authenticatorData),clientDataJSON:bufferToB64u(credential.response.clientDataJSON),signature:bufferToB64u(credential.response.signature),userHandle:credential.response.userHandle?bufferToB64u(credential.response.userHandle):null}};}
 const passkeyLogin=document.getElementById('passkeyLogin');const passkeyLoginStatus=document.getElementById('passkeyLoginStatus');
-if(passkeyLogin){passkeyLogin.addEventListener('click',async()=>{try{if(!window.PublicKeyCredential)throw new Error('This browser does not support passkeys.');const username=document.getElementById('loginUsername').value;if(!username){passkeyLoginStatus.textContent='Enter your username or recovery email first.';return;}const optionsResponse=await fetch('/api/passkeys/authenticate/options',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username})});const options=await optionsResponse.json();if(!optionsResponse.ok)throw new Error(options.error||'Passkey login is not available for this account.');const credential=await navigator.credentials.get({publicKey:publicKeyRequestFromJSON(options)});const verifyResponse=await fetch('/api/passkeys/authenticate/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(credentialToJSON(credential))});const result=await verifyResponse.json();if(!verifyResponse.ok||!result.success)throw new Error(result.error||'Passkey login failed.');location.href=result.redirect||'/dashboard';}catch(error){passkeyLoginStatus.textContent=error.message||'Passkey login failed.';}});}
-</script>`, null));
+if(passkeyLogin){passkeyLogin.addEventListener('click',async()=>{try{if(!window.PublicKeyCredential)throw new Error('This browser does not support passkeys.');const username=document.getElementById('loginUsername').value;if(!username){passkeyLoginStatus.textContent='Enter your username or recovery email first.';document.getElementById('loginUsername').focus();return;}passkeyLoginStatus.textContent='Waiting for your passkey…';const optionsResponse=await fetch('/api/passkeys/authenticate/options',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username})});const options=await optionsResponse.json();if(!optionsResponse.ok)throw new Error(options.error||'Passkey login is not available for this account.');const credential=await navigator.credentials.get({publicKey:publicKeyRequestFromJSON(options)});const verifyResponse=await fetch('/api/passkeys/authenticate/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(credentialToJSON(credential))});const result=await verifyResponse.json();if(!verifyResponse.ok||!result.success)throw new Error(result.error||'Passkey login failed.');passkeyLoginStatus.textContent='Passkey accepted. Opening your dashboard.';location.href=result.redirect||'/dashboard';}catch(error){passkeyLoginStatus.textContent=error.message||'Passkey login failed.';}});}
+</script>`, null, { bodyClass: 'login-page', publicNav: 'visitor-only' }));
 });
 
 app.get('/forgot-password', (req, res) => {
@@ -3321,6 +4348,81 @@ app.post('/logout', (req, res) => {
   res.redirect('/');
 });
 
+app.get('/client/authorize', (req, res) => {
+  const user = currentUser(req);
+  const code = String(req.query.code || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 16);
+  if (!user) {
+    res.redirect('/login');
+    return;
+  }
+  const store = readStore();
+  const auth = (store.pendingClientAuthorizations || []).find((item) => item.userCode === code && item.status === 'pending');
+  if (auth && Date.parse(auth.expiresAt || '') <= Date.now()) auth.status = 'expired';
+  const codeInput = `<label>Authorization code<input name="code" value="${escapeHtml(code)}" autocomplete="one-time-code" required></label>`;
+  if (!code) {
+    res.send(page('Authorize native client', `<h1>Authorize native client</h1><p>Enter the code shown in the AAAStreamer desktop client.</p><form method="get" action="/client/authorize">${codeInput}<button type="submit">Review code</button></form>`, user));
+    return;
+  }
+  if (!auth || auth.status !== 'pending') {
+    writeStore(store);
+    res.status(404).send(page('Client authorization not found', `<h1>Client authorization not found</h1><p>The code is missing, expired, already used, or not waiting for approval.</p><form method="get" action="/client/authorize">${codeInput}<button type="submit">Try another code</button></form>`, user));
+    return;
+  }
+  writeStore(store);
+  const body = `<h1>Authorize native client</h1>
+<section><h2>Client request</h2><p><strong>${escapeHtml(auth.clientName)}</strong> wants to connect to this AAAStreamer account.</p><dl><dt>Platform</dt><dd>${escapeHtml(auth.platform)}</dd><dt>Version</dt><dd>${escapeHtml(auth.version || 'unknown')}</dd><dt>Expires</dt><dd>${escapeHtml(auth.expiresAt)}</dd></dl></section>
+<form method="post" action="/client/authorize"><input type="hidden" name="code" value="${escapeHtml(auth.userCode)}"><button name="action" value="approve" type="submit">Approve this client</button><button name="action" value="deny" type="submit" class="secondary">Deny</button></form>`;
+  res.send(page('Authorize native client', body, user));
+});
+
+app.post('/client/authorize', requireUser, (req, res) => {
+  const code = String(req.body.code || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 16);
+  const action = String(req.body.action || '').trim();
+  const store = readStore();
+  const auth = (store.pendingClientAuthorizations || []).find((item) => item.userCode === code && item.status === 'pending');
+  if (!auth || Date.parse(auth.expiresAt || '') <= Date.now()) {
+    if (auth) auth.status = 'expired';
+    writeStore(store);
+    res.status(404).send(page('Client authorization not found', '<h1>Client authorization not found</h1><p>The client code is missing, expired, already used, or not waiting for approval.</p><p><a class="button" href="/dashboard?tab=downloads">Back to client downloads</a></p>', req.user));
+    return;
+  }
+  if (action === 'deny') {
+    auth.status = 'denied';
+    store.events.push({ id: id('evt'), type: 'native_client_auth_denied', payload: { authId: auth.id, userId: req.user.id, platform: auth.platform }, createdAt: nowIso() });
+    writeStore(store);
+    res.send(page('Client denied', '<h1>Client denied</h1><p>The native client request was denied.</p><p><a class="button" href="/dashboard?tab=downloads">Back to client downloads</a></p>', req.user));
+    return;
+  }
+  if (action !== 'approve') {
+    res.status(400).send(page('Client authorization not accepted', '<h1>Client authorization not accepted</h1><p>Choose approve or deny.</p>', req.user));
+    return;
+  }
+  const settings = store.settings.nativeClients || defaultNativeClientSettings();
+  const accessToken = crypto.randomBytes(32).toString('base64url');
+  const client = normalizeConnectedClient({
+    userId: req.user.id,
+    clientId: auth.clientId,
+    clientName: auth.clientName,
+    platform: auth.platform,
+    version: auth.version,
+    tokenHash: hashClientToken(accessToken),
+    permissions: clientPermissionsForUser(store, req.user),
+    status: 'authorized',
+    createdAt: nowIso(),
+    lastSeenAt: nowIso(),
+    expiresAt: new Date(Date.now() + settings.accessTokenDays * 24 * 60 * 60 * 1000).toISOString()
+  });
+  store.connectedClients.push(client);
+  auth.status = 'approved';
+  auth.userId = req.user.id;
+  auth.deviceId = client.id;
+  auth.approvedAt = nowIso();
+  auth.accessToken = accessToken;
+  store.events.push({ id: id('evt'), type: 'native_client_auth_approved', payload: { authId: auth.id, clientId: client.id, userId: req.user.id, platform: client.platform }, createdAt: nowIso() });
+  writeStore(store);
+  res.send(page('Client approved', '<h1>Client approved</h1><p>The native client is approved. Return to the desktop client and choose Poll auth.</p><p><a class="button" href="/dashboard?tab=downloads">Back to client downloads</a></p>', req.user));
+});
+
 app.get('/whats-new', requireUser, (req, res) => {
   const store = readStore();
   const user = userById(store, req.user.id) || req.user;
@@ -3360,7 +4462,7 @@ app.get('/dashboard', (req, res) => {
   }
   if (!canBroadcast(user)) {
     writeStore(store);
-    const body = `<h1>User panel</h1>${reminderHtml}<section><h2>Account status</h2><p>Signed in as <strong>${escapeHtml(user.displayName || user.username)}</strong>.</p><p>Current role: <strong>${escapeHtml(accountRoles.find((role) => role.value === user.role)?.label || user.role)}</strong>.</p><p class="muted">Standard user accounts can comment, manage account security, and use member features. Broadcast and stream-key tools are added only after you enable broadcaster access.</p><form method="post" action="/dashboard/broadcast-access"><button type="submit">Get broadcast access and generate stream key</button></form></section><section><h2>Account links</h2><p><a class="button" href="/dashboard?tab=account">Account settings</a></p></section>`;
+    const body = `<h1>User panel</h1>${reminderHtml}<section><h2>Account status</h2><p>Signed in as <strong>${escapeHtml(user.displayName || user.username)}</strong>.</p><p>Current role: <strong>${escapeHtml(accountRoles.find((role) => role.value === user.role)?.label || user.role)}</strong>.</p><p class="muted">Standard user accounts can comment, manage account security, download the native client, authorize devices, and use member features. Broadcast and stream-key tools are added only after you enable broadcaster access.</p><form method="post" action="/dashboard/broadcast-access"><button type="submit">Get broadcast access and generate stream key</button></form></section>${nativeClientDownloadsHtml(store, user)}<section><h2>Account links</h2><p><a class="button" href="/dashboard?tab=account">Account settings</a></p></section>`;
     res.send(page('User panel', body, user));
     return;
   }
@@ -3368,7 +4470,7 @@ app.get('/dashboard', (req, res) => {
   stream.support = effectiveSupportSettings(stream, user, store.settings);
   const shareLink = ensureShareLink(store, stream, user.id);
   writeStore(store);
-  const activeTab = ['overview', 'media', 'encoders', 'destinations', 'schedule', 'wordpress', 'profile', 'support', 'account', 'advanced'].includes(req.query.tab) ? req.query.tab : 'overview';
+  const activeTab = ['overview', 'downloads', 'media', 'encoders', 'destinations', 'schedule', 'wordpress', 'profile', 'support', 'account', 'advanced'].includes(req.query.tab) ? req.query.tab : 'overview';
   const serverUrl = rtmpUrlFor(stream.streamKey);
   const watchUrl = watchUrlFor(stream);
   const shareUrl = tokenUrlFor(shareLink.token);
@@ -3385,8 +4487,9 @@ app.get('/dashboard', (req, res) => {
   const relayRows = (stream.relaySources || []).map((source) => `<tr><td>${escapeHtml(source.label)}</td><td>${escapeHtml(source.mediaType)}</td><td><a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">Open source URL</a></td><td><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/select" class="inline-form" data-confirm-kind="live" data-confirm-message="Start streaming ${escapeHtml(source.label)} now?"><button type="submit">Start streaming this source</button></form><p class="muted">Starts this URL relay immediately as the current stream source.</p><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/delete" class="inline-form" data-confirm-kind="remove" data-confirm-message="Remove ${escapeHtml(source.label)} from your media sources?"><button type="submit" class="danger">Remove relay source</button></form><p class="muted">Removes this saved URL relay source.</p></td></tr>`).join('');
   const queueRows = queuedSourceRows(stream, store);
   const activeSourceRunning = sourceProcesses.has(stream.id);
-  const quickSourceCards = sourcePresetCards(stream, serverUrl);
-  const mediaFolderRows = mediaLibraryFolderRows(store, user);
+  const quickSourceCards = activeTab === 'media' ? sourcePresetCards(stream, serverUrl) : '';
+  const mediaFolderRows = activeTab === 'media' ? mediaLibraryFolderRows(store, user) : '';
+  const mediaBrowser = activeTab === 'media' ? mediaCatalogBrowser(store, user, stream, req.query) : '';
   const behavior = normalizeStreamMediaBehavior(stream.mediaBehavior);
   const scheduleRows = scheduledShowsForStream(store, stream).map((show) => `<tr><td>${escapeHtml(show.title)}</td><td>${escapeHtml(show.startAt || '')}</td><td>${escapeHtml(show.mode)}</td><td>${escapeHtml(show.status)}</td><td><form method="post" action="/dashboard/schedule/${escapeHtml(show.id)}/toggle" class="inline-form"><button type="submit">${show.enabled ? 'Disable' : 'Enable'}</button></form><form method="post" action="/dashboard/schedule/${escapeHtml(show.id)}/cancel" class="inline-form"><button type="submit" class="danger">Cancel</button></form></td></tr>`).join('');
   const authDomains = configuredAuthDomains(store, req).join(', ');
@@ -3438,15 +4541,24 @@ app.get('/dashboard', (req, res) => {
 <section><h2>Login recovery</h2><p class="muted">Use a recovery email and a private recovery code so you can reset your password if you forget your login details. Keep the recovery code somewhere only you can access.</p><form method="post" action="/dashboard/recovery-settings"><label><input type="checkbox" name="recoveryEnabled" value="true" ${user.recoveryEnabled ? 'checked' : ''}> Enable self-service password reset</label><label>Recovery email<input name="recoveryEmail" type="email" value="${escapeHtml(user.recoveryEmail || '')}"></label><label>Recovery hint, optional<input name="recoveryHint" value="${escapeHtml(user.recoveryHint || '')}" maxlength="240"></label><label>New recovery code<input name="recoveryCode" type="password" autocomplete="new-password" minlength="8" placeholder="${user.recoveryCodeHash ? 'Leave blank to keep existing code' : 'Set a private code, at least 8 characters'}"></label><button type="submit">Save recovery settings</button></form></section>
 <section><h2>Two-factor authentication</h2><p>Status: <strong>${user.totpEnabled ? 'enabled' : 'not enabled'}</strong>.</p>${user.totpPendingSecret ? `<p>Add this setup key to your authenticator app, then enter the current 6 digit code. Setup URI: <code>${escapeHtml(totpUri)}</code></p><form method="post" action="/dashboard/security/totp/confirm"><label>Authentication code<input name="code" inputmode="numeric" autocomplete="one-time-code" required></label><button type="submit">Enable two-factor authentication</button></form>` : user.totpEnabled ? `<form method="post" action="/dashboard/security/totp/disable"><label>Current password<input name="password" type="password" autocomplete="current-password" required></label><button type="submit" class="danger">Disable two-factor authentication</button></form>` : `<form method="post" action="/dashboard/security/totp/setup"><button type="submit">Set up two-factor authentication</button></form>`}</section>
 <section><h2>Passkeys</h2><p class="muted">Passkeys can sign in to this account on approved domains for this install: ${escapeHtml(authDomains)}. If an admin adds or changes domains, register a passkey from the new domain as well so your device syncs it under that site.</p><p><button type="button" id="registerPasskey">Add passkey</button></p><p id="passkeyStatus" class="notice" role="status" aria-live="polite"></p><table><tr><th>Name</th><th>Domain</th><th>Created</th><th>Last used</th></tr>${passkeyRows || '<tr><td colspan="4">No passkeys registered yet.</td></tr>'}</table></section>`;
-  const mediaTab = `<section><h2>Media management</h2><p>Current source: <strong>${escapeHtml(sourceSummary(selectedSource))}</strong>. Relay process: <strong>${activeSourceRunning ? 'running' : 'stopped'}</strong>.</p>
+  const mediaTab = activeTab === 'media' ? `<section><h2>Media management</h2><p>Current source: <strong>${escapeHtml(sourceSummary(selectedSource))}</strong>. Relay process: <strong>${activeSourceRunning ? 'running' : 'stopped'}</strong>.</p>
 <form method="post" action="/dashboard/media-settings"><div class="grid"><label><input type="checkbox" name="autoEnableUploads" value="true" ${behavior.autoEnableUploads ? 'checked' : ''}> Auto-enable new uploads</label><label><input type="checkbox" name="autoQueueUploads" value="true" ${behavior.autoQueueUploads ? 'checked' : ''}> Auto-add uploads to queue</label><label><input type="checkbox" name="autoRefreshMedia" value="true" ${behavior.autoRefreshMedia ? 'checked' : ''}> Auto-refresh media list</label><label>Enable delay after upload, seconds<input type="number" min="0" max="86400" name="uploadEnableDelaySeconds" value="${escapeHtml(behavior.uploadEnableDelaySeconds)}"></label><label>Playback action<select name="playbackMode"><option value="loop" ${behavior.playbackMode === 'loop' ? 'selected' : ''}>Auto loop continuously</option><option value="sequential" ${behavior.playbackMode === 'sequential' ? 'selected' : ''}>Play queue in order</option><option value="random" ${behavior.playbackMode === 'random' ? 'selected' : ''}>Random queue playback</option><option value="disabled" ${behavior.playbackMode === 'disabled' ? 'selected' : ''}>Stop or disable source relay</option></select></label><label>Fade in seconds<input type="range" min="0" max="30" step="1" name="fadeInSeconds" value="${escapeHtml(behavior.fadeInSeconds)}"></label><label>Fade out seconds<input type="range" min="0" max="30" step="1" name="fadeOutSeconds" value="${escapeHtml(behavior.fadeOutSeconds)}"></label><label>Crossfade target seconds<input type="range" min="0" max="30" step="1" name="crossfadeSeconds" value="${escapeHtml(behavior.crossfadeSeconds)}"></label></div><button type="submit">Save media settings</button></form>
 <section class="subsection"><h3>Quick source setup</h3><div class="preset-grid">${quickSourceCards}</div></section>
 <section class="subsection"><h3>Library folders</h3><p class="muted">These are the server folders currently available to this account for live or on-demand playback. The file count only includes supported audio and video formats that AAAStreamer can read.</p><table><tr><th>Library</th><th>Types</th><th>Access</th><th>Usable files</th></tr>${mediaFolderRows}</table></section>
-<form method="post" action="/dashboard/sources/select" data-confirm-kind="live" data-confirm-message="Start playing or queue the selected media for this stream?"><input type="hidden" name="sourceType" value="localMedia"><p><button type="button" id="checkAllMedia">Check all media</button><button type="button" id="uncheckAllMedia" class="secondary">Uncheck all media</button></p><table id="mediaCatalog"><tr><th>Select</th><th>Title</th><th>File name</th><th>Folder</th><th>Type</th><th>Duration</th><th>Size</th><th>Chapters</th><th>Use status</th><th>Preview</th></tr>${mediaCatalogCheckboxes(store, user, stream)}</table><p class="muted">Selected media becomes the current source or is added to the playback queue, depending on your media playback settings.</p><button type="submit">Start playing or queue selected media</button></form>
+${mediaBrowser}
 <form method="post" action="/dashboard/sources/upload" data-confirm-kind="add" data-confirm-message="Upload and add the selected media files?"><label>Upload audio or video files<input id="mediaUpload" type="file" accept="audio/*,video/*" multiple></label><input type="hidden" id="mediaUploadData" name="uploadData"><label>Upload title<input name="uploadLabel" placeholder="Intro music, event replay, audio described movie"></label><button type="submit">Upload media</button></form>
 <form method="post" action="/dashboard/sources/url" data-confirm-kind="add" data-confirm-message="Add this URL relay source?"><input type="hidden" name="sourceType" value="urlRelay"><label>Relay label<input id="relayLabel" name="relayLabel" placeholder="Radio relay, remote event, training video"></label><label>Media type<select id="relayMediaType" name="relayMediaType"><option value="video">video</option><option value="audio">audio</option></select></label><label>HTTP or HTTPS media URL<input id="relayUrl" name="relayUrl" placeholder="https://example.com/stream.mp3"></label><button type="submit">Add URL relay source</button></form>
 <section class="subsection"><h3>Source queue</h3><table><tr><th>Name</th><th>Type</th><th>Source</th><th>Actions</th></tr>${queueRows || '<tr><td colspan="4">No queued sources. Upload or check media to build a playlist.</td></tr>'}</table><form method="post" action="/dashboard/sources/queue/clear" class="inline-form" data-confirm-kind="remove" data-confirm-message="Clear all queued media?"><button type="submit" class="danger">Clear playback queue</button></form><p class="muted">Clears the queued list without deleting uploaded or server media.</p><form method="post" action="/dashboard/sources/action" class="inline-form"><label>Playback action<select name="sourceAction"><option value="start">Start playing selected or queued media now</option><option value="loop">Loop the current source continuously</option><option value="random">Play queued media in random order</option><option value="stop">Stop playback and disable source relay</option></select></label><button type="submit">Apply playback action</button></form><p class="muted">This changes what the stream plays now; media files stay in your library.</p></section>
-<table><tr><th>Name</th><th>Type</th><th>URL</th><th>Actions</th></tr>${relayRows || '<tr><td colspan="4">No URL relay sources configured.</td></tr>'}</table></section>`;
+<table><tr><th>Name</th><th>Type</th><th>URL</th><th>Actions</th></tr>${relayRows || '<tr><td colspan="4">No URL relay sources configured.</td></tr>'}</table></section>
+<div id="mediaReviewLayer" class="media-review-layer" hidden role="dialog" aria-modal="true" aria-labelledby="mediaReviewTitle">
+  <div class="media-review-panel">
+    <div class="media-review-head">
+      <h2 id="mediaReviewTitle">Media review</h2>
+      <button type="button" id="closeMediaReview" class="secondary">Close review</button>
+    </div>
+    <div id="mediaReviewPlayer"></div>
+  </div>
+</div>` : '';
   const scheduleTab = `<section><h2>Calendar and scheduled shows</h2><p class="muted">Schedule a live encoder session or pre-created uploaded media. The internal scheduler checks active entries and starts media playback when the show is due.</p><form method="post" action="/dashboard/schedule"><label>Show title<input name="title" required></label><label>Start time<input type="datetime-local" name="startAt" required></label><label>End time<input type="datetime-local" name="endAt"></label><label>Show type<select name="mode"><option value="live">Live stream from encoder</option><option value="media">Pre-created uploaded or server media</option></select></label><label>Media source for pre-created show<select name="sourceId"><option value="">No media source</option>${streamSources(stream).map((source) => `<option value="${escapeHtml(source.id)}">${escapeHtml(sourceSummary(source))}</option>`).join('')}</select></label><label>Description<textarea name="description" rows="4"></textarea></label><button type="submit">Add scheduled show</button></form><table><tr><th>Show</th><th>Start</th><th>Type</th><th>Status</th><th>Actions</th></tr>${scheduleRows || '<tr><td colspan="5">No shows are scheduled yet.</td></tr>'}</table></section>`;
   const profileTab = `<section><h2>Stream profile</h2><form method="post" action="/dashboard/stream"><label>Title<input name="title" value="${escapeHtml(stream.title)}"></label><label>Description<textarea name="description" rows="4">${escapeHtml(stream.description || '')}</textarea></label><label>Links, one per line. Use Label|https://example.com<textarea name="links" rows="4">${escapeHtml(linksText(stream.links))}</textarea></label><label>Optional photo background<input id="backgroundUpload" type="file" accept="image/png,image/jpeg,image/webp"></label><input type="hidden" id="backgroundImageData" name="backgroundImageData"><label><input type="checkbox" name="removeBackground" value="true"> Remove current background</label><label>Visibility<select name="visibility"><option ${stream.visibility === 'public' ? 'selected' : ''}>public</option><option ${stream.visibility === 'unlisted' ? 'selected' : ''}>unlisted</option></select></label><label><input type="checkbox" name="allowComments" value="true" ${stream.allowComments ? 'checked' : ''}> Allow visitor comments</label><button type="submit">Save stream profile</button></form></section>
 <section><h2>Extra embedded content</h2><form method="post" action="/dashboard/extra-content"><label><input type="checkbox" name="enabled" value="true" ${stream.extraContent?.enabled ? 'checked' : ''}> Enable extra embedded content</label><label><input type="checkbox" name="showOnWatchPage" value="true" ${stream.extraContent?.showOnWatchPage ? 'checked' : ''}> Show on visitor stream page</label><label>Heading<input name="title" value="${escapeHtml(stream.extraContent?.title || 'Additional content')}"></label><label>Description<textarea name="description" rows="3">${escapeHtml(stream.extraContent?.description || '')}</textarea></label><label>Embed HTML<textarea name="embedHtml" rows="8">${escapeHtml(stream.extraContent?.embedHtml || '')}</textarea></label><button type="submit">Save extra content</button></form>${renderExtraContentBox(stream, 'dashboard')}</section>`;
@@ -3458,8 +4570,9 @@ app.get('/dashboard', (req, res) => {
   const wordpressTab = wordpressAllowed
     ? `<section><h2>Plugin connector</h2><p class="muted">Connect a site plugin to this stream so pages outside AAAStreamer can embed the player, account tools, and comments while AAAStreamer remains the streaming authority.</p><form method="post" action="/dashboard/wordpress"><label>WordPress site URL<input name="siteUrl" value="${escapeHtml(primaryWordPressSite.siteUrl || '')}" placeholder="https://example.com"></label><label>WordPress listen page URL<input name="listenPageUrl" value="${escapeHtml(primaryWordPressSite.listenPageUrl || '')}" placeholder="https://example.com/listen"></label><label>Plugin REST base URL<input name="restBaseUrl" value="${escapeHtml(primaryWordPressSite.restBaseUrl || '')}" placeholder="https://example.com/index.php?rest_route=/aaastreamer/v1"></label><label><input type="checkbox" name="enabled" value="true" ${primaryWordPressSite.enabled ? 'checked' : ''}> Enable this WordPress site connection</label><label><input type="checkbox" name="commentsEnabled" value="true" ${primaryWordPressSite.commentsEnabled ? 'checked' : ''}> Allow comments from the WordPress stream page</label><label><input type="checkbox" name="hideCommentsOnStreamPage" value="true" ${primaryWordPressSite.hideCommentsOnStreamPage ? 'checked' : ''}> Hide comments on the normal AAAStreamer watch page for this stream</label><button type="submit">Save plugin connector</button></form><section class="subsection"><h3>Embed shortcodes</h3><p><code>[aaastreamer_player]</code></p><p><code>[aaastreamer_comments]</code></p><p><code>[aaastreamer_account_panel]</code></p></section><section class="subsection"><h3>Connected plugin sites</h3><table><tr><th>Site</th><th>Stream</th><th>Plugin version</th><th>Status</th><th>Comments</th><th>Health</th><th>Last check-in</th><th>Last error</th></tr>${wordpressConnectorSiteRows(store, wordpressSites) || '<tr><td colspan="8">No plugin check-ins yet. Save the connector here, then save settings in the site plugin once.</td></tr>'}</table></section></section>`
     : `<section><h2>Plugin connector</h2><p>This account does not currently have plugin connector access. Contact an administrator if this stream should be embedded on an external site.</p></section>`;
+  const downloadsTab = nativeClientDownloadsHtml(store, user);
   const advancedTab = `<section><h2>On-demand display</h2><form method="post" action="/dashboard/sources/ondemand"><label><input type="checkbox" name="enabled" value="true" ${stream.onDemand?.enabled ? 'checked' : ''}> Enable on-demand playback</label><label><input type="checkbox" name="showWhenOffline" value="true" ${stream.onDemand?.showWhenOffline ? 'checked' : ''}> Show to visitors when offline and selected media is available</label><label>On-demand title<input name="title" value="${escapeHtml(stream.onDemand?.title || '')}"></label><button type="submit">Save on-demand settings</button></form></section>`;
-  const selectedBody = { overview: overviewTab, media: mediaTab, encoders: encodersTab, destinations: destinationsTab, schedule: scheduleTab, wordpress: wordpressTab, profile: profileTab, support: supportTab, account: accountTab, advanced: advancedTab }[activeTab];
+  const selectedBody = { overview: overviewTab, downloads: downloadsTab, media: mediaTab, encoders: encodersTab, destinations: destinationsTab, schedule: scheduleTab, wordpress: wordpressTab, profile: profileTab, support: supportTab, account: accountTab, advanced: advancedTab }[activeTab];
   const body = `<h1>User panel</h1>${reminderHtml}${tabs}${selectedBody}<script>
 const copyStatus=document.getElementById('copyStatus');
 const confirmationPreferences=${JSON.stringify(user.confirmationPreferences || {})};
@@ -3509,6 +4622,44 @@ const uncheckAllMedia=document.getElementById('uncheckAllMedia');
 function setMediaChecks(checked){document.querySelectorAll('#mediaCatalog input[type="checkbox"]').forEach((box)=>{box.checked=checked;});}
 if(checkAllMedia) checkAllMedia.addEventListener('click',()=>setMediaChecks(true));
 if(uncheckAllMedia) uncheckAllMedia.addEventListener('click',()=>setMediaChecks(false));
+const mediaReviewLayer=document.getElementById('mediaReviewLayer');
+const mediaReviewPlayer=document.getElementById('mediaReviewPlayer');
+const mediaReviewTitle=document.getElementById('mediaReviewTitle');
+const closeMediaReview=document.getElementById('closeMediaReview');
+let lastMediaReviewButton=null;
+function hideMediaReview(){
+  if(!mediaReviewLayer||!mediaReviewPlayer)return;
+  mediaReviewLayer.hidden=true;
+  mediaReviewPlayer.innerHTML='';
+  if(lastMediaReviewButton) lastMediaReviewButton.focus();
+}
+function showMediaReview(button){
+  if(!mediaReviewLayer||!mediaReviewPlayer)return false;
+  const src=button.dataset.previewSrc||'';
+  if(!src)return false;
+  const title=button.dataset.previewTitle||'Media review';
+  const type=button.dataset.previewType==='audio'?'audio':'video';
+  const player=document.createElement(type);
+  player.controls=true;
+  player.autoplay=true;
+  player.src=src;
+  player.addEventListener('ended',hideMediaReview);
+  player.addEventListener('error',()=>setCopyStatus('Media review could not play. Open the preview link instead.'));
+  mediaReviewPlayer.innerHTML='';
+  mediaReviewPlayer.appendChild(player);
+  mediaReviewTitle.textContent=title;
+  lastMediaReviewButton=button;
+  mediaReviewLayer.hidden=false;
+  closeMediaReview?.focus();
+  player.play().catch(()=>setCopyStatus('Media review is ready. Press play to start.'));
+  return true;
+}
+document.querySelectorAll('.media-preview-button').forEach((button)=>button.addEventListener('click',(event)=>{
+  if(showMediaReview(button)) event.preventDefault();
+}));
+if(closeMediaReview) closeMediaReview.addEventListener('click',hideMediaReview);
+if(mediaReviewLayer) mediaReviewLayer.addEventListener('click',(event)=>{if(event.target===mediaReviewLayer)hideMediaReview();});
+document.addEventListener('keydown',(event)=>{if(event.key==='Escape'&&mediaReviewLayer&&!mediaReviewLayer.hidden)hideMediaReview();});
 const mediaUpload=document.getElementById('mediaUpload');
 const mediaUploadData=document.getElementById('mediaUploadData');
 if(mediaUpload){mediaUpload.addEventListener('change',async()=>{const files=Array.from(mediaUpload.files||[]);if(!files.length)return;if(files.length>${JSON.stringify(maxBulkUploads)}){setCopyStatus('Select no more than ${maxBulkUploads} files at once.');mediaUpload.value='';mediaUploadData.value='';return;}const tooLarge=files.find((file)=>file.size>${JSON.stringify(maxUploadBytes)});if(tooLarge){setCopyStatus(tooLarge.name+' is too large for this server upload limit.');mediaUpload.value='';mediaUploadData.value='';return;}const readFile=(file)=>new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve({name:file.name,type:file.type,data:String(reader.result||'')});reader.onerror=()=>reject(reader.error||new Error('Read failed'));reader.readAsDataURL(file);});try{const uploads=await Promise.all(files.map(readFile));mediaUploadData.value=JSON.stringify(uploads);setCopyStatus(files.length===1?'Media upload ready to submit.':files.length+' media files ready to upload and queue.');}catch{setCopyStatus('Media file could not be read. Choose the file again.');mediaUpload.value='';mediaUploadData.value='';}});}
@@ -3734,6 +4885,7 @@ app.post('/dashboard/sources/upload', requireBroadcaster, (req, res) => {
       source.autoEnabled = behavior.autoEnableUploads;
     }
     const source = sources[0];
+    clearMediaCatalogCache();
     stream.sourceMode = 'media';
     if (!stream.currentSource || behavior.autoQueueUploads) {
       stream.currentSource ||= source;
@@ -3775,7 +4927,6 @@ app.post('/dashboard/sources/queue/:sourceId/select', requireBroadcaster, (req, 
       stream.sourceMode = source.type === 'urlRelay' ? 'url' : 'media';
       stream.updatedAt = nowIso();
       store.events.push({ id: id('evt'), type: 'source_queue_selected', payload: { streamId: stream.id, sourceId: source.id, label: source.label }, createdAt: nowIso() });
-      writeStore(store);
       if (sourceProcesses.has(stream.id)) {
         try {
           startSourceProcess(stream, source, store);
@@ -3783,6 +4934,7 @@ app.post('/dashboard/sources/queue/:sourceId/select', requireBroadcaster, (req, 
           appendEvent('source_relay_queue_error', { streamId: stream.id, message: error.message });
         }
       }
+      writeStore(store);
     }
   }
   res.redirect('/dashboard?tab=media');
@@ -3876,6 +5028,9 @@ app.post('/dashboard/sources/stop', requireBroadcaster, (req, res) => {
   const stream = store.streams.find((item) => item.ownerId === req.user.id);
   if (stream) {
     const stopped = stopSourceProcess(stream.id);
+    if (stopped && stream.currentPlayback) {
+      stream.currentPlayback = normalizeCurrentPlayback({ ...stream.currentPlayback, status: 'stopped', updatedAt: nowIso() });
+    }
     store.events.push({ id: id('evt'), type: 'source_relay_stopped', payload: { streamId: stream.id, stopped }, createdAt: nowIso() });
     writeStore(store);
   }
@@ -3889,6 +5044,9 @@ app.post('/dashboard/sources/action', requireBroadcaster, (req, res) => {
   const sourceAction = String(req.body.sourceAction || '').trim();
   if (sourceAction === 'stop' || sourceAction === 'disable') {
     const stopped = stopSourceProcess(stream.id);
+    if (stopped && stream.currentPlayback) {
+      stream.currentPlayback = normalizeCurrentPlayback({ ...stream.currentPlayback, status: 'stopped', updatedAt: nowIso() });
+    }
     stream.mediaBehavior = normalizeStreamMediaBehavior({ ...stream.mediaBehavior, playbackMode: 'disabled', continuousPlayback: false });
     store.events.push({ id: id('evt'), type: 'source_relay_stopped', payload: { streamId: stream.id, stopped, sourceAction }, createdAt: nowIso() });
     writeStore(store);
@@ -5059,6 +6217,7 @@ app.post('/admin/media', requireAdmin, (req, res) => {
     maxScanDepth: clampNumber(req.body.maxScanDepth, 1, 8, 4),
     folders
   });
+  clearMediaCatalogCache();
   store.events.push({ id: id('evt'), type: 'media_library_settings_updated', payload: { folderCount: store.settings.mediaLibrary.folders.length }, createdAt: nowIso() });
   writeStore(store);
   res.redirect('/admin/media');
@@ -5374,6 +6533,29 @@ app.get('/api/streams/:streamId', (req, res) => {
   res.json({ success: true, stream: publicStreamSummary(stream, store, user?.role === 'admin' || stream.ownerId === user?.id) });
 });
 
+app.post('/api/streams/:streamId/playback/ensure', (req, res) => {
+  const store = readStore();
+  const stream = store.streams.find((item) => item.id === req.params.streamId || item.slug === req.params.streamId);
+  if (!stream) {
+    res.status(404).json({ success: false, error: 'Stream not found' });
+    return;
+  }
+  const user = currentUser(req);
+  if (!streamIsPubliclyListable(stream, store) && user?.role !== 'admin' && stream.ownerId !== user?.id) {
+    res.status(404).json({ success: false, error: 'Stream is offline' });
+    return;
+  }
+  const reason = String(req.body?.reason || 'viewer_playback_request').trim().slice(0, 80);
+  const ensured = ensureSourceRelayForStream(store, stream, reason, { explicit: true });
+  const latestStore = readStore();
+  const latestStream = latestStore.streams.find((item) => item.id === stream.id) || stream;
+  res.json({
+    success: true,
+    ensured,
+    stream: publicStreamSummary(latestStream, latestStore, user?.role === 'admin' || latestStream.ownerId === user?.id)
+  });
+});
+
 app.post('/api/streams/:streamId/comments', async (req, res) => {
   const store = readStore();
   const stream = store.streams.find((item) => item.id === req.params.streamId || item.slug === req.params.streamId);
@@ -5610,6 +6792,8 @@ app.post('/api/streams/:streamId/restream/stop', requireBroadcaster, (req, res) 
 app.listen(port, () => {
   ensureDataStore();
   ensureContinuousOnDemandRelays();
+  refreshJellyfinNowPlaying().catch(() => {});
+  setInterval(() => refreshJellyfinNowPlaying().catch(() => {}), 10000).unref();
   setInterval(() => {
     runSchedulerTick();
     ensureContinuousOnDemandRelays();

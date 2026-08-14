@@ -120,6 +120,8 @@ Streamers can:
 
 - select approved server media from visible folders
 - use checkboxes and check-all controls to build a queue
+- search and filter large server media libraries before adding files to the queue
+- jump through media by first letter or number
 - upload one or more audio/video files when uploads are allowed
 - auto-enable uploads immediately or after a delay
 - auto-add uploads to the queue
@@ -133,6 +135,12 @@ Streamers can:
 
 The media table can show title, filename, duration, size, media type, detected
 metadata, and chapter count when available.
+
+For large libraries, use **Browse server media** on the Media management tab.
+Search title, file, folder, or path; choose a folder or audio/video type; use
+the A-Z and 0-9 letter navigation; choose page size; then check the visible page
+or individual media cards before starting playback or adding the selection to
+the queue.
 
 ## URL Relay Sources
 

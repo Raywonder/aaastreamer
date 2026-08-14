@@ -130,6 +130,8 @@ Streamers can:
 
 - select approved server media as their stream source using checkboxes
 - check all available media items when building a queue
+- search, filter, sort, page, and jump by first letter or number when browsing
+  large server media libraries
 - upload one or more supported audio or video files into the configured upload folder
 - choose whether uploads auto-enable immediately or after a configured delay
 - choose whether uploaded media is automatically added to the queue
