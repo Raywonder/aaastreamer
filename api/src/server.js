@@ -204,6 +204,9 @@ function verifyPassword(password, stored) {
 }
 
 function createLoginSession(store, user, res) {
+  if (!user || user.isBot || user.identityType === 'bot' || user.loginAllowed === false || !user.active) {
+    throw new Error('Interactive login is disabled for this account.');
+  }
   const token = id('sess');
   store.sessions.push({ token, userId: user.id, createdAt: nowIso(), expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 14).toISOString() });
   writeStore(store);
@@ -741,6 +744,19 @@ function normalizeStreamMediaBehavior(settings = {}) {
 function normalizeUser(user) {
   if (!user || typeof user !== 'object') return user;
   user.role = normalizeRole(user.role || 'user');
+  user.identityType = ['visitor', 'member', 'moderator', 'admin', 'other', 'bot'].includes(user.identityType)
+    ? user.identityType
+    : user.role === 'admin' ? 'admin' : user.role === 'moderator' ? 'moderator' : 'member';
+  user.isBot = user.isBot === true || user.identityType === 'bot';
+  if (user.isBot) user.identityType = 'bot';
+  user.loginAllowed = user.isBot ? false : user.loginAllowed !== false;
+  user.realUserVerified = user.isBot ? false : user.realUserVerified === true;
+  user.botReason = String(user.botReason || '').trim().slice(0, 240);
+  user.botMarkedAt = String(user.botMarkedAt || '');
+  user.botMarkedBy = String(user.botMarkedBy || '').slice(0, 80);
+  user.permissions = Array.isArray(user.permissions)
+    ? [...new Set(user.permissions.map((item) => String(item).trim()).filter(Boolean))].slice(0, 50)
+    : [];
   user.whmcsClientId = String(user.whmcsClientId || '').replace(/[^0-9]/g, '').slice(0, 20);
   user.whmcsPortalEmail = String(user.whmcsPortalEmail || '').trim().slice(0, 180);
   user.recoveryEmail = String(user.recoveryEmail || user.whmcsPortalEmail || '').trim().slice(0, 180);
@@ -967,8 +983,15 @@ function roleOptions(selected, includeAdmin = false) {
     .join('');
 }
 
+function identityTypeOptions(selected) {
+  return [
+    ['visitor', 'Visitor'], ['member', 'Member'], ['moderator', 'Moderator'],
+    ['admin', 'Administrator'], ['other', 'Other'], ['bot', 'Bot']
+  ].map(([value, label]) => `<option value="${value}" ${value === selected ? 'selected' : ''}>${label}</option>`).join('');
+}
+
 function canBroadcast(user) {
-  return ['creator', 'broadcaster', 'producer', 'manager', 'enterprise', 'admin'].includes(user?.role);
+  return !user?.isBot && user?.loginAllowed !== false && ['creator', 'broadcaster', 'producer', 'manager', 'enterprise', 'admin'].includes(user?.role);
 }
 
 function defaultSupportSettings() {
@@ -1383,7 +1406,7 @@ function currentUser(req) {
   const store = readStore();
   const session = store.sessions.find((item) => item.token === token && new Date(item.expiresAt) > new Date());
   if (!session) return null;
-  return store.users.find((user) => user.id === session.userId && user.active) || null;
+  return store.users.find((user) => user.id === session.userId && user.active && !user.isBot && user.identityType !== 'bot' && user.loginAllowed !== false) || null;
 }
 
 function notificationEmailReminder(user) {
@@ -3640,7 +3663,7 @@ function bearerClient(req, store = readStore()) {
   const client = (store.connectedClients || []).find((item) => item.tokenHash === tokenHash && item.status === 'authorized');
   if (!client) return null;
   const user = userById(store, client.userId);
-  if (!user || !user.active) return null;
+  if (!user || !user.active || user.isBot || user.identityType === 'bot' || user.loginAllowed === false) return null;
   return { client, user };
 }
 
@@ -4295,7 +4318,7 @@ app.get('/manual', (req, res) => {
 app.post('/login', (req, res) => {
   const store = readStore();
   const user = userByLogin(store, req.body.username);
-  if (!user || !verifyPassword(req.body.password || '', user.passwordHash)) {
+  if (!user || user.isBot || user.identityType === 'bot' || user.loginAllowed === false || !user.active || !verifyPassword(req.body.password || '', user.passwordHash)) {
     res.status(403).send(page('Login failed', '<h1>Login failed</h1><p>Username or password was not accepted.</p><a class="button" href="/login">Try again</a>', null));
     return;
   }
@@ -4329,7 +4352,7 @@ app.post('/login/2fa', (req, res) => {
   const token = String(req.body.token || '');
   const pending = store.pendingLogins.find((item) => item.token === token && Date.parse(item.expiresAt || '') > Date.now());
   const user = pending ? userById(store, pending.userId) : null;
-  if (!user || !verifyTotp(user.totpSecret, req.body.code)) {
+  if (!user || user.isBot || user.identityType === 'bot' || user.loginAllowed === false || !user.active || !verifyTotp(user.totpSecret, req.body.code)) {
     res.status(403).send(page('Two-factor verification failed', '<h1>Two-factor verification failed</h1><p>The code was not accepted.</p><p><a class="button" href="/login">Back to login</a></p>', null));
     return;
   }
@@ -5365,7 +5388,7 @@ app.post('/api/passkeys/register/verify', requireUser, async (req, res) => {
 app.post('/api/passkeys/authenticate/options', async (req, res) => {
   const store = readStore();
   const user = userByLogin(store, req.body.username);
-  if (!user || !user.active || !(user.passkeys || []).length) {
+  if (!user || !user.active || user.isBot || user.identityType === 'bot' || user.loginAllowed === false || !(user.passkeys || []).length) {
     res.status(404).json({ success: false, error: 'No passkeys are registered for that account.' });
     return;
   }
@@ -5386,7 +5409,7 @@ app.post('/api/passkeys/authenticate/verify', async (req, res) => {
   const user = store.users.find((item) => (item.passkeys || []).some((passkey) => passkey.id === credentialId));
   const passkey = user?.passkeys?.find((item) => item.id === credentialId);
   const challenge = user ? [...(store.passkeyChallenges || [])].reverse().find((item) => item.type === 'authentication' && item.userId === user.id) : null;
-  if (!user || !passkey || !challenge) {
+  if (!user || !user.active || user.isBot || user.identityType === 'bot' || user.loginAllowed === false || !passkey || !challenge) {
     res.status(400).json({ success: false, error: 'Passkey login expired. Try again.' });
     return;
   }
@@ -5590,10 +5613,15 @@ app.get('/admin/streams', requireAdmin, (req, res) => {
 
 app.get('/admin/accounts', requireAdmin, (req, res) => {
   const store = readStore();
-  const accountRows = store.users.map((item) => `<tr><td>${escapeHtml(item.username)}</td><td><form method="post" action="/admin/users/${escapeHtml(item.id)}"><label>Display name<input name="displayName" value="${escapeHtml(item.displayName || '')}"></label></td><td><label>Role<select name="role">${roleOptions(item.role, true)}</select></label></td><td><label><input type="checkbox" name="active" value="true" ${item.active ? 'checked' : ''}> Active</label><label><input type="checkbox" name="wordpressConnectorAccess" value="true" ${item.wordpressConnectorAccess !== false ? 'checked' : ''}> Plugin connector access</label></td><td><label>Notification email<input name="notificationEmail" type="email" value="${escapeHtml(item.notificationEmail || '')}"></label><label>Client ID or client email<input name="clientLookup" value="${escapeHtml(item.whmcsClientId || item.whmcsPortalEmail || '')}"></label><p class="muted">Current client ID: ${escapeHtml(item.whmcsClientId || 'None')}. Client email: ${escapeHtml(item.whmcsPortalEmail || 'None')}.</p></td><td><label>New password<input name="password" type="password" autocomplete="new-password" placeholder="Leave blank to keep current password"></label><button type="submit">Save account</button></form></td></tr>`).join('');
+  const selectedType = String(req.query.type || 'all');
+  const counts = Object.fromEntries(['visitor', 'member', 'moderator', 'admin', 'other', 'bot'].map((type) => [type, store.users.filter((item) => item.identityType === type).length]));
+  const visibleUsers = selectedType === 'all' ? store.users : store.users.filter((item) => item.identityType === selectedType);
+  const filterLinks = [['all', 'All', store.users.length], ['member', 'Real users', store.users.filter((item) => !item.isBot).length], ['visitor', 'Visitors', counts.visitor], ['moderator', 'Moderators', counts.moderator], ['admin', 'Admins', counts.admin], ['bot', 'Bots', counts.bot], ['other', 'Other', counts.other]]
+    .map(([value, label, count]) => `<a class="button ${selectedType === value ? '' : 'secondary'}" href="/admin/accounts?type=${value}" ${selectedType === value ? 'aria-current="page"' : ''}>${label} (${count})</a>`).join('');
+  const accountRows = visibleUsers.map((item) => `<tr><td><strong>${escapeHtml(item.username)}</strong><br><span class="muted">${item.isBot ? 'Bot · interactive login blocked' : item.realUserVerified ? 'Verified real user' : 'Real-user status unverified'}</span></td><td><form method="post" action="/admin/users/${escapeHtml(item.id)}"><label>Display name<input name="displayName" value="${escapeHtml(item.displayName || '')}"></label><label>Identity type<select name="identityType">${identityTypeOptions(item.identityType)}</select></label><label>Role<select name="role">${roleOptions(item.role, true)}</select></label></td><td><label><input type="checkbox" name="isBot" value="true" ${item.isBot ? 'checked' : ''}> Mark as bot</label><p class="muted">Bots cannot use passwords or passkeys. Saving this immediately revokes sessions and connected clients.</p><label><input type="checkbox" name="realUserVerified" value="true" ${item.realUserVerified ? 'checked' : ''} ${item.isBot ? 'disabled' : ''}> Verified real user</label><label><input type="checkbox" name="loginAllowed" value="true" ${item.loginAllowed !== false ? 'checked' : ''} ${item.isBot ? 'disabled' : ''}> Interactive login allowed</label><label><input type="checkbox" name="active" value="true" ${item.active ? 'checked' : ''}> Account active</label><label>Bot or review note<input name="botReason" value="${escapeHtml(item.botReason || '')}" placeholder="Why this account was classified"></label></td><td><label><input type="checkbox" name="wordpressConnectorAccess" value="true" ${item.wordpressConnectorAccess !== false && !item.isBot ? 'checked' : ''}> Plugin connector access</label><label>Permissions, comma separated<input name="permissions" value="${escapeHtml((item.permissions || []).join(', '))}" placeholder="stream.view, archive.download"></label><label>Notification email<input name="notificationEmail" type="email" value="${escapeHtml(item.notificationEmail || '')}"></label><label>Client ID or client email<input name="clientLookup" value="${escapeHtml(item.whmcsClientId || item.whmcsPortalEmail || '')}"></label></td><td><label>New password<input name="password" type="password" autocomplete="new-password" placeholder="Leave blank to keep current password"></label><button type="submit">Save account</button></form></td></tr>`).join('');
   const body = `<h1>Admin panel</h1>${adminTabs('accounts')}
 <section><h2>Create user</h2><form method="post" action="/admin/users"><label>Username<input name="username" required></label><label>Display name<input name="displayName"></label><label>Password<input name="password" type="password" required></label><label>Role<select name="role">${roleOptions('user', true)}</select></label><button type="submit">Create user</button></form></section>
-<section><h2>Edit accounts</h2><table><tr><th>Username</th><th>Display name</th><th>Role</th><th>Status</th><th>Linked details</th><th>Password and save</th></tr>${accountRows}</table></section>`;
+<section><h2>Users and identities</h2><p>Separate real people from automation accounts. Bots are quarantined from every interactive login path.</p><nav aria-label="Account filters">${filterLinks}</nav><table><tr><th>Account</th><th>Profile and role</th><th>Identity and login</th><th>Access details</th><th>Password and save</th></tr>${accountRows || '<tr><td colspan="5">No accounts match this filter.</td></tr>'}</table></section>`;
   res.send(page('Admin accounts', body, req.user));
 });
 
@@ -6280,6 +6308,10 @@ app.post('/admin/users', requireAdmin, (req, res) => {
     username,
     displayName: req.body.displayName || username,
     role: normalizeRole(req.body.role, 'user'),
+    identityType: normalizeRole(req.body.role, 'user') === 'admin' ? 'admin' : normalizeRole(req.body.role, 'user') === 'moderator' ? 'moderator' : 'member',
+    isBot: false,
+    loginAllowed: true,
+    realUserVerified: false,
     passwordHash: hashPassword(password),
     active: true,
     createdAt,
@@ -6301,6 +6333,20 @@ app.post('/admin/users/:userId', requireAdmin, async (req, res) => {
   }
   user.displayName = String(req.body.displayName || user.username).trim().slice(0, 80) || user.username;
   user.role = normalizeRole(req.body.role, user.role);
+  const wasBot = user.isBot === true;
+  user.isBot = req.body.isBot === 'true' || req.body.identityType === 'bot';
+  user.identityType = user.isBot ? 'bot' : ['visitor', 'member', 'moderator', 'admin', 'other'].includes(req.body.identityType) ? req.body.identityType : 'member';
+  user.loginAllowed = user.isBot ? false : req.body.loginAllowed === 'true';
+  user.realUserVerified = user.isBot ? false : req.body.realUserVerified === 'true';
+  user.botReason = String(req.body.botReason || '').trim().slice(0, 240);
+  user.permissions = [...new Set(String(req.body.permissions || '').split(',').map((item) => item.trim()).filter(Boolean))].slice(0, 50);
+  if (user.isBot && !wasBot) {
+    user.botMarkedAt = nowIso();
+    user.botMarkedBy = req.user.id;
+  } else if (!user.isBot) {
+    user.botMarkedAt = '';
+    user.botMarkedBy = '';
+  }
   user.notificationEmail = String(req.body.notificationEmail || '').trim().slice(0, 180);
   const paymentSettings = store.settings.paymentIntegration || defaultPaymentIntegrationSettings();
   const lookup = String(req.body.clientLookup || '').trim();
@@ -6311,7 +6357,7 @@ app.post('/admin/users/:userId', requireAdmin, async (req, res) => {
   user.whmcsPortalEmail = linkedWhmcs?.email || (lookup.includes('@') ? lookup.slice(0, 180) : user.whmcsPortalEmail || '');
   user.whmcsClientId = linkedWhmcs?.clientId || (/^\d+$/.test(lookup) ? lookup.replace(/[^0-9]/g, '').slice(0, 20) : user.whmcsClientId || '');
   user.active = user.id === req.user.id ? true : req.body.active === 'true';
-  user.wordpressConnectorAccess = req.body.wordpressConnectorAccess === 'true';
+  user.wordpressConnectorAccess = !user.isBot && req.body.wordpressConnectorAccess === 'true';
   const password = String(req.body.password || '');
   if (password) {
     if (password.length < 8) {
@@ -6321,9 +6367,17 @@ app.post('/admin/users/:userId', requireAdmin, async (req, res) => {
     user.passwordHash = hashPassword(password);
     store.sessions = (store.sessions || []).filter((session) => session.userId !== user.id || user.id === req.user.id);
   }
+  if (user.isBot || user.loginAllowed === false || !user.active) {
+    store.sessions = (store.sessions || []).filter((session) => session.userId !== user.id);
+    store.pendingLogins = (store.pendingLogins || []).filter((login) => login.userId !== user.id);
+    store.passkeyChallenges = (store.passkeyChallenges || []).filter((challenge) => challenge.userId !== user.id);
+    for (const client of store.connectedClients || []) {
+      if (client.userId === user.id) client.status = 'revoked';
+    }
+  }
   user.updatedAt = nowIso();
   if (canBroadcast(user)) ensureStreamForUser(store, user);
-  store.events.push({ id: id('evt'), type: 'admin_account_updated', payload: { username: user.username, role: user.role, active: user.active, clientLinked: Boolean(linkedWhmcs) }, createdAt: nowIso() });
+  store.events.push({ id: id('evt'), type: 'admin_account_updated', payload: { username: user.username, role: user.role, identityType: user.identityType, isBot: user.isBot, loginAllowed: user.loginAllowed, sessionsRevoked: user.isBot || user.loginAllowed === false || !user.active, active: user.active, clientLinked: Boolean(linkedWhmcs) }, createdAt: nowIso() });
   writeStore(store);
   res.redirect('/admin/accounts');
 });

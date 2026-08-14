@@ -1,5 +1,11 @@
 # AAAStreamer
 
+## Version 0.2.0 identity controls
+
+Administrators can classify accounts as visitors, members, moderators, administrators, other users, or bots. Marking an account as a bot disables password and passkey login, revokes browser sessions and pending two-factor or passkey challenges, and revokes connected native clients. Bot accounts remain visible in the audit-oriented admin filter and are excluded from real-user counts.
+
+Real-person verification is an administrator classification, not proof supplied by the account itself. Interactive login permission can be disabled independently for a non-bot account. Bot API access, when introduced, must use separate scoped and revocable service credentials; bot accounts never regain an interactive user session.
+
 ## Overview
 
 AAAStreamer is a self-hosted, multi-platform live streaming system designed for
