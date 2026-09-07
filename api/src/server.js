@@ -1494,7 +1494,10 @@ function normalizeStore(store) {
     .slice(-500);
   store.connectedClients = (store.connectedClients || []).map(normalizeConnectedClient).filter((item) => item.tokenHash && item.userId).slice(-2000);
   store.passkeyChallenges = (store.passkeyChallenges || []).filter((item) => item?.challenge && Date.parse(item.expiresAt || '') > now);
-  for (const stream of store.streams) normalizeStream(stream);
+  for (const stream of store.streams) {
+    normalizeStream(stream);
+    Object.defineProperty(stream, 'publicShareToken', { value: store.shareLinks.find((link) => link.streamId === stream.id && link.purpose === 'stream')?.token || '', writable: true, configurable: true, enumerable: false });
+  }
   pruneComments(store);
   return store;
 }
@@ -1913,6 +1916,7 @@ function rtmpPublishUrlFor(streamKey) {
 }
 
 function watchUrlFor(stream) {
+  if (stream.publicShareToken) return tokenUrlFor(stream.publicShareToken);
   return `${publicUrl || ''}/s/${stream.slug}`;
 }
 
@@ -1935,6 +1939,7 @@ function ensureShareLink(store, stream, createdBy = '') {
     };
     store.shareLinks.push(link);
   }
+  Object.defineProperty(stream, 'publicShareToken', { value: link.token, writable: true, configurable: true, enumerable: false });
   return link;
 }
 
