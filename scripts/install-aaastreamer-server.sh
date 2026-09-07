@@ -11,6 +11,10 @@ PUBLIC_URL="${PUBLIC_URL:-}"
 RTMP_HOST="${RTMP_HOST:-localhost}"
 RTMP_APP_NAME="${RTMP_APP_NAME:-live}"
 SERVICE_NAME="${SERVICE_NAME:-aaastreamer}"
+MEDIA_SERVICE_NAME="${MEDIA_SERVICE_NAME:-aaastreamer-mediamtx}"
+MEDIAMTX_VERSION="${MEDIAMTX_VERSION:-1.19.0}"
+MEDIAMTX_BIN="${MEDIAMTX_BIN:-/usr/local/bin/mediamtx}"
+MEDIAMTX_CONFIG="${MEDIAMTX_CONFIG:-/etc/aaastreamer/mediamtx.yml}"
 REPO_URL="${REPO_URL:-https://github.com/Raywonder/aaastreamer.git}"
 BRANCH="${BRANCH:-main}"
 CREATE_NGINX="${CREATE_NGINX:-true}"
@@ -67,21 +71,57 @@ ensure_user() {
 }
 
 install_source() {
-  mkdir -p "$APP_DIR"
   if [[ -d "$APP_DIR/.git" ]]; then
     git -C "$APP_DIR" fetch origin "$BRANCH"
     git -C "$APP_DIR" checkout "$BRANCH"
     git -C "$APP_DIR" pull --ff-only origin "$BRANCH"
   else
-    rm -rf "$APP_DIR"
+    if [[ -e "$APP_DIR" ]]; then
+      echo "Refusing to replace existing non-Git path: ${APP_DIR}" >&2
+      echo "Move or import that installation explicitly, then rerun." >&2
+      exit 1
+    fi
     git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
   fi
   chown -R "$APP_USER:$APP_USER" "$APP_DIR"
   sudo -u "$APP_USER" npm --prefix "$APP_DIR/api" ci --omit=dev
 }
 
+install_mediamtx() {
+  local machine arch asset release_url temp_dir checksum_line
+  machine="$(uname -m)"
+  case "$machine" in
+    x86_64|amd64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    armv7l) arch=armv7 ;;
+    armv6l) arch=armv6 ;;
+    *) echo "Unsupported MediaMTX architecture: ${machine}" >&2; exit 1 ;;
+  esac
+
+  asset="mediamtx_v${MEDIAMTX_VERSION}_linux_${arch}.tar.gz"
+  release_url="https://github.com/bluenviron/mediamtx/releases/download/v${MEDIAMTX_VERSION}"
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf -- "$temp_dir"' RETURN
+  curl --fail --location --retry 3 --output "${temp_dir}/${asset}" "${release_url}/${asset}"
+  curl --fail --location --retry 3 --output "${temp_dir}/checksums.sha256" "${release_url}/checksums.sha256"
+  checksum_line="$(grep -E "[[:space:]][*]?${asset}$" "${temp_dir}/checksums.sha256" || true)"
+  if [[ -z "$checksum_line" ]]; then
+    echo "Official checksum file does not list ${asset}." >&2
+    exit 1
+  fi
+  printf '%s\n' "$checksum_line" >"${temp_dir}/selected.sha256"
+  (cd "$temp_dir" && sha256sum --check selected.sha256)
+  tar -xzf "${temp_dir}/${asset}" -C "$temp_dir" mediamtx
+  install -o root -g root -m 0755 "${temp_dir}/mediamtx" "$MEDIAMTX_BIN"
+  trap - RETURN
+  rm -rf -- "$temp_dir"
+}
+
 prepare_storage() {
   mkdir -p "$DATA_DIR" "$MEDIA_DIR" "$UPLOAD_DIR"
+  mkdir -p /etc/aaastreamer "$APP_DIR/hooks"
+  install -o "$APP_USER" -g "$APP_USER" -m 0755 "$APP_DIR/ops/host/hooks/on-ready.sh" "$APP_DIR/hooks/on-ready.sh"
+  install -o "$APP_USER" -g "$APP_USER" -m 0755 "$APP_DIR/ops/host/hooks/on-not-ready.sh" "$APP_DIR/hooks/on-not-ready.sh"
   chown -R "$APP_USER:$APP_USER" "$DATA_DIR"
   chmod 750 "$DATA_DIR" "$MEDIA_DIR" "$UPLOAD_DIR"
 }
@@ -162,8 +202,34 @@ ReadWritePaths=${APP_DIR}/api/data ${DATA_DIR} ${MEDIA_DIR} ${UPLOAD_DIR} /tmp /
 [Install]
 WantedBy=multi-user.target
 EOF_SERVICE
+
+  install -o root -g root -m 0644 "$APP_DIR/ops/host/mediamtx.yml" "$MEDIAMTX_CONFIG"
+  sed -i "s|/opt/aaastreamer/hooks/|${APP_DIR}/hooks/|g" "$MEDIAMTX_CONFIG"
+  cat >"/etc/systemd/system/${MEDIA_SERVICE_NAME}.service" <<EOF_MEDIA_SERVICE
+[Unit]
+Description=AAAStreamer MediaMTX RTMP and HLS service
+After=network-online.target ${SERVICE_NAME}.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${APP_USER}
+Group=${APP_USER}
+ExecStart=${MEDIAMTX_BIN} ${MEDIAMTX_CONFIG}
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=${APP_DIR}/hooks ${MEDIAMTX_CONFIG}
+
+[Install]
+WantedBy=multi-user.target
+EOF_MEDIA_SERVICE
   systemctl daemon-reload
   systemctl enable --now "$SERVICE_NAME"
+  systemctl enable --now "$MEDIA_SERVICE_NAME"
 }
 
 write_nginx() {
@@ -200,6 +266,7 @@ EOF_NGINX
 install_packages
 ensure_user
 install_source
+install_mediamtx
 prepare_storage
 write_env
 write_systemd
@@ -207,6 +274,7 @@ write_nginx
 
 echo "AAAStreamer installed."
 echo "Service: systemctl status ${SERVICE_NAME}"
+echo "Media service: systemctl status ${MEDIA_SERVICE_NAME}"
 echo "Environment: /etc/aaastreamer/aaastreamer.env"
 if [[ -n "$PUBLIC_URL" ]]; then
   echo "Open: ${PUBLIC_URL}"

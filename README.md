@@ -149,12 +149,30 @@ URL through the configured service identity, such as a TappedIn account on
 The Linux server installer is `scripts/install-aaastreamer-server.sh`. It
 creates a service account, installs dependencies, pulls the repository, creates
 owned data/media/upload folders under `/var/lib/aaastreamer` by default, writes
-`/etc/aaastreamer/aaastreamer.env`, creates a systemd service, and can create an
-nginx vhost when `DOMAIN` is provided. Self-hosted installs should keep media
+`/etc/aaastreamer/aaastreamer.env`, and creates native systemd services for both
+the AAAStreamer API and MediaMTX RTMP/HLS engine. MediaMTX is pinned to a known
+release and its downloaded archive is checked against the checksum published
+with that release before installation. The installer can also create an nginx
+vhost when `DOMAIN` is provided. Self-hosted installs should keep media
 inside folders owned by the app user unless the admin deliberately adds a
 mounted or external folder that the service account can read. Normal web UI
 folder management presents those approved folders as selectable rows with
 actions, not free-form path entry.
+
+Each stream owner can attach custom hostnames from the dashboard Domains tab.
+AAAStreamer issues a unique TXT challenge and does not route that hostname until
+DNS ownership has been verified. Verification authorizes only the in-app host
+mapping; the server operator still controls TLS certificates, reverse-proxy
+listeners, and any DNS changes.
+
+Live input options include OBS-compatible RTMP publishing and HTTP, HLS,
+Icecast, or Shoutcast listener relays. Authenticated API clients can add a relay
+with `POST /api/client/v1/streams/:streamId/sources` and start it with
+`POST /api/client/v1/streams/:streamId/sources/:sourceId/start`. Browser-session
+aliases without `/client/v1` remain available. Use `mediaType` set to
+`audio` or `video`, `protocol` set to `http`, `hls`, `icecast`, or `shoutcast`,
+and an HTTP(S) `url`. Docker Compose remains available for portable and hosted
+deployments; the native installer is the preferred system installation.
 
 Customer-owned installs can use their own PayPal, Apple Pay, Stripe links, or
 other creator payment methods. License, invoice, install ID, product ID, domain,

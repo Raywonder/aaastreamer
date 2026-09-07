@@ -191,7 +191,10 @@ configured Mastodon identity, such as a TappedIn bot or user on `md.tappedin.fm`
 `scripts/install-aaastreamer-server.sh` is the Linux server installer. It
 installs dependencies, creates a service user, pulls the app, creates owned
 data, media, and upload folders under `/var/lib/aaastreamer` by default, writes
-the env file, creates a systemd service, and optionally writes an nginx vhost.
+the env file, and creates native systemd services for the API and MediaMTX.
+The MediaMTX release is pinned and the selected archive must match its official
+release checksum before it is installed. The installer can optionally write an
+nginx vhost.
 Self-hosted installs should use those owned folders unless an administrator
 explicitly grants the service account access to mounted media paths.
 
@@ -264,6 +267,26 @@ Recommended defaults:
 - 2 second keyframe interval
 - low-latency mode with 2 second target latency and 4 second player buffer
 - low-latency HLS with 1 second segments, 200 ms parts, and 7 retained segments
+
+HTTP(S) live relays can be classified as ordinary HTTP media, HLS, Icecast, or
+Shoutcast. Icecast and Shoutcast sources use the public listener or mount-point
+URL, not an administration URL or source password. AAAStreamer reconnects live
+network relays and republishes them through the stream's normal HLS output.
+Authenticated stream owners and administrators can create these sources through
+`POST /api/client/v1/streams/:streamId/sources` and start a saved source through
+`POST /api/client/v1/streams/:streamId/sources/:sourceId/start`. These routes
+accept a signed-in browser session or an authorized native-client bearer token.
+
+## Stream-owned domains
+
+The dashboard Domains tab lets a stream owner request a hostname and displays a
+unique `_aaastreamer.<hostname>` TXT challenge. The hostname stays pending until
+the exact challenge is visible through DNS. A verified hostname can select the
+owner's stream when the request reaches AAAStreamer with that Host header.
+Certificate issuance, proxy listener configuration, and provider-side DNS
+changes remain separate operator actions; adding a hostname in the user panel
+does not perform them automatically. A domain cannot be assigned to more than
+one stream or replace the installation's primary hostname.
 
 Each stream can override latency mode, target live latency, player buffer, and
 reconnect buffer from the user dashboard. Lower latency is best for interactive

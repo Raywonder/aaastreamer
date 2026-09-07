@@ -107,8 +107,25 @@ const sourcePresets = [
     id: 'audioRelay',
     name: 'Audio stream URL',
     mediaType: 'audio',
+    protocol: 'http',
     label: 'Remote audio stream or radio relay',
     placeholder: 'https://example.com/live.mp3'
+  },
+  {
+    id: 'icecastRelay',
+    name: 'Icecast audio stream',
+    mediaType: 'audio',
+    protocol: 'icecast',
+    label: 'Icecast mount-point listener URL',
+    placeholder: 'https://radio.example.com/live.mp3'
+  },
+  {
+    id: 'shoutcastRelay',
+    name: 'Shoutcast audio stream',
+    mediaType: 'audio',
+    protocol: 'shoutcast',
+    label: 'Shoutcast listener URL',
+    placeholder: 'https://radio.example.com/;stream.mp3'
   },
   {
     id: 'videoRelay',
@@ -121,6 +138,7 @@ const sourcePresets = [
     id: 'hlsRelay',
     name: 'HLS playlist URL',
     mediaType: 'video',
+    protocol: 'hls',
     label: 'Remote HLS playlist',
     placeholder: 'https://example.com/live/index.m3u8'
   },
@@ -396,6 +414,41 @@ function ipVersion(ip) {
 
 function requestHostName(req) {
   return String(req.get('x-forwarded-host') || req.get('host') || '').split(',')[0].trim().toLowerCase().replace(/:\d+$/, '').slice(0, 255);
+}
+
+function normalizeHostedDomainName(value = '') {
+  const host = String(value || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/[\/:].*$/, '').replace(/^\.+|\.+$/g, '');
+  if (!host || host.length > 253 || host === 'localhost' || !host.includes('.')) return '';
+  if (!/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(host)) return '';
+  return host;
+}
+
+function normalizeStreamDomain(domain = {}) {
+  const hostname = normalizeHostedDomainName(domain.hostname || domain.domain);
+  if (!hostname) return null;
+  const status = ['pending', 'verified', 'disabled', 'error'].includes(domain.status) ? domain.status : 'pending';
+  return {
+    id: String(domain.id || id('dom')).slice(0, 80),
+    hostname,
+    status,
+    enabled: domain.enabled !== false,
+    verificationToken: String(domain.verificationToken || crypto.randomBytes(18).toString('base64url')).slice(0, 120),
+    verifiedAt: domain.verifiedAt || '',
+    lastCheckedAt: domain.lastCheckedAt || '',
+    lastError: String(domain.lastError || '').slice(0, 300),
+    createdAt: domain.createdAt || nowIso(),
+    updatedAt: domain.updatedAt || domain.createdAt || nowIso()
+  };
+}
+
+function verifiedStreamDomain(stream) {
+  return (stream?.customDomains || []).find((domain) => domain.enabled && domain.status === 'verified') || null;
+}
+
+function streamForHostedDomain(store, hostname) {
+  const normalized = normalizeHostedDomainName(hostname);
+  if (!normalized) return null;
+  return (store.streams || []).find((stream) => (stream.customDomains || []).some((domain) => domain.hostname === normalized && domain.enabled && domain.status === 'verified')) || null;
 }
 
 async function reverseDnsHost(ip) {
@@ -1198,6 +1251,7 @@ function normalizeStream(stream) {
   stream.encoderKeys ||= [];
   stream.destinations ||= [];
   stream.links ||= [];
+  stream.customDomains = (stream.customDomains || []).map(normalizeStreamDomain).filter(Boolean).slice(0, 20);
   stream.backgroundImage ||= '';
   stream.encoderSettings = { ...defaultEncoderSettings(), ...(stream.encoderSettings || {}) };
   stream.latencySettings = { ...defaultLatencySettings(), ...(stream.latencySettings || {}) };
@@ -1262,6 +1316,11 @@ function normalizeStreamSource(source) {
   if (!source || typeof source !== 'object') return null;
   const type = ['localMedia', 'urlRelay'].includes(source.type) ? source.type : null;
   if (!type) return null;
+  const protocol = type === 'urlRelay'
+    ? (['http', 'hls', 'icecast', 'shoutcast'].includes(source.protocol)
+        ? source.protocol
+        : /\.m3u8(?:$|\?)/i.test(source.url || '') ? 'hls' : 'http')
+    : '';
   return {
     id: source.id || id('src'),
     type,
@@ -1270,6 +1329,7 @@ function normalizeStreamSource(source) {
     folderId: source.folderId || '',
     relativePath: source.relativePath || '',
     url: source.url || '',
+    protocol,
     enabled: source.enabled !== false,
     enableAt: source.enableAt || '',
     autoEnabled: source.autoEnabled === true,
@@ -1698,6 +1758,7 @@ function publicStreamSummary(stream, store, includePrivate = false) {
     nowPlaying: publicPlaybackMetadata(stream),
     nowPlayingHtml: nowPlayingClientHtml(publicPlaybackMetadata(stream)),
     watchUrl: watchUrlFor(stream),
+    hostedDomains: (stream.customDomains || []).filter((domain) => domain.enabled && domain.status === 'verified').map((domain) => ({ hostname: domain.hostname, url: `https://${domain.hostname}/` })),
     playbackUrl: playbackUrl || null,
     hlsUrl: isLive(stream) || continuousOnDemandRelay ? (stream.hlsUrl || hlsUrlFor(stream.activeEncoderKey || stream.streamKey)) : null,
     updatedAt: stream.updatedAt,
@@ -1711,6 +1772,7 @@ function publicStreamSummary(stream, store, includePrivate = false) {
     safe.currentSource = stream.currentSource;
     safe.relaySources = stream.relaySources;
     safe.sourceQueue = stream.sourceQueue;
+    safe.customDomains = stream.customDomains;
   }
   safe.sourceQueueCount = stream.sourceQueue?.length || 0;
   return safe;
@@ -2034,6 +2096,7 @@ function ensureStreamForUser(store, user, body = {}) {
     sourceMode: 'rtmp',
     currentSource: null,
     relaySources: [],
+    customDomains: [],
     latencySettings: {
       ...defaultLatencySettings(),
       mode: encoderDefaults.latencyMode || 'low',
@@ -2849,7 +2912,7 @@ function sourcePresetCards(stream, serverUrl) {
     if (preset.id === 'upload') {
       return `<article class="preset-card"><h3>${escapeHtml(preset.name)}</h3><p>${escapeHtml(preset.label)}</p><p><a class="button" href="#mediaUpload">Choose upload file</a></p></article>`;
     }
-    return `<article class="preset-card"><h3>${escapeHtml(preset.name)}</h3><p>${escapeHtml(preset.label)}</p><button type="button" data-source-preset="${escapeHtml(preset.id)}" data-source-label="${escapeHtml(preset.label)}" data-source-media-type="${escapeHtml(preset.mediaType)}" data-source-placeholder="${escapeHtml(preset.placeholder || '')}">Use this source type</button></article>`;
+    return `<article class="preset-card"><h3>${escapeHtml(preset.name)}</h3><p>${escapeHtml(preset.label)}</p><button type="button" data-source-preset="${escapeHtml(preset.id)}" data-source-label="${escapeHtml(preset.label)}" data-source-media-type="${escapeHtml(preset.mediaType)}" data-source-protocol="${escapeHtml(preset.protocol || 'http')}" data-source-placeholder="${escapeHtml(preset.placeholder || '')}">Use this source type</button></article>`;
   }).join('');
 }
 
@@ -2862,6 +2925,7 @@ function dashboardTabs(active) {
     ['destinations', 'Destinations'],
     ['schedule', 'Calendar'],
     ['wordpress', 'Plugin connector'],
+    ['domains', 'Domains'],
     ['profile', 'Stream profile'],
     ['support', 'Support and payments'],
     ['account', 'Account'],
@@ -3201,11 +3265,15 @@ function sourceFromRequest(req, store, user) {
     if (!settings.urlRelayEnabled || (!settings.allowUsersToAddRelayUrls && user?.role !== 'admin')) return null;
     const url = String(req.body.relayUrl || '').trim();
     if (!/^https?:\/\//i.test(url)) return null;
+    const protocol = ['http', 'hls', 'icecast', 'shoutcast'].includes(req.body.relayProtocol)
+      ? req.body.relayProtocol
+      : /\.m3u8(?:$|\?)/i.test(url) ? 'hls' : 'http';
     return normalizeStreamSource({
       type: 'urlRelay',
       url: url.slice(0, 1200),
       label: String(req.body.relayLabel || url).trim().slice(0, 160),
       mediaType: req.body.relayMediaType === 'audio' ? 'audio' : 'video',
+      protocol,
       enabled: true
     });
   }
@@ -3355,10 +3423,20 @@ function startSourceProcess(stream, source, store) {
   const args = [
     '-hide_banner',
     '-loglevel', 'warning',
-    '-fflags', '+genpts',
-    '-re'
+    '-fflags', '+genpts'
   ];
-  if (!hasQueue) {
+  const liveNetworkRelay = source?.type === 'urlRelay' && ['hls', 'icecast', 'shoutcast'].includes(source.protocol);
+  if (liveNetworkRelay) {
+    args.push(
+      '-reconnect', '1',
+      '-reconnect_streamed', '1',
+      '-reconnect_at_eof', '1',
+      '-reconnect_delay_max', '10'
+    );
+  } else {
+    args.push('-re');
+  }
+  if (!hasQueue && !liveNetworkRelay) {
     args.push('-stream_loop', '-1');
   }
   args.push(
@@ -3611,6 +3689,8 @@ function clientCapabilitiesFor(user = null) {
       comments: true,
       passkeys: true,
       totp: true,
+      relaySources: canBroadcast(user),
+      streamDomains: canBroadcast(user),
       streamControl: false,
       adminControl: false
     }
@@ -4090,6 +4170,11 @@ app.use((req, res, next) => {
 
 app.get('/', (req, res) => {
   const store = readStore();
+  const hostedStream = streamForHostedDomain(store, requestHostName(req));
+  if (hostedStream) {
+    res.redirect(`/s/${encodeURIComponent(hostedStream.slug)}`);
+    return;
+  }
   const branding = store.settings.platformBranding || defaultPlatformBranding();
   const streams = store.streams.filter((stream) => streamIsPubliclyListable(stream, store));
   const body = `<h1>${escapeHtml(branding.platformName || store.settings.siteName)}</h1>
@@ -4493,7 +4578,7 @@ app.get('/dashboard', (req, res) => {
   stream.support = effectiveSupportSettings(stream, user, store.settings);
   const shareLink = ensureShareLink(store, stream, user.id);
   writeStore(store);
-  const activeTab = ['overview', 'downloads', 'media', 'encoders', 'destinations', 'schedule', 'wordpress', 'profile', 'support', 'account', 'advanced'].includes(req.query.tab) ? req.query.tab : 'overview';
+  const activeTab = ['overview', 'downloads', 'media', 'encoders', 'destinations', 'schedule', 'wordpress', 'domains', 'profile', 'support', 'account', 'advanced'].includes(req.query.tab) ? req.query.tab : 'overview';
   const serverUrl = rtmpUrlFor(stream.streamKey);
   const watchUrl = watchUrlFor(stream);
   const shareUrl = tokenUrlFor(shareLink.token);
@@ -4507,7 +4592,8 @@ app.get('/dashboard', (req, res) => {
   const destinationRows = (stream.destinations || []).map((destination) => `<tr><td><input type="checkbox" form="destinationStateForm" name="destinationIds" value="${escapeHtml(destination.id)}" aria-label="Select ${escapeHtml(destination.name)} for a bulk action"></td><td>${destination.enabled ? 'Live enabled' : 'Disabled'}</td><td>${escapeHtml(destination.name)}</td><td>${escapeHtml(destination.platform)}</td><td>${destination.connected ? 'connected' : 'manual setup'}</td><td><details><summary>Show manual RTMP</summary><code>${escapeHtml(destination.rtmpUrl)}</code></details></td><td><form method="post" action="/dashboard/destinations/${escapeHtml(destination.id)}/delete" data-confirm-kind="remove" data-confirm-message="Remove ${escapeHtml(destination.name)} from your destinations?"><button type="submit" class="danger">Remove destination</button></form><p class="muted">Removes this destination from your saved streaming targets.</p></td></tr>`).join('');
   const presetOptions = platformPresets.map((preset) => `<option value="${escapeHtml(preset.id)}" data-ingest="${escapeHtml(preset.ingest)}" data-connect="${escapeHtml(preset.connectUrl || preset.url || '')}" data-services="${escapeHtml((preset.services || []).join(', '))}">${escapeHtml(preset.name)}</option>`).join('');
   const selectedSource = stream.currentSource || null;
-  const relayRows = (stream.relaySources || []).map((source) => `<tr><td>${escapeHtml(source.label)}</td><td>${escapeHtml(source.mediaType)}</td><td><a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">Open source URL</a></td><td><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/select" class="inline-form" data-confirm-kind="live" data-confirm-message="Start streaming ${escapeHtml(source.label)} now?"><button type="submit">Start streaming this source</button></form><p class="muted">Starts this URL relay immediately as the current stream source.</p><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/delete" class="inline-form" data-confirm-kind="remove" data-confirm-message="Remove ${escapeHtml(source.label)} from your media sources?"><button type="submit" class="danger">Remove relay source</button></form><p class="muted">Removes this saved URL relay source.</p></td></tr>`).join('');
+  const relayRows = (stream.relaySources || []).map((source) => `<tr><td>${escapeHtml(source.label)}</td><td>${escapeHtml(source.mediaType)}</td><td>${escapeHtml(source.protocol || 'http')}</td><td><a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">Open source URL</a></td><td><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/select" class="inline-form" data-confirm-kind="live" data-confirm-message="Start streaming ${escapeHtml(source.label)} now?"><button type="submit">Start streaming this source</button></form><p class="muted">Starts this URL relay immediately as the current stream source.</p><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/delete" class="inline-form" data-confirm-kind="remove" data-confirm-message="Remove ${escapeHtml(source.label)} from your media sources?"><button type="submit" class="danger">Remove relay source</button></form><p class="muted">Removes this saved URL relay source.</p></td></tr>`).join('');
+  const domainRows = (stream.customDomains || []).map((domain) => `<tr><td>${escapeHtml(domain.hostname)}</td><td>${escapeHtml(domain.status)}</td><td>${domain.enabled ? 'enabled' : 'disabled'}</td><td><code>_aaastreamer.${escapeHtml(domain.hostname)}</code></td><td><code>aaastreamer-verification=${escapeHtml(domain.verificationToken)}</code></td><td>${domain.lastError ? escapeHtml(domain.lastError) : escapeHtml(domain.verifiedAt || 'Not verified yet')}</td><td><form method="post" action="/dashboard/domains/${escapeHtml(domain.id)}/verify" class="inline-form"><button type="submit">Verify DNS</button></form><form method="post" action="/dashboard/domains/${escapeHtml(domain.id)}/remove" class="inline-form" data-confirm-kind="remove" data-confirm-message="Remove ${escapeHtml(domain.hostname)} from this stream?"><button type="submit" class="danger">Remove domain</button></form></td></tr>`).join('');
   const queueRows = queuedSourceRows(stream, store);
   const activeSourceRunning = sourceProcesses.has(stream.id);
   const quickSourceCards = activeTab === 'media' ? sourcePresetCards(stream, serverUrl) : '';
@@ -4570,9 +4656,9 @@ app.get('/dashboard', (req, res) => {
 <section class="subsection"><h3>Library folders</h3><p class="muted">These are the server folders currently available to this account for live or on-demand playback. The file count only includes supported audio and video formats that AAAStreamer can read.</p><table><tr><th>Library</th><th>Types</th><th>Access</th><th>Usable files</th></tr>${mediaFolderRows}</table></section>
 ${mediaBrowser}
 <form method="post" action="/dashboard/sources/upload" data-confirm-kind="add" data-confirm-message="Upload and add the selected media files?"><label>Upload audio or video files<input id="mediaUpload" type="file" accept="audio/*,video/*" multiple></label><input type="hidden" id="mediaUploadData" name="uploadData"><label>Upload title<input name="uploadLabel" placeholder="Intro music, event replay, audio described movie"></label><button type="submit">Upload media</button></form>
-<form method="post" action="/dashboard/sources/url" data-confirm-kind="add" data-confirm-message="Add this URL relay source?"><input type="hidden" name="sourceType" value="urlRelay"><label>Relay label<input id="relayLabel" name="relayLabel" placeholder="Radio relay, remote event, training video"></label><label>Media type<select id="relayMediaType" name="relayMediaType"><option value="video">video</option><option value="audio">audio</option></select></label><label>HTTP or HTTPS media URL<input id="relayUrl" name="relayUrl" placeholder="https://example.com/stream.mp3"></label><button type="submit">Add URL relay source</button></form>
+<form method="post" action="/dashboard/sources/url" data-confirm-kind="add" data-confirm-message="Add this URL relay source?"><input type="hidden" name="sourceType" value="urlRelay"><label>Relay label<input id="relayLabel" name="relayLabel" placeholder="Radio relay, remote event, training video"></label><label>Media type<select id="relayMediaType" name="relayMediaType"><option value="video">video</option><option value="audio">audio</option></select></label><label>Source protocol<select id="relayProtocol" name="relayProtocol"><option value="http">HTTP or HTTPS media</option><option value="hls">HLS playlist</option><option value="icecast">Icecast listener URL</option><option value="shoutcast">Shoutcast listener URL</option></select></label><label>Listening or media URL<input id="relayUrl" name="relayUrl" placeholder="https://example.com/stream.mp3"></label><button type="submit">Add URL relay source</button></form>
 <section class="subsection"><h3>Source queue</h3><table><tr><th>Name</th><th>Type</th><th>Source</th><th>Actions</th></tr>${queueRows || '<tr><td colspan="4">No queued sources. Upload or check media to build a playlist.</td></tr>'}</table><form method="post" action="/dashboard/sources/queue/clear" class="inline-form" data-confirm-kind="remove" data-confirm-message="Clear all queued media?"><button type="submit" class="danger">Clear playback queue</button></form><p class="muted">Clears the queued list without deleting uploaded or server media.</p><form method="post" action="/dashboard/sources/action" class="inline-form"><label>Playback action<select name="sourceAction"><option value="start">Start playing selected or queued media now</option><option value="loop">Loop the current source continuously</option><option value="random">Play queued media in random order</option><option value="stop">Stop playback and disable source relay</option></select></label><button type="submit">Apply playback action</button></form><p class="muted">This changes what the stream plays now; media files stay in your library.</p></section>
-<table><tr><th>Name</th><th>Type</th><th>URL</th><th>Actions</th></tr>${relayRows || '<tr><td colspan="4">No URL relay sources configured.</td></tr>'}</table></section>
+<table><tr><th>Name</th><th>Type</th><th>Protocol</th><th>URL</th><th>Actions</th></tr>${relayRows || '<tr><td colspan="5">No URL relay sources configured.</td></tr>'}</table></section>
 <div id="mediaReviewLayer" class="media-review-layer" hidden role="dialog" aria-modal="true" aria-labelledby="mediaReviewTitle">
   <div class="media-review-panel">
     <div class="media-review-head">
@@ -4593,9 +4679,10 @@ ${mediaBrowser}
   const wordpressTab = wordpressAllowed
     ? `<section><h2>Plugin connector</h2><p class="muted">Connect a site plugin to this stream so pages outside AAAStreamer can embed the player, account tools, and comments while AAAStreamer remains the streaming authority.</p><form method="post" action="/dashboard/wordpress"><label>WordPress site URL<input name="siteUrl" value="${escapeHtml(primaryWordPressSite.siteUrl || '')}" placeholder="https://example.com"></label><label>WordPress listen page URL<input name="listenPageUrl" value="${escapeHtml(primaryWordPressSite.listenPageUrl || '')}" placeholder="https://example.com/listen"></label><label>Plugin REST base URL<input name="restBaseUrl" value="${escapeHtml(primaryWordPressSite.restBaseUrl || '')}" placeholder="https://example.com/index.php?rest_route=/aaastreamer/v1"></label><label><input type="checkbox" name="enabled" value="true" ${primaryWordPressSite.enabled ? 'checked' : ''}> Enable this WordPress site connection</label><label><input type="checkbox" name="commentsEnabled" value="true" ${primaryWordPressSite.commentsEnabled ? 'checked' : ''}> Allow comments from the WordPress stream page</label><label><input type="checkbox" name="hideCommentsOnStreamPage" value="true" ${primaryWordPressSite.hideCommentsOnStreamPage ? 'checked' : ''}> Hide comments on the normal AAAStreamer watch page for this stream</label><button type="submit">Save plugin connector</button></form><section class="subsection"><h3>Embed shortcodes</h3><p><code>[aaastreamer_player]</code></p><p><code>[aaastreamer_comments]</code></p><p><code>[aaastreamer_account_panel]</code></p></section><section class="subsection"><h3>Connected plugin sites</h3><table><tr><th>Site</th><th>Stream</th><th>Plugin version</th><th>Status</th><th>Comments</th><th>Health</th><th>Last check-in</th><th>Last error</th></tr>${wordpressConnectorSiteRows(store, wordpressSites) || '<tr><td colspan="8">No plugin check-ins yet. Save the connector here, then save settings in the site plugin once.</td></tr>'}</table></section></section>`
     : `<section><h2>Plugin connector</h2><p>This account does not currently have plugin connector access. Contact an administrator if this stream should be embedded on an external site.</p></section>`;
+  const domainsTab = `<section><h2>Hosted domains</h2><p class="muted">Attach a domain you control to this stream. Add the displayed TXT record at your DNS provider, then choose Verify DNS. AAAStreamer will not route the domain until ownership is verified. TLS certificates and the hosting proxy must also be configured for the verified domain by the server operator.</p><table><tr><th>Domain</th><th>Verification</th><th>Routing</th><th>TXT record name</th><th>TXT record value</th><th>Last check</th><th>Actions</th></tr>${domainRows || '<tr><td colspan="7">No custom domains are attached to this stream.</td></tr>'}</table><form method="post" action="/dashboard/domains" data-confirm-kind="add" data-confirm-message="Add this domain and create an ownership-verification challenge?"><label>Domain name<input name="hostname" inputmode="url" placeholder="radio.example.com" required></label><button type="submit">Add domain</button></form></section>`;
   const downloadsTab = nativeClientDownloadsHtml(store, user);
   const advancedTab = `<section><h2>On-demand display</h2><form method="post" action="/dashboard/sources/ondemand"><label><input type="checkbox" name="enabled" value="true" ${stream.onDemand?.enabled ? 'checked' : ''}> Enable on-demand playback</label><label><input type="checkbox" name="showWhenOffline" value="true" ${stream.onDemand?.showWhenOffline ? 'checked' : ''}> Show to visitors when offline and selected media is available</label><label>On-demand title<input name="title" value="${escapeHtml(stream.onDemand?.title || '')}"></label><button type="submit">Save on-demand settings</button></form></section>`;
-  const selectedBody = { overview: overviewTab, downloads: downloadsTab, media: mediaTab, encoders: encodersTab, destinations: destinationsTab, schedule: scheduleTab, wordpress: wordpressTab, profile: profileTab, support: supportTab, account: accountTab, advanced: advancedTab }[activeTab];
+  const selectedBody = { overview: overviewTab, downloads: downloadsTab, media: mediaTab, encoders: encodersTab, destinations: destinationsTab, schedule: scheduleTab, wordpress: wordpressTab, domains: domainsTab, profile: profileTab, support: supportTab, account: accountTab, advanced: advancedTab }[activeTab];
   const body = `<h1>User panel</h1>${reminderHtml}${tabs}${selectedBody}<script>
 const copyStatus=document.getElementById('copyStatus');
 const confirmationPreferences=${JSON.stringify(user.confirmationPreferences || {})};
@@ -4627,10 +4714,12 @@ const destinationServices=document.getElementById('destinationServices');
 if(platformPreset){platformPreset.addEventListener('change',()=>{const option=platformPreset.selectedOptions[0];if(option && !destinationRtmpUrl.value){destinationRtmpUrl.value=option.dataset.ingest||'';} if(destinationConnectLink){const connect=option?.dataset.connect||'';destinationConnectLink.href=connect||'#';destinationConnectLink.style.display=connect?'inline-block':'none';destinationConnectLink.textContent=connect?'Open '+option.textContent+' setup':'Manual setup only';} if(destinationServices){destinationServices.textContent=option?.dataset.services?'Supported through this service: '+option.dataset.services:'Manual RTMP destination.';}});platformPreset.dispatchEvent(new Event('change'));}
 const relayLabel=document.getElementById('relayLabel');
 const relayMediaType=document.getElementById('relayMediaType');
+const relayProtocol=document.getElementById('relayProtocol');
 const relayUrl=document.getElementById('relayUrl');
 document.querySelectorAll('[data-source-preset]').forEach((button)=>button.addEventListener('click',()=>{
   if(relayLabel) relayLabel.value=button.dataset.sourceLabel||'Remote source';
   if(relayMediaType) relayMediaType.value=button.dataset.sourceMediaType||'video';
+  if(relayProtocol) relayProtocol.value=button.dataset.sourceProtocol||'http';
   if(relayUrl){
     relayUrl.placeholder=button.dataset.sourcePlaceholder||'https://example.com/stream';
     relayUrl.focus();
@@ -4890,6 +4979,74 @@ app.post('/dashboard/sources/url', requireBroadcaster, (req, res) => {
   store.events.push({ id: id('evt'), type: 'url_relay_source_added', payload: { streamId: stream.id, label: source.label }, createdAt: nowIso() });
   writeStore(store);
   res.redirect('/dashboard?tab=media');
+});
+
+app.post('/dashboard/domains', requireBroadcaster, (req, res) => {
+  const store = readStore();
+  const user = store.users.find((item) => item.id === req.user.id);
+  const stream = ensureStreamForUser(store, user);
+  const hostname = normalizeHostedDomainName(req.body.hostname);
+  if (!hostname) {
+    res.status(400).send(page('Domain not saved', '<h1>Domain not saved</h1><p>Enter a complete domain such as radio.example.com.</p><a class="button" href="/dashboard?tab=domains">Back to domains</a>', req.user));
+    return;
+  }
+  const primaryHost = (() => { try { return normalizeHostedDomainName(new URL(publicUrl).hostname); } catch { return ''; } })();
+  const usedBy = store.streams.find((item) => item.id !== stream.id && (item.customDomains || []).some((domain) => domain.hostname === hostname));
+  if (hostname === primaryHost || usedBy) {
+    res.status(409).send(page('Domain not available', '<h1>Domain not available</h1><p>This domain is already reserved by this installation or another stream.</p><a class="button" href="/dashboard?tab=domains">Back to domains</a>', req.user));
+    return;
+  }
+  stream.customDomains ||= [];
+  const existing = stream.customDomains.find((domain) => domain.hostname === hostname);
+  if (!existing) {
+    stream.customDomains.push(normalizeStreamDomain({ hostname, status: 'pending', enabled: true }));
+    stream.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'stream_domain_added', payload: { streamId: stream.id, hostname }, createdAt: nowIso() });
+    writeStore(store);
+  }
+  res.redirect('/dashboard?tab=domains');
+});
+
+app.post('/dashboard/domains/:domainId/verify', requireBroadcaster, async (req, res) => {
+  const store = readStore();
+  const stream = store.streams.find((item) => item.ownerId === req.user.id);
+  const domain = stream?.customDomains?.find((item) => item.id === req.params.domainId);
+  if (!stream || !domain) {
+    res.status(404).send(page('Domain not found', '<h1>Domain not found</h1><a class="button" href="/dashboard?tab=domains">Back to domains</a>', req.user));
+    return;
+  }
+  domain.lastCheckedAt = nowIso();
+  try {
+    const records = await dns.promises.resolveTxt(`_aaastreamer.${domain.hostname}`);
+    const values = records.map((parts) => parts.join(''));
+    const expected = `aaastreamer-verification=${domain.verificationToken}`;
+    if (!values.includes(expected)) throw new Error('The expected TXT verification value was not found.');
+    domain.status = 'verified';
+    domain.verifiedAt = nowIso();
+    domain.lastError = '';
+    domain.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'stream_domain_verified', payload: { streamId: stream.id, hostname: domain.hostname }, createdAt: nowIso() });
+  } catch (error) {
+    domain.status = 'pending';
+    domain.lastError = String(error?.message || 'DNS verification failed').slice(0, 300);
+    domain.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'stream_domain_verification_failed', payload: { streamId: stream.id, hostname: domain.hostname }, createdAt: nowIso() });
+  }
+  writeStore(store);
+  res.redirect('/dashboard?tab=domains');
+});
+
+app.post('/dashboard/domains/:domainId/remove', requireBroadcaster, (req, res) => {
+  const store = readStore();
+  const stream = store.streams.find((item) => item.ownerId === req.user.id);
+  const domain = stream?.customDomains?.find((item) => item.id === req.params.domainId);
+  if (stream && domain) {
+    stream.customDomains = stream.customDomains.filter((item) => item.id !== domain.id);
+    stream.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'stream_domain_removed', payload: { streamId: stream.id, hostname: domain.hostname }, createdAt: nowIso() });
+    writeStore(store);
+  }
+  res.redirect('/dashboard?tab=domains');
 });
 
 app.post('/dashboard/sources/upload', requireBroadcaster, (req, res) => {
@@ -6586,6 +6743,77 @@ app.get('/api/streams/:streamId', (req, res) => {
   ensureContinuousOnDemandRelayForStream(store, stream, 'api_stream');
   res.json({ success: true, stream: publicStreamSummary(stream, store, user?.role === 'admin' || stream.ownerId === user?.id) });
 });
+
+function addApiStreamSource(req, res) {
+  const store = readStore();
+  const stream = store.streams.find((item) => item.id === req.params.streamId || item.slug === req.params.streamId);
+  if (!stream || !canEditStream(req.user, stream)) {
+    res.status(404).json({ success: false, error: 'Stream not found' });
+    return;
+  }
+  const source = sourceFromRequest({
+    ...req,
+    body: {
+      sourceType: 'urlRelay',
+      relayUrl: req.body.url,
+      relayLabel: req.body.label,
+      relayMediaType: req.body.mediaType,
+      relayProtocol: req.body.protocol
+    }
+  }, store, req.user);
+  if (!source) {
+    res.status(400).json({ success: false, error: 'Use an HTTP or HTTPS source URL and a supported protocol: http, hls, icecast, or shoutcast.' });
+    return;
+  }
+  stream.relaySources = [source, ...(stream.relaySources || []).filter((item) => item.url !== source.url)].slice(0, 20);
+  if (req.body.select !== false) {
+    stream.currentSource = source;
+    stream.sourceMode = 'url';
+  }
+  stream.updatedAt = nowIso();
+  store.events.push({ id: id('evt'), type: 'api_stream_source_added', payload: { streamId: stream.id, sourceId: source.id, protocol: source.protocol }, createdAt: nowIso() });
+  writeStore(store);
+  res.status(201).json({ success: true, source });
+}
+
+function startApiStreamSource(req, res) {
+  const store = readStore();
+  const stream = store.streams.find((item) => item.id === req.params.streamId || item.slug === req.params.streamId);
+  const source = stream?.relaySources?.find((item) => item.id === req.params.sourceId);
+  if (!stream || !source || !canEditStream(req.user, stream)) {
+    res.status(404).json({ success: false, error: 'Stream source not found' });
+    return;
+  }
+  try {
+    stream.currentSource = source;
+    stream.sourceMode = 'url';
+    startSourceProcess(stream, source, store);
+    stream.hlsUrl = hlsUrlFor(stream.streamKey);
+    stream.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'api_stream_source_started', payload: { streamId: stream.id, sourceId: source.id, protocol: source.protocol }, createdAt: nowIso() });
+    writeStore(store);
+    res.json({ success: true, source, hlsUrl: stream.hlsUrl });
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error?.message || 'Source could not be started').slice(0, 300) });
+  }
+}
+
+function getApiStreamDomains(req, res) {
+  const store = readStore();
+  const stream = store.streams.find((item) => item.id === req.params.streamId || item.slug === req.params.streamId);
+  if (!stream || !canEditStream(req.user, stream)) {
+    res.status(404).json({ success: false, error: 'Stream not found' });
+    return;
+  }
+  res.json({ success: true, domains: stream.customDomains || [] });
+}
+
+app.post('/api/streams/:streamId/sources', requireNativeClientUser, addApiStreamSource);
+app.post('/api/streams/:streamId/sources/:sourceId/start', requireNativeClientUser, startApiStreamSource);
+app.get('/api/streams/:streamId/domains', requireNativeClientUser, getApiStreamDomains);
+app.post('/api/client/v1/streams/:streamId/sources', requireNativeClientUser, addApiStreamSource);
+app.post('/api/client/v1/streams/:streamId/sources/:sourceId/start', requireNativeClientUser, startApiStreamSource);
+app.get('/api/client/v1/streams/:streamId/domains', requireNativeClientUser, getApiStreamDomains);
 
 app.post('/api/streams/:streamId/playback/ensure', (req, res) => {
   const store = readStore();
