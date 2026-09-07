@@ -1528,7 +1528,16 @@ function normalizeMediaSettings(settings = {}) {
   const defaults = defaultMediaSettings();
   const configuredFolders = Array.isArray(settings.folders) && settings.folders.length ? settings.folders : [];
   const configuredKeys = new Set(configuredFolders.map((folder) => String(folder.path || '').trim()).filter(Boolean));
-  const defaultFoldersToAdd = defaults.folders.filter((folder) => !configuredKeys.has(folder.path));
+  // Compare resolved defaults with stored paths: wildcard patterns are not
+  // retained in the store and would otherwise be appended on every read.
+  const defaultFoldersToAdd = defaults.folders.flatMap((folder) =>
+    expandMediaFolderPath(folder.path).filter((folderPath) => {
+      if (configuredKeys.has(folderPath)) return false;
+      configuredKeys.add(folderPath);
+      return true;
+    }).map((folderPath) => ({ ...folder, path: folderPath,
+      id: folder.path === folderPath ? folder.id : slugify(folderPath) }))
+  );
   const folders = configuredFolders.length ? [...configuredFolders, ...defaultFoldersToAdd] : defaults.folders;
   const uploadFolder = String(settings.uploadFolder || defaults.uploadFolder).trim();
   const normalizedFolders = folders.flatMap((folder, index) => {
@@ -4317,7 +4326,7 @@ app.get('/api/wordpress/releases/aaastreamer-connector', (req, res) => {
   const paidModulesAllowed = Boolean(auth && (auth.user.role === 'admin' || entitlement?.status === 'active' || entitlement?.unlimited));
   res.setHeader('Cache-Control', 'private, max-age=300');
   res.json({
-    slug: 'aaastreamer-connector', name: 'AAAStreamer Connector', version: '0.2.0',
+    slug: 'aaastreamer-connector', name: 'AAAStreamer Connector', version: '0.2.1',
     packageUrl: wordpressConnectorPackageUrl, requiresWordPress: '6.2', requiresPhp: '7.4',
     modules: [
       { id: 'stream-player', name: 'Stream player and comments', tier: 'free', available: true, bundled: true },

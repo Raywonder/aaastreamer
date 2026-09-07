@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AAAStreamer Connector
  * Description: Connects a WordPress site to an AAAStreamer account, provides an accessible stream player, and keeps listener comments inside WordPress moderation.
- * Version: 0.2.0
+ * Version: 0.2.1
  * Author: Devine Creations
  * License: GPL-2.0-or-later
  * Text Domain: aaastreamer-connector
@@ -16,7 +16,7 @@ final class AAAStreamer_Connector {
     private const OPTION = 'aaastreamer_connector_settings';
     private const NONCE_ACTION = 'aaastreamer_connector_save';
     private const REST_NAMESPACE = 'aaastreamer/v1';
-    private const VERSION = '0.2.0';
+    private const VERSION = '0.2.1';
 
     public static function boot(): void {
         add_action('admin_menu', [__CLASS__, 'admin_menu']);
@@ -28,7 +28,7 @@ final class AAAStreamer_Connector {
         add_action('admin_post_nopriv_aaastreamer_sso', [__CLASS__, 'handle_sso']);
         add_filter('pre_set_site_transient_update_plugins', [__CLASS__, 'check_for_update']);
         add_filter('auto_update_plugin', [__CLASS__, 'allow_auto_update'], 10, 2);
-        add_action('updated_option_' . self::OPTION, [__CLASS__, 'settings_updated'], 10, 3);
+        add_action('update_option_' . self::OPTION, [__CLASS__, 'settings_updated'], 10, 3);
         add_filter('preprocess_comment', [__CLASS__, 'prepare_stream_comment']);
         add_filter('comments_open', [__CLASS__, 'comments_open_for_stream_page'], 9999, 2);
         add_shortcode('aaastreamer_player', [__CLASS__, 'render_player_shortcode']);
@@ -131,7 +131,8 @@ final class AAAStreamer_Connector {
 
     public static function enqueue_frontend(): void {
         wp_register_style('aaastreamer-connector', plugins_url('assets/aaastreamer-connector.css', __FILE__), [], self::VERSION);
-        wp_register_script('aaastreamer-connector', plugins_url('assets/aaastreamer-connector.js', __FILE__), [], self::VERSION, true);
+        wp_register_script('aaastreamer-hls', plugins_url('assets/hls.min.js', __FILE__), [], '1.7.2', true);
+        wp_register_script('aaastreamer-connector', plugins_url('assets/aaastreamer-connector.js', __FILE__), ['aaastreamer-hls'], self::VERSION, true);
     }
 
     public static function enqueue_admin(string $hook): void {
@@ -336,6 +337,7 @@ final class AAAStreamer_Connector {
         wp_enqueue_script('aaastreamer-connector');
         wp_localize_script('aaastreamer-connector', 'AAAStreamerConnector', [
             'streamUrlEndpoint' => esc_url_raw(rest_url(self::REST_NAMESPACE . '/stream-url')),
+            'streamUrlFallbackEndpoint' => esc_url_raw(add_query_arg('rest_route', '/' . self::REST_NAMESPACE . '/stream-url', home_url('/'))),
         ]);
 
         $stream_url = self::resolve_stream_url($settings);
@@ -646,7 +648,7 @@ final class AAAStreamer_Connector {
         $body = (string)wp_remote_retrieve_body($response);
         $resolved = '';
         foreach (preg_split('/\r\n|\r|\n/', $body) as $line) {
-            if (stripos($line, 'File') === 0 && str_contains($line, '=')) {
+            if (stripos($line, 'File') === 0 && strpos($line, '=') !== false) {
                 $resolved = trim((string)substr($line, strpos($line, '=') + 1));
                 break;
             }
@@ -685,7 +687,7 @@ final class AAAStreamer_Connector {
     private static function status_label(array $status): string {
         if (!empty($status['success']) && !empty($status['stream'])) {
             $stream = is_array($status['stream']) ? $status['stream'] : [];
-            if (!empty($stream['isLive']) || !empty($stream['live'])) {
+            if (!empty($stream['hasLivePlayback']) || !empty($stream['isLive']) || !empty($stream['live'])) {
                 return __('Stream status: live.', 'aaastreamer-connector');
             }
             if (!empty($stream['hasOnDemandPlayback']) || !empty($stream['continuousOnDemandRelay'])) {
