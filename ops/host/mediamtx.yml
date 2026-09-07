@@ -1,6 +1,15 @@
 logLevel: info
 logDestinations: [stdout]
 
+authMethod: http
+authHTTPAddress: http://127.0.0.1:8095/api/mediamtx/auth
+authHTTPExclude:
+  - action: read
+  - action: playback
+  - action: api
+  - action: metrics
+  - action: pprof
+
 api: false
 
 playback: false
@@ -22,7 +31,12 @@ hlsPartDuration: 500ms
 hlsSegmentMaxSize: 50M
 hlsMuxerCloseAfter: 120s
 
-webrtc: false
+webrtc: true
+webrtcAddress: :8889
+webrtcAllowOrigins: ['*']
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: :8189
+webrtcAdditionalHosts: []
 srt: false
 moq: false
 

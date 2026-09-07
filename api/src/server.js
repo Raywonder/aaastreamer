@@ -4,6 +4,17 @@ import dns from 'dns';
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
+import { evaluateDomainClaim, isEmailAllowed, normalizeHostingEntitlement } from './account-policy.js';
+import {
+  canonicalIssuer,
+  externalAuthCallbackUrl,
+  identityKey,
+  normalizeExternalAuthState,
+  normalizeLinkedIdentity,
+  pkceChallenge,
+  randomUrlToken,
+  verifyWordPressAssertion
+} from './external-auth.js';
 import {
   generateAuthenticationOptions,
   generateRegistrationOptions,
@@ -47,6 +58,12 @@ const manualMarkdownPath = path.join(repoRoot, 'docs', 'USER-MANUAL.md');
 const hlsPath = process.env.HLS_PATH || '/tmp/hls';
 const publicUrl = (process.env.AAASTREAMER_PUBLIC_URL || '').replace(/\/+$/, '');
 const hlsBaseUrl = (process.env.AAASTREAMER_HLS_BASE_URL || publicUrl || '').replace(/\/+$/, '');
+const whipPublicBaseUrl = (() => {
+  try {
+    const url = new URL(process.env.AAASTREAMER_WHIP_PUBLIC_URL || '');
+    return url.protocol === 'https:' ? url.toString().replace(/\/+$/, '') : '';
+  } catch { return ''; }
+})();
 const rtmpHost = process.env.AAASTREAMER_RTMP_HOST || 'localhost';
 const rtmpAppName = process.env.RTMP_APP_NAME || 'live';
 const requireSecret = process.env.AAASTREAMER_REQUIRE_SECRET === 'true';
@@ -58,12 +75,34 @@ const stripeSecretKey = process.env.AAASTREAMER_STRIPE_SECRET_KEY || '';
 const stripeWebhookSecret = process.env.AAASTREAMER_STRIPE_WEBHOOK_SECRET || '';
 const dnsApiToken = process.env.AAASTREAMER_DNS_API_TOKEN || '';
 const mastodonAccessToken = process.env.AAASTREAMER_MASTODON_ACCESS_TOKEN || '';
+const mastodonCredentialEncryptionSecret = process.env.AAASTREAMER_CREDENTIAL_ENCRYPTION_KEY || '';
+const defaultMastodonAuthIssuer = canonicalIssuer(publicUrl).includes('devinecreations.net') ? 'https://mastodon.devinecreations.net' : 'https://md.tappedin.fm';
+const mastodonAuthProviders = (() => {
+  try {
+    const fallback = process.env.AAASTREAMER_MASTODON_AUTH_CLIENT_ID && process.env.AAASTREAMER_MASTODON_AUTH_CLIENT_SECRET
+      ? [{ issuer: defaultMastodonAuthIssuer, clientId: process.env.AAASTREAMER_MASTODON_AUTH_CLIENT_ID, clientSecret: process.env.AAASTREAMER_MASTODON_AUTH_CLIENT_SECRET, label: defaultMastodonAuthIssuer.includes('devinecreations') ? 'Devine Creations Mastodon' : 'TappedIn Mastodon' }]
+      : [];
+    const providers = JSON.parse(process.env.AAASTREAMER_MASTODON_AUTH_PROVIDERS_JSON || JSON.stringify(fallback));
+    return (Array.isArray(providers) ? providers : []).map((provider) => ({
+      issuer: canonicalIssuer(provider.issuer),
+      clientId: String(provider.clientId || ''),
+      clientSecret: String(provider.clientSecret || ''),
+      label: String(provider.label || '').slice(0, 120)
+    })).filter((provider) => provider.issuer && provider.clientId && provider.clientSecret);
+  } catch {
+    return [];
+  }
+})();
 const allowRestream = process.env.ALLOW_RESTREAM !== 'false';
 const allowAdHocStreams = process.env.AAASTREAMER_ALLOW_AD_HOC_STREAMS === 'true';
 const sessionCookieName = 'aaastreamer_session';
 const sseClients = new Set();
 const appVersion = process.env.AAASTREAMER_VERSION || '0.1.3';
-const updateManifestUrl = process.env.AAASTREAMER_UPDATE_MANIFEST_URL || 'https://raw.githubusercontent.com/Raywonder/aaastreamer/main/api/package.json';
+const masterProductUrl = (process.env.AAASTREAMER_MASTER_URL || 'https://aaastreamer.devinecreations.net').replace(/\/+$/, '');
+const externalAuthBaseUrl = canonicalIssuer(process.env.AAASTREAMER_AUTH_BASE_URL || publicUrl || masterProductUrl);
+const giteaReleaseBaseUrl = (process.env.AAASTREAMER_RELEASE_BASE_URL || 'https://git.tappedin.fm/raywonder/aaastreamer/releases').replace(/\/+$/, '');
+const updateManifestUrl = process.env.AAASTREAMER_UPDATE_MANIFEST_URL || `${giteaReleaseBaseUrl}/latest/download/update-manifest.json`;
+const wordpressConnectorPackageUrl = process.env.AAASTREAMER_WORDPRESS_CONNECTOR_PACKAGE_URL || `${giteaReleaseBaseUrl}/latest/download/aaastreamer-connector.zip`;
 const audioBitrates = ['96k', '128k', '160k', '192k', '256k', '320k'];
 const licenseTierCatalog = [
   { id: 'hosted-starter', model: 'hosted', name: 'AAAStreamer Hosted Starter', setupCents: 0, monthlyCents: 1499, desktopClientIncluded: true, proClientIncluded: false, description: 'Hosted starter station for creators who want Devine Creations to run the infrastructure.' },
@@ -232,6 +271,84 @@ function createLoginSession(store, user, res) {
   res.setHeader('Set-Cookie', `${sessionCookieName}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax`);
 }
 
+function beginInteractiveLogin(store, user, res, method = 'password') {
+  if (!user || user.isBot || user.identityType === 'bot' || user.loginAllowed === false || !user.active) {
+    throw new Error('Interactive login is disabled for this account.');
+  }
+  const privileged = ['manager', 'enterprise', 'admin'].includes(user.role);
+  if (method !== 'password' && store.settings.externalAuth?.requireLocalFallbackForManagers && privileged && !user.passwordHash && !(user.passkeys || []).length) {
+    throw new Error('This server requires manager and administrator accounts to have a local password or passkey fallback. Ask an administrator to set a fallback before using social sign-in.');
+  }
+  user.notificationEmailReminder ||= { enabled: true, everyLogins: 3, everyDays: 14, loginCount: 0, lastShownAt: '' };
+  user.notificationEmailReminder.loginCount = Number(user.notificationEmailReminder.loginCount || 0) + 1;
+  user.updatedAt = nowIso();
+  if (user.totpEnabled) {
+    const token = id('login');
+    store.pendingLogins.push({ token, userId: user.id, method, createdAt: nowIso(), expiresAt: new Date(Date.now() + 1000 * 60 * 10).toISOString() });
+    writeStore(store);
+    return `/login/2fa?token=${encodeURIComponent(token)}`;
+  }
+  createLoginSession(store, user, res);
+  return '/dashboard';
+}
+
+function externalIdentityOwner(store, identity) {
+  const key = identityKey(identity);
+  if (!key) return null;
+  return store.users.find((user) => (user.linkedIdentities || []).some((linked) => identityKey(linked) === key)) || null;
+}
+
+function uniqueSocialUsername(store, candidate, provider) {
+  const base = slugify(candidate || provider).replace(/-/g, '_').slice(0, 32) || provider;
+  let username = base;
+  for (let suffix = 1; store.users.some((user) => user.username.toLowerCase() === username.toLowerCase()); suffix += 1) {
+    username = `${base.slice(0, 32 - String(suffix).length - 1)}_${suffix}`;
+  }
+  return username;
+}
+
+function completeExternalIdentity(store, identity, state) {
+  const authSettings = store.settings.externalAuth || defaultExternalAuthSettings();
+  const normalized = normalizeLinkedIdentity({ ...identity, id: identity.id || id('eid'), linkedAt: identity.linkedAt || nowIso(), lastLoginAt: nowIso() });
+  if (!normalized) throw new Error('The external identity was incomplete.');
+  const existingOwner = externalIdentityOwner(store, normalized);
+  if (state.intent === 'link') {
+    if (!authSettings.linkingEnabled) throw new Error('Linking additional sign-in methods is disabled by this server owner.');
+    const target = userById(store, state.linkUserId);
+    if (!target) throw new Error('The account-link request is no longer valid.');
+    if (existingOwner && existingOwner.id !== target.id) throw new Error('That external identity is already linked to another AAAStreamer account.');
+    target.linkedIdentities = (target.linkedIdentities || []).filter((item) => identityKey(item) !== identityKey(normalized));
+    target.linkedIdentities.push(normalized);
+    target.updatedAt = nowIso();
+    return target;
+  }
+  if (existingOwner) {
+    const linked = existingOwner.linkedIdentities.find((item) => identityKey(item) === identityKey(normalized));
+    Object.assign(linked, normalized, { id: linked.id || normalized.id, linkedAt: linked.linkedAt || normalized.linkedAt });
+    return existingOwner;
+  }
+  if (authSettings.autoLinkByEmail && normalized.email) {
+    const matches = store.users.filter((user) => [user.recoveryEmail, user.whmcsPortalEmail, user.notificationEmail].some((email) => String(email || '').toLowerCase() === normalized.email.toLowerCase()));
+    if (matches.length === 1) {
+      matches[0].linkedIdentities.push(normalized);
+      matches[0].updatedAt = nowIso();
+      return matches[0];
+    }
+  }
+  if (!store.settings.registrationsEnabled || !authSettings.socialSignupEnabled) throw new Error('This identity is not linked yet. Log in with your AAAStreamer fallback account and link it from Account settings.');
+  const createdAt = nowIso();
+  const username = uniqueSocialUsername(store, normalized.username || normalized.displayName, normalized.provider);
+  const user = normalizeUser({
+    id: id('usr'), username,
+    displayName: normalized.displayName || normalized.username || username,
+    role: store.settings.registrationDefaultRole === 'admin' ? 'user' : store.settings.registrationDefaultRole,
+    passwordHash: '', active: true, linkedIdentities: [normalized], createdAt, updatedAt: createdAt
+  });
+  store.users.push(user);
+  store.events.push({ id: id('evt'), type: 'external_identity_signup', payload: { username, provider: normalized.provider, issuer: normalized.issuer }, createdAt });
+  return user;
+}
+
 function base32Encode(buffer) {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
   let bits = 0;
@@ -341,6 +458,7 @@ function ensureDataStore() {
         license: defaultLicenseSettings(),
         dns: defaultDnsSettings(),
         social: defaultSocialSettings(),
+        externalAuth: defaultExternalAuthSettings(),
         visitorCommentsEnabled: true,
         messaging: defaultMessagingSettings(),
         commentAccessRules: [],
@@ -542,8 +660,24 @@ function defaultPlatformBranding() {
     subheading: 'Accessible live streaming for creators, communities, and events.',
     slogan: '',
     tagline: '',
-    description: 'Watch live streams, join the conversation, and support creators from one accessible streaming page.'
+    description: 'Watch live streams, join the conversation, and support creators from one accessible streaming page.',
+    websiteUrl: process.env.AAASTREAMER_HOST_WEBSITE_URL || (canonicalIssuer(publicUrl).includes('devinecreations.net') ? 'https://devinecreations.net' : 'https://tappedin.fm'),
+    showWebsiteLink: true,
+    disclaimerEnabled: true,
+    disclaimerText: 'Streams and comments are provided by independent creators. Creators are responsible for their content and permissions. Use respectful language and report concerns to the stream owner or hosting provider.'
   };
+}
+
+function streamDisclaimerHtml(settings) {
+  const branding = settings.platformBranding || defaultPlatformBranding();
+  if (!branding.disclaimerEnabled) return '';
+  const websiteUrl = safeUrl(branding.websiteUrl);
+  let websiteLabel = '';
+  try { websiteLabel = new URL(websiteUrl).hostname.replace(/^www\./, ''); } catch { websiteLabel = ''; }
+  const hostLink = branding.showWebsiteLink && websiteUrl
+    ? ` <span>Hosted by <a href="${escapeHtml(websiteUrl)}" rel="home">${escapeHtml(websiteLabel || websiteUrl)}</a>.</span>`
+    : '';
+  return `<footer class="stream-disclaimer"><p>${escapeHtml(branding.disclaimerText || '')}${hostLink}</p></footer>`;
 }
 
 function defaultMessagingSettings() {
@@ -584,12 +718,25 @@ function defaultWordPressConnectorSettings() {
   };
 }
 
+function defaultExternalAuthSettings() {
+  return {
+    wordpressEnabled: true,
+    mastodonEnabled: true,
+    linkingEnabled: true,
+    socialSignupEnabled: true,
+    autoLinkByEmail: false,
+    recommendLocalFallback: true,
+    requireLocalFallbackForManagers: false,
+    mastodonDynamicRegistration: false
+  };
+}
+
 function defaultLicenseSettings() {
   const tier = licenseTierCatalog.find((item) => item.id === process.env.AAASTREAMER_LICENSE_TIER) || licenseTierCatalog.find((item) => item.id === 'self-hosted-starter');
   const internalUse = process.env.AAASTREAMER_INTERNAL_ENTERPRISE === 'true' || tier?.internal === true;
   return {
     licensingEnabled: process.env.AAASTREAMER_LICENSE_ENABLED !== 'false',
-    licenseServerUrl: process.env.AAASTREAMER_LICENSE_SERVER_URL || 'https://devine-creations.com',
+    licenseServerUrl: process.env.AAASTREAMER_LICENSE_SERVER_URL || masterProductUrl,
     whmcsProductId: process.env.AAASTREAMER_WHMCS_PRODUCT_ID || '',
     whmcsProductCode: process.env.AAASTREAMER_WHMCS_PRODUCT_CODE || tier?.id || 'self-hosted-starter',
     whmcsAdminUsername: process.env.AAASTREAMER_WHMCS_ADMIN_USERNAME || '',
@@ -838,9 +985,107 @@ function normalizeUser(user) {
   };
   user.totpEnabled = user.totpEnabled === true;
   user.passkeys = Array.isArray(user.passkeys) ? user.passkeys : [];
+  user.linkedIdentities = (Array.isArray(user.linkedIdentities) ? user.linkedIdentities : [])
+    .map(normalizeLinkedIdentity).filter(Boolean)
+    .filter((identity, index, identities) => identities.findIndex((item) => identityKey(item) === identityKey(identity)) === index)
+    .slice(0, 20);
+  user.mastodonPublisher = normalizeMastodonPublisher(user.mastodonPublisher || {});
   user.wordpressConnectorAccess = user.wordpressConnectorAccess !== false;
   user.nativeClientPermissions = normalizeClientPermissions(user.nativeClientPermissions || {});
+  user.hostingEntitlement = normalizeHostingEntitlement(user.hostingEntitlement || {}, {
+    enterprise: user.hostingEntitlement?.unlimited === true
+  });
   return user;
+}
+
+function encryptCredential(value) {
+  if (mastodonCredentialEncryptionSecret.length < 32) throw new Error('Credential encryption is not configured.');
+  const key = crypto.createHash('sha256').update(mastodonCredentialEncryptionSecret).digest();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const encrypted = Buffer.concat([cipher.update(String(value), 'utf8'), cipher.final()]);
+  return `v1.${iv.toString('base64url')}.${cipher.getAuthTag().toString('base64url')}.${encrypted.toString('base64url')}`;
+}
+
+function decryptCredential(value) {
+  if (mastodonCredentialEncryptionSecret.length < 32) throw new Error('Credential encryption is not configured.');
+  const [version, iv, tag, encrypted] = String(value || '').split('.');
+  if (version !== 'v1' || !iv || !tag || !encrypted) throw new Error('The stored publisher credential is invalid.');
+  const key = crypto.createHash('sha256').update(mastodonCredentialEncryptionSecret).digest();
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(iv, 'base64url'));
+  decipher.setAuthTag(Buffer.from(tag, 'base64url'));
+  return Buffer.concat([decipher.update(Buffer.from(encrypted, 'base64url')), decipher.final()]).toString('utf8');
+}
+
+async function postMastodonWithToken(issuer, token, status, visibility = 'public') {
+  const base = canonicalIssuer(issuer);
+  if (!base || !token) throw new Error('Mastodon publisher authorization is incomplete.');
+  const response = await fetch(`${base}/api/v1/statuses`, {
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: String(status).slice(0, 500), visibility })
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || `Mastodon returned HTTP ${response.status}.`);
+  return payload;
+}
+
+function normalizeMastodonPublisher(value = {}) {
+  return {
+    enabled: value.enabled === true,
+    issuer: canonicalIssuer(value.issuer),
+    accountId: String(value.accountId || '').slice(0, 120),
+    acct: String(value.acct || '').slice(0, 180),
+    encryptedToken: String(value.encryptedToken || ''),
+    onLive: value.onLive !== false,
+    onPreLive: value.onPreLive === true,
+    onMetadata: value.onMetadata === true,
+    leadMinutes: clampNumber(value.leadMinutes, 1, 1440, 15),
+    includeLink: value.includeLink !== false,
+    includeMetadata: value.includeMetadata !== false,
+    mentionAccount: value.mentionAccount === true,
+    extraHashtags: String(value.extraHashtags || '').replace(/[^#a-z0-9_\s]/gi, '').trim().slice(0, 160),
+    visibility: ['public', 'unlisted', 'private'].includes(value.visibility) ? value.visibility : 'public',
+    lastPostedAt: value.lastPostedAt || '',
+    lastStatusUrl: String(value.lastStatusUrl || '').slice(0, 500),
+    lastError: String(value.lastError || '').slice(0, 300),
+    lastMetadataKey: String(value.lastMetadataKey || '').slice(0, 300),
+    preLivePostedFor: Array.isArray(value.preLivePostedFor) ? value.preLivePostedFor.map(String).slice(-100) : []
+  };
+}
+
+async function queueMastodonPublisherPost(streamId, eventType, extra = {}) {
+  try {
+    const store = readStore();
+    const stream = store.streams.find((item) => item.id === streamId);
+    const user = stream ? userById(store, stream.ownerId) : null;
+    const publisher = normalizeMastodonPublisher(user?.mastodonPublisher || {});
+    if (!stream || !user || !publisher.enabled || !publisher.encryptedToken) return;
+    if (eventType === 'live' && !publisher.onLive) return;
+    if (eventType === 'prelive' && !publisher.onPreLive) return;
+    if (eventType === 'metadata' && !publisher.onMetadata) return;
+    const metadata = stream.currentPlayback?.title || stream.currentSource?.label || '';
+    const metadataKey = `${stream.id}:${metadata}`;
+    if (eventType === 'metadata' && (!metadata || publisher.lastMetadataKey === metadataKey)) return;
+    const lead = eventType === 'prelive' ? ` goes live in ${publisher.leadMinutes} minutes.` : eventType === 'metadata' ? ' is now playing:' : ' is live now.';
+    const parts = [`${stream.title}${lead}`];
+    if (eventType === 'metadata' && publisher.includeMetadata) parts.push(metadata);
+    if (publisher.includeLink) parts.push(watchUrlFor(stream));
+    if (publisher.mentionAccount && publisher.acct) parts.push(`@${publisher.acct.replace(/^@/, '')}`);
+    parts.push('#aaastreamer');
+    if (publisher.extraHashtags) parts.push(publisher.extraHashtags);
+    try {
+      const posted = await postMastodonWithToken(publisher.issuer, decryptCredential(publisher.encryptedToken), parts.filter(Boolean).join('\n'), publisher.visibility);
+      publisher.lastPostedAt = nowIso(); publisher.lastStatusUrl = posted.url || posted.uri || ''; publisher.lastError = '';
+      if (eventType === 'metadata') publisher.lastMetadataKey = metadataKey;
+      if (eventType === 'prelive' && extra.showId) publisher.preLivePostedFor.push(String(extra.showId));
+      store.events.push({ id: id('evt'), type: `mastodon_publisher_${eventType}`, payload: { streamId, userId: user.id, statusUrl: publisher.lastStatusUrl }, createdAt: nowIso() });
+    } catch (error) {
+      publisher.lastError = error.message;
+      store.events.push({ id: id('evt'), type: 'mastodon_publisher_failed', payload: { streamId, userId: user.id, eventType, message: error.message }, createdAt: nowIso() });
+    }
+    user.mastodonPublisher = publisher;
+    writeStore(store);
+  } catch {}
 }
 
 function normalizeClientPermissions(value = {}, defaults = null) {
@@ -1166,6 +1411,8 @@ function normalizeWordPressConnectorSite(site = {}) {
     hideCommentsOnStreamPage: site.hideCommentsOnStreamPage === true,
     accountEnabled: site.accountEnabled !== false,
     autoUpdate: site.autoUpdate !== false,
+    ssoEnabled: site.ssoEnabled === true,
+    ssoSecretHash: String(site.ssoSecretHash || '').replace(/[^a-f0-9]/gi, '').slice(0, 64).toLowerCase(),
     healthLevel,
     lastCheckInAt: site.lastCheckInAt || '',
     lastCheckedAt: site.lastCheckedAt || '',
@@ -1183,6 +1430,7 @@ function normalizeStore(store) {
   store.payments ||= [];
   store.sessions ||= [];
   store.pendingLogins ||= [];
+  store.externalAuthStates ||= [];
   store.passkeyChallenges ||= [];
   store.scheduledShows ||= [];
   store.shareLinks ||= [];
@@ -1199,6 +1447,7 @@ function normalizeStore(store) {
   store.settings.paymentIntegration = { ...defaultPaymentIntegrationSettings(), ...(store.settings.paymentIntegration || {}) };
   store.settings.nativeClients = normalizeNativeClientSettings(store.settings.nativeClients || {});
   store.settings.wordpressConnector = { ...defaultWordPressConnectorSettings(), ...(store.settings.wordpressConnector || {}) };
+  store.settings.externalAuth = { ...defaultExternalAuthSettings(), ...(store.settings.externalAuth || {}) };
   store.settings.license = { ...defaultLicenseSettings(), ...(store.settings.license || {}) };
   store.settings.license.reissueLimits = { ...defaultLicenseSettings().reissueLimits, ...(store.settings.license.reissueLimits || {}) };
   if (store.settings.license.internalUse || store.settings.license.deploymentTier === 'internal-enterprise') {
@@ -1237,6 +1486,7 @@ function normalizeStore(store) {
   store.wordpressConnectors = (store.wordpressConnectors || []).map(normalizeWordPressConnectorSite).filter(Boolean).slice(-1000);
   const now = Date.now();
   store.pendingLogins = (store.pendingLogins || []).filter((item) => item?.token && Date.parse(item.expiresAt || '') > now);
+  store.externalAuthStates = (store.externalAuthStates || []).map(normalizeExternalAuthState).filter((item) => item && !item.usedAt && Date.parse(item.expiresAt || '') > now).slice(-500);
   store.pendingClientAuthorizations = (store.pendingClientAuthorizations || [])
     .map(normalizePendingClientAuthorization)
     .filter((item) => item.status === 'approved' || Date.parse(item.expiresAt || '') > now)
@@ -1577,12 +1827,14 @@ function requireModeratorOrAdmin(req, res, next) {
 function safeUser(user) {
   if (!user) return null;
   const { passwordHash, ...safe } = user;
+  if (safe.mastodonPublisher) safe.mastodonPublisher = { ...safe.mastodonPublisher, encryptedToken: undefined, authorized: Boolean(safe.mastodonPublisher.encryptedToken) };
   return safe;
 }
 
 function clientSafeUser(user) {
   if (!user) return null;
   const { passwordHash, streamKey, recoveryCodeHash, totpSecret, passkeys, passkeyChallenges, ...safe } = user;
+  if (safe.mastodonPublisher) safe.mastodonPublisher = { ...safe.mastodonPublisher, encryptedToken: undefined, authorized: Boolean(safe.mastodonPublisher.encryptedToken) };
   safe.hasStreamKey = Boolean(streamKey);
   safe.totpEnabled = user.totpEnabled === true;
   safe.passkeyCount = Array.isArray(passkeys) ? passkeys.length : 0;
@@ -1905,20 +2157,24 @@ function metadataForSource(source, store) {
   return probeMediaFile(target);
 }
 
-async function refreshJellyfinNowPlaying() {
+async function refreshIcecastNowPlaying() {
   let store;
   try { store = readStore(); } catch { return; }
   const changed = [];
   for (const stream of store.streams || []) {
     const source = stream?.currentSource;
-    if (source?.type !== 'urlRelay' || source.url !== 'http://172.17.0.1:8003/jellyfin-radio') continue;
+    if (source?.type !== 'urlRelay' || !['icecast', 'shoutcast'].includes(source.protocol)) continue;
     try {
-      const response = await fetch('http://172.17.0.1:8003/status-json.xsl', { signal: AbortSignal.timeout(4000) });
+      const sourceUrl = new URL(source.url);
+      const statusUrl = new URL('/status-json.xsl', sourceUrl.origin);
+      const response = await fetch(statusUrl, { signal: AbortSignal.timeout(4000) });
       if (!response.ok) continue;
       const payload = await response.json();
       const sources = Array.isArray(payload?.icestats?.source) ? payload.icestats.source : [payload?.icestats?.source];
-      const icecastSource = sources.find((item) => String(item?.listenurl || '').includes('/jellyfin-radio'));
-      const title = String(icecastSource?.title || "").trim();
+      const icecastSource = sources.find((item) => {
+        try { return new URL(String(item?.listenurl || '')).pathname === sourceUrl.pathname; } catch { return String(item?.listenurl || '').endsWith(sourceUrl.pathname); }
+      });
+      const title = String(icecastSource?.title || icecastSource?.server_name || '').trim();
       if (!title) continue;
       const existing = normalizeCurrentPlayback(stream.currentPlayback) || {};
       if (existing.title === title && existing.status === "playing") continue;
@@ -1929,7 +2185,10 @@ async function refreshJellyfinNowPlaying() {
   }
   if (!changed.length) return;
   writeStore(store);
-  for (const streamId of changed) broadcast({ type: "now_playing_updated", payload: { streamId } });
+  for (const streamId of changed) {
+    broadcast({ type: "now_playing_updated", payload: { streamId } });
+    queueMastodonPublisherPost(streamId, 'metadata').catch(() => {});
+  }
 }
 
 function publicPlaybackMetadata(stream) {
@@ -3281,6 +3540,53 @@ function sourceFromRequest(req, store, user) {
   return null;
 }
 
+function wordpressLoginSites(store) {
+  if (store.settings.externalAuth?.wordpressEnabled === false) return [];
+  return (store.wordpressConnectors || []).filter((site) => site.enabled && site.accountEnabled && site.ssoEnabled && site.ssoSecretHash && site.siteUrl);
+}
+
+function mastodonProviderForIssuer(issuer) {
+  const canonical = canonicalIssuer(issuer);
+  return mastodonAuthProviders.find((provider) => provider.issuer === canonical) || null;
+}
+
+function newExternalAuthState(store, provider, issuer, user = null, requestedIntent = '') {
+  const state = normalizeExternalAuthState({
+    state: randomUrlToken(), provider, issuer,
+    intent: requestedIntent === 'publisher' && user ? 'publisher' : user ? 'link' : 'login', linkUserId: user?.id || '',
+    codeVerifier: provider === 'mastodon' ? randomUrlToken(48) : '',
+    createdAt: nowIso(), expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString()
+  });
+  store.externalAuthStates.push(state);
+  return state;
+}
+
+function consumeExternalAuthState(store, provider, stateValue) {
+  const state = store.externalAuthStates.find((item) => item.provider === provider && item.state === String(stateValue || '') && !item.usedAt && Date.parse(item.expiresAt || '') > Date.now());
+  if (!state) throw new Error('The external sign-in request expired or did not match.');
+  state.usedAt = nowIso();
+  return state;
+}
+
+function editRelaySourceFromRequest(req, store, user, stream, sourceId) {
+  const existing = stream?.relaySources?.find((item) => item.id === sourceId && item.type === 'urlRelay');
+  if (!existing) return { error: 'Stream source not found' };
+  const parsed = sourceFromRequest({ ...req, body: { ...req.body, sourceType: 'urlRelay' } }, store, user);
+  if (!parsed) return { error: 'Use a valid HTTP or HTTPS media URL and a supported protocol: http, hls, icecast, or shoutcast.' };
+  const updated = normalizeStreamSource({
+    ...existing,
+    ...parsed,
+    id: existing.id,
+    createdAt: existing.createdAt,
+    enabled: existing.enabled !== false
+  });
+  stream.relaySources = (stream.relaySources || []).map((item) => item.id === sourceId ? updated : item);
+  stream.sourceQueue = (stream.sourceQueue || []).map((item) => item.id === sourceId ? updated : item);
+  if (stream.currentSource?.id === sourceId) stream.currentSource = updated;
+  stream.updatedAt = nowIso();
+  return { source: updated };
+}
+
 function parseUploadItems(body) {
   const raw = String(body.uploadData || '').trim();
   if (!raw) return [];
@@ -3516,6 +3822,7 @@ function runSchedulerTick() {
   }
   const now = Date.now();
   let changed = false;
+  const preLivePosts = [];
   for (const show of store.scheduledShows || []) {
     if (!show.enabled || show.status === 'cancelled') continue;
     const stream = store.streams.find((item) => item.id === show.streamId);
@@ -3523,6 +3830,15 @@ function runSchedulerTick() {
     normalizeStream(stream);
     const startsAt = new Date(show.startAt || '').getTime();
     const endsAt = new Date(show.endAt || '').getTime();
+    const owner = userById(store, stream.ownerId);
+    const publisher = normalizeMastodonPublisher(owner?.mastodonPublisher || {});
+    const leadWindowMs = publisher.leadMinutes * 60 * 1000;
+    if (owner && publisher.enabled && publisher.onPreLive && show.status === 'scheduled' && Number.isFinite(startsAt) && startsAt > now && startsAt - now <= leadWindowMs && !publisher.preLivePostedFor.includes(String(show.id))) {
+      publisher.preLivePostedFor.push(String(show.id));
+      owner.mastodonPublisher = publisher;
+      preLivePosts.push({ streamId: stream.id, showId: show.id });
+      changed = true;
+    }
     if (show.status === 'scheduled' && Number.isFinite(startsAt) && startsAt <= now) {
       show.status = 'live';
       show.updatedAt = nowIso();
@@ -3565,6 +3881,7 @@ function runSchedulerTick() {
     }
   }
   if (changed) writeStore(store);
+  for (const item of preLivePosts) queueMastodonPublisherPost(item.streamId, 'prelive', { showId: item.showId }).catch(() => {});
 }
 
 function ensureContinuousOnDemandRelays() {
@@ -3950,6 +4267,7 @@ app.post('/api/wordpress/checkin', (req, res) => {
   }
   const stream = store.streams.find((item) => item.slug === streamSlug || item.id === req.body.streamId);
   const owner = stream ? store.users.find((user) => user.id === stream.ownerId) : null;
+  const connectorAuth = bearerClient(req, store);
   if (owner && !wordpressConnectorAllowedForUser(store, owner)) {
     res.status(403).json({ success: false, error: 'This stream owner does not have plugin connector access.' });
     return;
@@ -3980,6 +4298,8 @@ app.post('/api/wordpress/checkin', (req, res) => {
     hideCommentsOnStreamPage: req.body.hideCommentsOnStreamPage === true || req.body.hideCommentsOnStreamPage === 'true',
     accountEnabled: !(req.body.accountEnabled === false || req.body.accountEnabled === 'false'),
     autoUpdate: !(req.body.autoUpdate === false || req.body.autoUpdate === 'false'),
+    ssoEnabled: Boolean(connectorAuth && owner && (connectorAuth.user.role === 'admin' || connectorAuth.user.id === owner.id) && req.body.ssoEnabled !== false && req.body.ssoEnabled !== 'false'),
+    ssoSecretHash: connectorAuth && owner && (connectorAuth.user.role === 'admin' || connectorAuth.user.id === owner.id) ? connectorAuth.client.tokenHash : (site.ssoSecretHash || ''),
     healthLevel: req.body.enabled === false || req.body.enabled === 'false' ? 4 : 9,
     lastCheckInAt: nowIso(),
     lastError: '',
@@ -3987,7 +4307,26 @@ app.post('/api/wordpress/checkin', (req, res) => {
   }));
   store.events.push({ id: id('evt'), type: created ? 'wordpress_connector_checkin_created' : 'wordpress_connector_checkin', payload: { siteUrl, streamSlug, userId: site.userId || '' }, createdAt: nowIso() });
   writeStore(store);
-  res.json({ success: true, siteId: site.id, healthLevel: wordpressConnectorHealth(site), commentsHiddenOnStreamPage: wordpressConnectorHidesStreamComments(store, stream || { id: site.streamId, slug: site.streamSlug }), autoUpdate: site.autoUpdate !== false });
+  res.json({ success: true, siteId: site.id, healthLevel: wordpressConnectorHealth(site), commentsHiddenOnStreamPage: wordpressConnectorHidesStreamComments(store, stream || { id: site.streamId, slug: site.streamSlug }), autoUpdate: site.autoUpdate !== false, ssoEnabled: site.ssoEnabled });
+});
+
+app.get('/api/wordpress/releases/aaastreamer-connector', (req, res) => {
+  const store = readStore();
+  const auth = bearerClient(req, store);
+  const entitlement = auth ? normalizeHostingEntitlement(auth.user.hostingEntitlement || {}) : null;
+  const paidModulesAllowed = Boolean(auth && (auth.user.role === 'admin' || entitlement?.status === 'active' || entitlement?.unlimited));
+  res.setHeader('Cache-Control', 'private, max-age=300');
+  res.json({
+    slug: 'aaastreamer-connector', name: 'AAAStreamer Connector', version: '0.2.0',
+    packageUrl: wordpressConnectorPackageUrl, requiresWordPress: '6.2', requiresPhp: '7.4',
+    modules: [
+      { id: 'stream-player', name: 'Stream player and comments', tier: 'free', available: true, bundled: true },
+      { id: 'account-bridge', name: 'Account management and WordPress sign-in', tier: 'free', available: true, bundled: true },
+      { id: 'multi-domain', name: 'Multi-domain management', tier: 'paid', available: paidModulesAllowed, bundled: false },
+      { id: 'advanced-scheduling', name: 'Advanced scheduling', tier: 'paid', available: paidModulesAllowed, bundled: false },
+      { id: 'mastodon-tutor', name: 'Mastodon publishing automation', tier: 'paid', available: paidModulesAllowed, bundled: false }
+    ]
+  });
 });
 
 function canEditStream(user, stream) {
@@ -4215,6 +4554,7 @@ ${renderPlaybackPlayer(playbackUrl, stream)}${renderNowPlaying(stream)}${support
 <section><h2>About this stream</h2><p>${escapeHtml(stream.description || 'No description yet.')}</p>${renderExtraContentBox(stream, 'watch')}<h3>Links</h3><div id="streamLinksPanel">${editableLinks(stream, canEditLinks)}</div></section>
 <section><h2>Live comments</h2>${commentsHiddenByConnector ? '<p>Comments for this stream are handled on the connected WordPress page.</p>' : `<div id="comments" class="comments">${comments.map((comment) => renderComment(comment, messaging.reactionsEnabled)).join('')}</div>`}
 ${canComment ? `${!user ? '<p class="notice" role="note">Guest messages include moderation metadata such as approximate network address, browser/device information, and the host used to reach this stream. Broadcasters and moderators may use that information to keep chat safe.</p>' : ''}<form id="commentForm"><label>Name<input name="authorName" ${user ? `value="${escapeHtml(user.displayName || user.username)}" readonly` : 'required'}></label><label>Message type<select name="messageType"><option value="comment">Comment</option><option value="question">Question</option><option value="support">Support message</option></select></label><label>Comment<textarea name="message" required rows="3" maxlength="${escapeHtml(messaging.maxMessageLength || 1000)}"></textarea></label><button type="submit">Post comment</button></form>` : (!commentsHiddenByConnector ? '<p>Comments are disabled for this stream or account type.</p>' : '')}</section>
+${streamDisclaimerHtml(store.settings)}
 ${supportAfter}
 <script>
 const streamId=${JSON.stringify(stream.id)};
@@ -4260,7 +4600,114 @@ function renderComment(comment, reactionsEnabled = true) {
   return `<div class="comment" id="comment-${escapeHtml(comment.id)}"><strong>${escapeHtml(comment.authorName)}</strong> <span class="message-meta">${escapeHtml(comment.authorType || 'guest')} ${escapeHtml(comment.messageType || 'comment')} ${escapeHtml(comment.createdAt)}</span><p>${escapeHtml(comment.message)}</p>${reactionsEnabled ? `<div id="reactions-${escapeHtml(comment.id)}" class="reaction-list">${reactionButtons}</div>` : ''}</div>`;
 }
 
+app.get('/auth/wordpress/start', (req, res) => {
+  const store = readStore();
+  const site = wordpressLoginSites(store).find((item) => item.id === req.query.site || canonicalIssuer(item.siteUrl) === canonicalIssuer(req.query.issuer));
+  const linkingUser = req.query.intent === 'link' ? currentUser(req) : null;
+  if (req.query.intent === 'link' && !linkingUser) { res.redirect('/login'); return; }
+  if (!site || !externalAuthBaseUrl) {
+    res.status(400).send(page('WordPress sign-in unavailable', '<h1>WordPress sign-in unavailable</h1><p>This WordPress site is not configured as a trusted sign-in provider.</p><p><a class="button" href="/login">Back to login</a></p>', linkingUser));
+    return;
+  }
+  const state = newExternalAuthState(store, 'wordpress', site.siteUrl, linkingUser);
+  writeStore(store);
+  const bridge = new URL(`${site.siteUrl.replace(/\/+$/, '')}/wp-admin/admin-post.php`);
+  bridge.searchParams.set('action', 'aaastreamer_sso');
+  bridge.searchParams.set('state', state.state);
+  bridge.searchParams.set('callback', externalAuthCallbackUrl(externalAuthBaseUrl, 'wordpress'));
+  res.redirect(bridge.toString());
+});
+
+app.post('/auth/wordpress/callback', (req, res) => {
+  const store = readStore();
+  try {
+    const state = consumeExternalAuthState(store, 'wordpress', req.body.state);
+    const site = wordpressLoginSites(store).find((item) => canonicalIssuer(item.siteUrl) === state.issuer);
+    if (!site) throw new Error('The WordPress connector is no longer trusted for sign-in.');
+    const payload = verifyWordPressAssertion(req.body.assertion, site.ssoSecretHash, { issuer: state.issuer, audience: externalAuthBaseUrl, state: state.state });
+    const identity = { provider: 'wordpress', issuer: payload.iss, subject: payload.sub, username: payload.username || '', email: payload.email || '', displayName: payload.name || '' };
+    const user = completeExternalIdentity(store, identity, state);
+    store.events.push({ id: id('evt'), type: state.intent === 'link' ? 'external_identity_linked' : 'external_identity_login', payload: { username: user.username, provider: 'wordpress', issuer: state.issuer }, createdAt: nowIso() });
+    if (state.intent === 'link') { writeStore(store); res.redirect('/dashboard?tab=account'); return; }
+    res.redirect(beginInteractiveLogin(store, user, res, 'wordpress'));
+  } catch (error) {
+    writeStore(store);
+    res.status(403).send(page('WordPress sign-in failed', `<h1>WordPress sign-in failed</h1><p>${escapeHtml(error.message)}</p><p><a class="button" href="/login">Back to login</a></p>`, null));
+  }
+});
+
+app.get('/auth/mastodon/start', (req, res) => {
+  const store = readStore();
+  const provider = store.settings.externalAuth?.mastodonEnabled === false ? null : mastodonProviderForIssuer(req.query.issuer);
+  const protectedIntent = ['link', 'publisher'].includes(req.query.intent) ? req.query.intent : '';
+  const linkingUser = protectedIntent ? currentUser(req) : null;
+  if (protectedIntent && !linkingUser) { res.redirect('/login'); return; }
+  if (protectedIntent === 'publisher' && mastodonCredentialEncryptionSecret.length < 32) {
+    res.status(503).send(page('Mastodon publishing unavailable', '<h1>Mastodon publishing unavailable</h1><p>The server owner must configure credential encryption before a timeline can be connected.</p><p><a class="button" href="/dashboard?tab=account">Back to account</a></p>', linkingUser)); return;
+  }
+  if (!provider || !externalAuthBaseUrl) {
+    res.status(400).send(page('Mastodon sign-in unavailable', '<h1>Mastodon sign-in unavailable</h1><p>Choose a Mastodon server configured by this AAAStreamer operator.</p><p><a class="button" href="/login">Back to login</a></p>', linkingUser));
+    return;
+  }
+  const state = newExternalAuthState(store, 'mastodon', provider.issuer, linkingUser, protectedIntent);
+  writeStore(store);
+  const authorize = new URL('/oauth/authorize', provider.issuer);
+  authorize.searchParams.set('response_type', 'code');
+  authorize.searchParams.set('client_id', provider.clientId);
+  authorize.searchParams.set('redirect_uri', externalAuthCallbackUrl(externalAuthBaseUrl, 'mastodon'));
+  authorize.searchParams.set('scope', protectedIntent === 'publisher' ? 'read:accounts write:statuses' : 'read:accounts');
+  authorize.searchParams.set('state', state.state);
+  authorize.searchParams.set('code_challenge', pkceChallenge(state.codeVerifier));
+  authorize.searchParams.set('code_challenge_method', 'S256');
+  res.redirect(authorize.toString());
+});
+
+app.get('/auth/mastodon/callback', async (req, res) => {
+  const store = readStore();
+  try {
+    if (req.query.error) throw new Error(`Mastodon did not authorize sign-in: ${String(req.query.error_description || req.query.error).slice(0, 240)}`);
+    const state = consumeExternalAuthState(store, 'mastodon', req.query.state);
+    const provider = mastodonProviderForIssuer(state.issuer);
+    if (!provider || !req.query.code) throw new Error('The Mastodon provider or authorization code was not accepted.');
+    const tokenResponse = await fetch(new URL('/oauth/token', provider.issuer), {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+      body: new URLSearchParams({ grant_type: 'authorization_code', code: String(req.query.code), client_id: provider.clientId, client_secret: provider.clientSecret, redirect_uri: externalAuthCallbackUrl(externalAuthBaseUrl, 'mastodon'), code_verifier: state.codeVerifier })
+    });
+    const tokenPayload = await tokenResponse.json().catch(() => ({}));
+    if (!tokenResponse.ok || !tokenPayload.access_token) throw new Error('Mastodon did not issue an access token for this sign-in.');
+    const accountResponse = await fetch(new URL('/api/v1/accounts/verify_credentials', provider.issuer), { headers: { Authorization: `Bearer ${tokenPayload.access_token}`, Accept: 'application/json' } });
+    const account = await accountResponse.json().catch(() => ({}));
+    if (!accountResponse.ok || !account.id) throw new Error('Mastodon could not verify the signed-in account.');
+    const identity = { provider: 'mastodon', issuer: provider.issuer, subject: String(account.id), username: account.acct || account.username || '', displayName: account.display_name || account.username || '' };
+    let user;
+    if (state.intent === 'publisher') {
+      user = userById(store, state.linkUserId);
+      if (!user) throw new Error('The publisher-link request is no longer valid.');
+      const owner = externalIdentityOwner(store, identity);
+      if (owner && owner.id !== user.id) throw new Error('That Mastodon identity is linked to another AAAStreamer account.');
+      if (!owner) {
+        const linked = normalizeLinkedIdentity({ ...identity, id: id('eid'), linkedAt: nowIso(), lastLoginAt: nowIso() });
+        user.linkedIdentities.push(linked);
+      }
+      user.mastodonPublisher = normalizeMastodonPublisher({ ...user.mastodonPublisher, enabled: true, issuer: provider.issuer, accountId: String(account.id), acct: account.acct || account.username || '', encryptedToken: encryptCredential(tokenPayload.access_token) });
+      user.updatedAt = nowIso();
+    } else {
+      user = completeExternalIdentity(store, identity, state);
+    }
+    store.events.push({ id: id('evt'), type: state.intent === 'publisher' ? 'mastodon_publisher_authorized' : state.intent === 'link' ? 'external_identity_linked' : 'external_identity_login', payload: { username: user.username, provider: 'mastodon', issuer: state.issuer }, createdAt: nowIso() });
+    if (state.intent === 'link' || state.intent === 'publisher') { writeStore(store); res.redirect('/dashboard?tab=account'); return; }
+    res.redirect(beginInteractiveLogin(store, user, res, 'mastodon'));
+  } catch (error) {
+    writeStore(store);
+    res.status(403).send(page('Mastodon sign-in failed', `<h1>Mastodon sign-in failed</h1><p>${escapeHtml(error.message)}</p><p><a class="button" href="/login">Back to login</a></p>`, null));
+  }
+});
+
 app.get('/login', (req, res) => {
+  const store = readStore();
+  const wordpressButtons = wordpressLoginSites(store).map((site) => `<a class="button secondary" href="/auth/wordpress/start?site=${encodeURIComponent(site.id)}">Continue with WordPress at ${escapeHtml(new URL(site.siteUrl).hostname)}</a>`).join(' ');
+  const mastodonButtons = store.settings.externalAuth?.mastodonEnabled === false ? '' : mastodonAuthProviders.map((provider) => `<a class="button secondary" href="/auth/mastodon/start?issuer=${encodeURIComponent(provider.issuer)}">Continue with ${escapeHtml(provider.label || new URL(provider.issuer).hostname)}</a>`).join(' ');
+  const externalButtons = wordpressButtons || mastodonButtons ? `<div class="login-divider" aria-hidden="true">or</div><div class="stacked-actions">${wordpressButtons}${mastodonButtons}</div><p class="muted">Social sign-in is optional. Keep a local password or passkey as a fallback in case the linked site or social account becomes unavailable.</p>` : '';
   if (currentUser(req)) {
     res.redirect('/dashboard');
     return;
@@ -4311,7 +4758,7 @@ app.get('/login', (req, res) => {
     </form>
     <div class="login-divider" aria-hidden="true">or</div>
     <button class="passkey-button" type="button" id="passkeyLogin"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="8" r="4"/><path d="M4 21v-3a4 4 0 0 1 4-4h3m4-1a4 4 0 1 1 4 4v4m0-4h3m-3 2h2"/></svg>Log in with a passkey</button>
-    <p id="passkeyLoginStatus" class="notice" role="status" aria-live="polite"></p>
+    <p id="passkeyLoginStatus" class="notice" role="status" aria-live="polite"></p>${externalButtons}
     <p class="login-help"><a href="/forgot-password">Forgot your login details?</a></p>
   </section>
   <footer class="login-foot"><span>AAAStreamer by Devine Creations and TappedIn.</span><span>Hosted customers retain ownership of their content.</span></footer>
@@ -4576,6 +5023,9 @@ app.get('/dashboard', (req, res) => {
     return;
   }
   const stream = ensureStreamForUser(store, user);
+  const entitlement = normalizeHostingEntitlement(user.hostingEntitlement || {}, {
+    enterprise: user.hostingEntitlement?.unlimited === true
+  });
   stream.support = effectiveSupportSettings(stream, user, store.settings);
   const shareLink = ensureShareLink(store, stream, user.id);
   writeStore(store);
@@ -4590,10 +5040,13 @@ app.get('/dashboard', (req, res) => {
     ...stream.encoderKeys
   ];
   const encoderRows = encoders.map((encoder) => `<tr><td>${escapeHtml(encoder.name)}</td><td><code>${escapeHtml(encoder.key)}</code></td><td>${escapeHtml(encoder.audioBitrate || stream.encoderSettings.audioBitrate)}</td><td>${escapeHtml(encoder.sampleRate || stream.encoderSettings.sampleRate || '48000')}</td><td>${encoder.active === false ? 'disabled' : 'enabled'}</td><td><input readonly value="${escapeHtml(hlsUrlFor(encoder.key))}"></td></tr>`).join('');
+  const browserBroadcastSection = whipPublicBaseUrl ? `<section><h2>Broadcast from this browser</h2><p class="muted">Use a microphone, camera, or shared screen when the desktop client is not available. Your browser will ask before sharing any device. Keep this dashboard open while live.</p><label>Broadcast source<select id="browserBroadcastMode"><option value="audio">Microphone audio only</option><option value="camera">Camera and microphone</option><option value="screen">Screen or window, with optional audio</option></select></label><label><input id="browserBroadcastMic" type="checkbox" checked> Include microphone</label><video id="browserBroadcastPreview" muted playsinline hidden></video><p id="browserBroadcastStatus" class="notice" role="status" aria-live="polite">Ready to request browser devices.</p><button type="button" id="browserBroadcastStart">Start browser broadcast</button><button type="button" id="browserBroadcastStop" class="danger" disabled>Stop browser broadcast</button><script>
+(()=>{const start=document.getElementById('browserBroadcastStart');const stop=document.getElementById('browserBroadcastStop');const mode=document.getElementById('browserBroadcastMode');const mic=document.getElementById('browserBroadcastMic');const preview=document.getElementById('browserBroadcastPreview');const status=document.getElementById('browserBroadcastStatus');if(!start)return;let pc=null;let media=null;let resource='';const waitIce=(connection)=>connection.iceGatheringState==='complete'?Promise.resolve():new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('Network discovery timed out.')),12000);connection.addEventListener('icegatheringstatechange',()=>{if(connection.iceGatheringState==='complete'){clearTimeout(timer);resolve();}});});async function stopNow(){if(resource){fetch(resource,{method:'DELETE'}).catch(()=>{});resource='';}if(pc){pc.close();pc=null;}if(media){media.getTracks().forEach(track=>track.stop());media=null;}preview.srcObject=null;preview.hidden=true;start.disabled=false;stop.disabled=true;status.textContent='Browser broadcast stopped.';}start.addEventListener('click',async()=>{try{start.disabled=true;status.textContent='Waiting for browser permission…';const kind=mode.value;let display=null;let microphone=null;if(kind==='screen')display=await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});if(kind==='camera')display=await navigator.mediaDevices.getUserMedia({video:true,audio:false});if((kind==='audio'||mic.checked))microphone=await navigator.mediaDevices.getUserMedia({audio:true,video:false});const tracks=[...(display?.getTracks()||[]),...(microphone?.getAudioTracks()||[])];if(!tracks.length)throw new Error('No audio or video track was selected.');media=new MediaStream(tracks);preview.srcObject=media;preview.hidden=!media.getVideoTracks().length;if(!preview.hidden)await preview.play();pc=new RTCPeerConnection();tracks.forEach(track=>pc.addTrack(track,media));const offer=await pc.createOffer();await pc.setLocalDescription(offer);await waitIce(pc);status.textContent='Connecting the browser broadcast…';const response=await fetch(${JSON.stringify(`${whipPublicBaseUrl}/${rtmpAppName}/${stream.streamKey}/whip`)},{method:'POST',headers:{'Content-Type':'application/sdp'},body:pc.localDescription.sdp});if(!response.ok)throw new Error('The server did not accept this browser broadcast ('+response.status+').');const location=response.headers.get('Location');resource=location?new URL(location,response.url).toString():'';await pc.setRemoteDescription({type:'answer',sdp:await response.text()});media.getTracks().forEach(track=>track.addEventListener('ended',stopNow,{once:true}));stop.disabled=false;status.textContent='Live from this browser. Use Stop browser broadcast when finished.';}catch(error){status.textContent=error.message||'Browser broadcasting could not start.';await stopNow();}});stop.addEventListener('click',stopNow);window.addEventListener('pagehide',()=>{if(resource)navigator.sendBeacon?.(resource);});})();
+</script></section>` : `<section><h2>Broadcast from this browser</h2><p>Browser microphone, camera, and screen broadcasting becomes available after the server owner configures the public HTTPS WHIP endpoint. OBS and desktop-client streaming remain available now.</p></section>`;
   const destinationRows = (stream.destinations || []).map((destination) => `<tr><td><input type="checkbox" form="destinationStateForm" name="destinationIds" value="${escapeHtml(destination.id)}" aria-label="Select ${escapeHtml(destination.name)} for a bulk action"></td><td>${destination.enabled ? 'Live enabled' : 'Disabled'}</td><td>${escapeHtml(destination.name)}</td><td>${escapeHtml(destination.platform)}</td><td>${destination.connected ? 'connected' : 'manual setup'}</td><td><details><summary>Show manual RTMP</summary><code>${escapeHtml(destination.rtmpUrl)}</code></details></td><td><form method="post" action="/dashboard/destinations/${escapeHtml(destination.id)}/delete" data-confirm-kind="remove" data-confirm-message="Remove ${escapeHtml(destination.name)} from your destinations?"><button type="submit" class="danger">Remove destination</button></form><p class="muted">Removes this destination from your saved streaming targets.</p></td></tr>`).join('');
   const presetOptions = platformPresets.map((preset) => `<option value="${escapeHtml(preset.id)}" data-ingest="${escapeHtml(preset.ingest)}" data-connect="${escapeHtml(preset.connectUrl || preset.url || '')}" data-services="${escapeHtml((preset.services || []).join(', '))}">${escapeHtml(preset.name)}</option>`).join('');
   const selectedSource = stream.currentSource || null;
-  const relayRows = (stream.relaySources || []).map((source) => `<tr><td>${escapeHtml(source.label)}</td><td>${escapeHtml(source.mediaType)}</td><td>${escapeHtml(source.protocol || 'http')}</td><td><a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">Open source URL</a></td><td><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/select" class="inline-form" data-confirm-kind="live" data-confirm-message="Start streaming ${escapeHtml(source.label)} now?"><button type="submit">Start streaming this source</button></form><p class="muted">Starts this URL relay immediately as the current stream source.</p><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/delete" class="inline-form" data-confirm-kind="remove" data-confirm-message="Remove ${escapeHtml(source.label)} from your media sources?"><button type="submit" class="danger">Remove relay source</button></form><p class="muted">Removes this saved URL relay source.</p></td></tr>`).join('');
+  const relayRows = (stream.relaySources || []).map((source) => `<tr><td>${escapeHtml(source.label)}</td><td>${escapeHtml(source.mediaType)}</td><td>${escapeHtml(source.protocol || 'http')}</td><td><a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">Open source URL</a></td><td><details><summary>Edit source</summary><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/edit"><label>Content name<input name="relayLabel" value="${escapeHtml(source.label)}" required></label><label>Media type<select name="relayMediaType"><option value="audio" ${source.mediaType === 'audio' ? 'selected' : ''}>audio</option><option value="video" ${source.mediaType !== 'audio' ? 'selected' : ''}>video</option></select></label><label>Protocol<select name="relayProtocol"><option value="http" ${source.protocol === 'http' ? 'selected' : ''}>HTTP or HTTPS media</option><option value="hls" ${source.protocol === 'hls' ? 'selected' : ''}>HLS</option><option value="icecast" ${source.protocol === 'icecast' ? 'selected' : ''}>Icecast</option><option value="shoutcast" ${source.protocol === 'shoutcast' ? 'selected' : ''}>Shoutcast</option></select></label><label>Listening or media URL<input name="relayUrl" value="${escapeHtml(source.url)}" required></label><button type="submit">Save source</button></form></details><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/select" class="inline-form" data-confirm-kind="live" data-confirm-message="Start streaming ${escapeHtml(source.label)} now?"><button type="submit">Start streaming this source</button></form><p class="muted">Starts this URL relay immediately as the current stream source.</p><form method="post" action="/dashboard/sources/${escapeHtml(source.id)}/delete" class="inline-form" data-confirm-kind="remove" data-confirm-message="Remove ${escapeHtml(source.label)} from your media sources?"><button type="submit" class="danger">Remove relay source</button></form><p class="muted">Removes this saved URL relay source.</p></td></tr>`).join('');
   const domainRows = (stream.customDomains || []).map((domain) => `<tr><td>${escapeHtml(domain.hostname)}</td><td>${escapeHtml(domain.status)}</td><td>${domain.enabled ? 'enabled' : 'disabled'}</td><td><code>_aaastreamer.${escapeHtml(domain.hostname)}</code></td><td><code>aaastreamer-verification=${escapeHtml(domain.verificationToken)}</code></td><td>${domain.lastError ? escapeHtml(domain.lastError) : escapeHtml(domain.verifiedAt || 'Not verified yet')}</td><td><form method="post" action="/dashboard/domains/${escapeHtml(domain.id)}/verify" class="inline-form"><button type="submit">Verify DNS</button></form><form method="post" action="/dashboard/domains/${escapeHtml(domain.id)}/remove" class="inline-form" data-confirm-kind="remove" data-confirm-message="Remove ${escapeHtml(domain.hostname)} from this stream?"><button type="submit" class="danger">Remove domain</button></form></td></tr>`).join('');
   const queueRows = queuedSourceRows(stream, store);
   const activeSourceRunning = sourceProcesses.has(stream.id);
@@ -4604,6 +5057,14 @@ app.get('/dashboard', (req, res) => {
   const scheduleRows = scheduledShowsForStream(store, stream).map((show) => `<tr><td>${escapeHtml(show.title)}</td><td>${escapeHtml(show.startAt || '')}</td><td>${escapeHtml(show.mode)}</td><td>${escapeHtml(show.status)}</td><td><form method="post" action="/dashboard/schedule/${escapeHtml(show.id)}/toggle" class="inline-form"><button type="submit">${show.enabled ? 'Disable' : 'Enable'}</button></form><form method="post" action="/dashboard/schedule/${escapeHtml(show.id)}/cancel" class="inline-form"><button type="submit" class="danger">Cancel</button></form></td></tr>`).join('');
   const authDomains = configuredAuthDomains(store, req).join(', ');
   const passkeyRows = (user.passkeys || []).map((passkey) => `<tr><td>${escapeHtml(passkey.name || 'Passkey')}</td><td>${escapeHtml(passkey.rpID || '')}</td><td>${escapeHtml(passkey.createdAt || '')}</td><td>${escapeHtml(passkey.lastUsedAt || 'Never')}</td></tr>`).join('');
+  const hasLocalFallback = Boolean(user.passwordHash || (user.passkeys || []).length);
+  const linkedIdentityRows = (user.linkedIdentities || []).map((identity) => `<tr><td>${escapeHtml(identity.provider)}</td><td>${escapeHtml(identity.displayName || identity.username || identity.subject)}</td><td>${escapeHtml(identity.issuer)}</td><td>${escapeHtml(identity.lastLoginAt || 'Never')}</td><td><form method="post" action="/dashboard/identities/${escapeHtml(identity.id)}/unlink" data-confirm-kind="remove" data-confirm-message="Unlink this sign-in method?"><button type="submit" class="danger">Unlink</button></form></td></tr>`).join('');
+  const wordpressLinkButtons = wordpressLoginSites(store).map((site) => `<a class="button secondary" href="/auth/wordpress/start?intent=link&amp;site=${encodeURIComponent(site.id)}">Link WordPress at ${escapeHtml(new URL(site.siteUrl).hostname)}</a>`).join(' ');
+  const mastodonLinkButtons = store.settings.externalAuth?.mastodonEnabled === false ? '' : mastodonAuthProviders.map((provider) => `<a class="button secondary" href="/auth/mastodon/start?intent=link&amp;issuer=${encodeURIComponent(provider.issuer)}">Link ${escapeHtml(provider.label || new URL(provider.issuer).hostname)}</a>`).join(' ');
+  const externalIdentitySection = `<section><h2>Linked sign-in methods</h2><p class="${hasLocalFallback ? 'muted' : 'notice'}">${hasLocalFallback ? 'A local AAAStreamer password or passkey is available as a fallback.' : 'Add a local AAAStreamer password or passkey so this account remains available if a linked provider is lost or revoked.'}</p><table><tr><th>Provider</th><th>Account</th><th>Server</th><th>Last used</th><th>Action</th></tr>${linkedIdentityRows || '<tr><td colspan="5">No WordPress or Mastodon identities are linked.</td></tr>'}</table>${store.settings.externalAuth?.linkingEnabled === false ? '<p>Linking is disabled by this server owner.</p>' : `<p>${wordpressLinkButtons}${mastodonLinkButtons}</p>`}<h3>${user.passwordHash ? 'Change local fallback password' : 'Create local fallback password'}</h3><form method="post" action="/dashboard/security/password">${user.passwordHash ? '<label>Current password<input name="currentPassword" type="password" autocomplete="current-password" required></label>' : ''}<label>New password<input name="newPassword" type="password" autocomplete="new-password" minlength="8" required></label><button type="submit">Save local password</button></form></section>`;
+  const mastodonPublisher = normalizeMastodonPublisher(user.mastodonPublisher || {});
+  const mastodonPublisherButtons = mastodonCredentialEncryptionSecret.length < 32 ? '<p>Timeline publishing is unavailable until this server owner configures credential encryption.</p>' : mastodonAuthProviders.map((provider) => `<a class="button secondary" href="/auth/mastodon/start?intent=publisher&amp;issuer=${encodeURIComponent(provider.issuer)}">Authorize posting through ${escapeHtml(provider.label || new URL(provider.issuer).hostname)}</a>`).join(' ');
+  const mastodonPublisherSection = `<section><h2>Mastodon publishing</h2><p class="muted">Sign-in permission and timeline-posting permission are separate. Posting is opt-in and can be revoked without removing your AAAStreamer account. Every automatic post includes <code>#aaastreamer</code>.</p><p>Authorized account: <strong>${escapeHtml(mastodonPublisher.acct || 'None')}</strong> on ${escapeHtml(mastodonPublisher.issuer || 'no server')}.</p><p>${mastodonPublisherButtons}</p><form method="post" action="/dashboard/mastodon-publisher"><label><input type="checkbox" name="enabled" value="true" ${mastodonPublisher.enabled ? 'checked' : ''}> Enable automatic Mastodon publishing</label><label><input type="checkbox" name="onLive" value="true" ${mastodonPublisher.onLive ? 'checked' : ''}> Post when this stream goes live</label><label><input type="checkbox" name="onPreLive" value="true" ${mastodonPublisher.onPreLive ? 'checked' : ''}> Post before a scheduled live show</label><label>Minutes before a scheduled show<input name="leadMinutes" type="number" min="1" max="1440" value="${escapeHtml(mastodonPublisher.leadMinutes)}"></label><label><input type="checkbox" name="onMetadata" value="true" ${mastodonPublisher.onMetadata ? 'checked' : ''}> Post when the playing-content metadata changes</label><label><input type="checkbox" name="includeMetadata" value="true" ${mastodonPublisher.includeMetadata ? 'checked' : ''}> Include the playing content name</label><label><input type="checkbox" name="includeLink" value="true" ${mastodonPublisher.includeLink ? 'checked' : ''}> Include the stream page link</label><label><input type="checkbox" name="mentionAccount" value="true" ${mastodonPublisher.mentionAccount ? 'checked' : ''}> Mention this Mastodon account</label><label>Additional hashtags<input name="extraHashtags" value="${escapeHtml(mastodonPublisher.extraHashtags)}" placeholder="#music #live"></label><label>Visibility<select name="visibility"><option value="public" ${mastodonPublisher.visibility === 'public' ? 'selected' : ''}>Public</option><option value="unlisted" ${mastodonPublisher.visibility === 'unlisted' ? 'selected' : ''}>Quiet public</option><option value="private" ${mastodonPublisher.visibility === 'private' ? 'selected' : ''}>Followers only</option></select></label><button type="submit">Save publishing choices</button></form>${mastodonPublisher.lastError ? `<p class="notice">Last publishing error: ${escapeHtml(mastodonPublisher.lastError)}</p>` : ''}${mastodonPublisher.encryptedToken ? '<form method="post" action="/dashboard/mastodon-publisher/revoke" data-confirm-kind="remove" data-confirm-message="Revoke Mastodon timeline posting for this account?"><button type="submit" class="danger">Revoke timeline posting</button></form>' : ''}</section>`;
   const totpUri = user.totpPendingSecret ? `otpauth://totp/${encodeURIComponent(store.settings.siteName || 'AAAStreamer')}:${encodeURIComponent(user.username)}?secret=${encodeURIComponent(user.totpPendingSecret)}&issuer=${encodeURIComponent(store.settings.siteName || 'AAAStreamer')}` : '';
   const tabs = dashboardTabs(activeTab);
   const streamEvents = (store.events || []).filter((event) => event.payload?.streamId === stream.id).slice(-25);
@@ -4638,7 +5099,7 @@ app.get('/dashboard', (req, res) => {
 <div class="field-row"><label>Server URL<input id="rtmpUrl" readonly value="${escapeHtml(serverUrl)}"></label><button type="button" data-copy-target="rtmpUrl">Copy URL</button></div>
 <div class="field-row"><label>Primary stream key<input id="streamKey" readonly value="${escapeHtml(stream.streamKey)}"></label><button type="button" data-copy-target="streamKey">Copy key</button></div>
 <form class="inline-form" method="post" action="/dashboard/stream/key"><input type="hidden" name="action" value="revoke"><button type="submit" class="danger" onclick="return confirm('This will revoke the current stream key and generate a new one. Existing encoder settings using the old key will stop working until you update them. Continue?')">Revoke and generate new key</button></form></section>
-<section><h2>Encoder keys</h2><p class="muted">Each row shows a key that an encoder app can use, plus the audio settings, status, and HLS output for that encoder.</p><table><tr><th>Name</th><th>Key</th><th>Audio bitrate</th><th>Sample rate</th><th>Status</th><th>HLS output</th></tr>${encoderRows}</table>
+${browserBroadcastSection}<section><h2>Encoder keys</h2><p class="muted">Each row shows a key that an encoder app can use, plus the audio settings, status, and HLS output for that encoder.</p><table><tr><th>Name</th><th>Key</th><th>Audio bitrate</th><th>Sample rate</th><th>Status</th><th>HLS output</th></tr>${encoderRows}</table>
 <form method="post" action="/dashboard/encoders"><label>Encoder name<input name="name" placeholder="OBS Windows, Ecamm Mac, Audio Hijack"></label><label>Audio bitrate<select name="audioBitrate">${audioBitrates.map((rate) => `<option ${rate === stream.encoderSettings.audioBitrate ? 'selected' : ''}>${rate}</option>`).join('')}</select></label><button type="submit">Add encoder key for another app</button></form></section>
 <section><h2>Encoder audio and video defaults</h2><form method="post" action="/dashboard/encoder-settings"><label>Video bitrate<input name="videoBitrate" value="${escapeHtml(stream.encoderSettings.videoBitrate || '4500k')}"></label><label>Audio bitrate<select name="audioBitrate">${audioBitrates.map((rate) => `<option ${rate === stream.encoderSettings.audioBitrate ? 'selected' : ''}>${rate}</option>`).join('')}</select></label><label>Audio channels<select name="audioChannels"><option value="stereo" selected>stereo</option></select></label><label>Sample rate<select name="sampleRate"><option value="44100" ${stream.encoderSettings.sampleRate === '44100' ? 'selected' : ''}>44100</option><option value="48000" ${stream.encoderSettings.sampleRate !== '44100' ? 'selected' : ''}>48000</option></select></label><label>Keyframe interval seconds<input name="keyframeIntervalSeconds" type="number" min="1" max="10" step="1" value="${escapeHtml(stream.encoderSettings.keyframeIntervalSeconds || 2)}"></label><label>HLS segment duration, ms<input name="hlsSegmentDurationMs" type="number" min="1000" max="6000" step="100" value="${escapeHtml(stream.encoderSettings.hlsSegmentDurationMs || 2000)}"></label><label>HLS segment count<input name="hlsSegmentCount" type="number" min="8" max="24" step="1" value="${escapeHtml(Math.max(12, Number(stream.encoderSettings.hlsSegmentCount || 12)))}"></label><button type="submit">Save encoder defaults</button></form></section>
 <section><h2>Encoder latency and buffer</h2><form method="post" action="/dashboard/latency"><label>Stream latency mode<select name="mode"><option value="low" ${stream.latencySettings.mode === 'low' ? 'selected' : ''}>Low latency</option><option value="balanced" ${stream.latencySettings.mode === 'balanced' ? 'selected' : ''}>Balanced</option><option value="stable" ${stream.latencySettings.mode === 'stable' ? 'selected' : ''}>Most stable for Safari and mobile browsers</option></select></label><label>Target live latency, seconds<input name="targetLatencySeconds" type="number" min="2" max="30" step="0.5" value="${escapeHtml(stream.latencySettings.targetLatencySeconds)}"></label><label>Player buffer, seconds<input name="playerBufferSeconds" type="number" min="4" max="60" step="0.5" value="${escapeHtml(stream.latencySettings.playerBufferSeconds)}"></label><label>Reconnect buffer, seconds<input name="reconnectBufferSeconds" type="number" min="4" max="120" step="1" value="${escapeHtml(stream.latencySettings.reconnectBufferSeconds)}"></label><button type="submit">Save encoder latency and buffer</button></form></section>`;
@@ -4646,6 +5107,8 @@ app.get('/dashboard', (req, res) => {
 <form method="post" action="/dashboard/destinations" data-confirm-kind="add" data-confirm-message="Add this destination or subchannel to your stream settings?"><label>Platform<select id="platformPreset" name="platform">${presetOptions}</select></label><p id="destinationServices" class="muted"></p><p><a id="destinationConnectLink" class="button" href="#" target="_blank" rel="noopener noreferrer">Open service setup</a></p><label>Name<input name="name" placeholder="Main YouTube channel"></label><label>RTMP or RTMPS URL, manual destinations only<input id="destinationRtmpUrl" name="rtmpUrl"></label><label>Stream key, manual destinations only<input name="streamKey"></label><label><input type="checkbox" name="enabled" value="true" checked> Enable this destination after saving</label><button type="submit">Add destination or subchannel</button></form></section>`;
   const accountTab = `<section><h2>Account details</h2><form method="post" action="/dashboard/account"><label>Display name<input name="displayName" value="${escapeHtml(user.displayName || '')}"></label><label>Client ID or client email<input name="whmcsLookup" value="${escapeHtml(user.whmcsClientId || user.whmcsPortalEmail || '')}" placeholder="Client ID or email address"></label><p class="muted">When the client portal is configured, AAAStreamer looks up the matching client ID and client email automatically.</p><button type="submit">Save account details</button></form><p>Client ID: <strong>${escapeHtml(user.whmcsClientId || 'None')}</strong>. Client email: <strong>${escapeHtml(user.whmcsPortalEmail || 'None')}</strong>.</p></section>
 <section><h2>Notification email</h2><p class="muted">This email is used for account recovery reminders, stream notices, payment notices, and browser notification enrollment. Browser notifications follow the current domain in your browser.</p><form method="post" action="/dashboard/notification-settings"><label>Notification email<input name="notificationEmail" type="email" value="${escapeHtml(user.notificationEmail || '')}"></label><label><input type="checkbox" name="reminderEnabled" value="true" ${user.notificationEmailReminder?.enabled !== false ? 'checked' : ''}> Remind me if no notification email is configured</label><label>Reminder every number of logins<input name="everyLogins" type="number" min="1" max="30" value="${escapeHtml(user.notificationEmailReminder?.everyLogins || 3)}"></label><label>Reminder every number of days<input name="everyDays" type="number" min="1" max="180" value="${escapeHtml(user.notificationEmailReminder?.everyDays || 14)}"></label><button type="submit">Save notification settings</button></form></section>
+${externalIdentitySection}
+${mastodonPublisherSection}
 <section><h2>What's new preference</h2><p class="muted">Controls whether release notes appear automatically after AAAStreamer updates. You can still open What's new from the navigation.</p><form method="post" action="/dashboard/whats-new-settings"><label><input type="checkbox" name="suppressOnLogin" value="true" ${user.whatsNew?.suppressOnLogin ? 'checked' : ''}> Do not show What's new automatically when I log in</label><p>Last seen version: <strong>${escapeHtml(user.whatsNew?.seenVersion || 'Not recorded')}</strong>. Current version: <strong>${escapeHtml(appVersion)}</strong>.</p><button type="submit">Save What's new preference</button></form></section>
 <section><h2>Action confirmations</h2><p class="muted">Confirmations help prevent accidental stream changes. The countdown appears before go-live actions so you can cancel before enabled destinations begin receiving a stream.</p><form method="post" action="/dashboard/confirmation-settings"><label><input type="checkbox" name="enabled" value="true" ${user.confirmationPreferences?.enabled !== false ? 'checked' : ''}> Show confirmations before stream actions</label><label><input type="checkbox" name="confirmGoingLive" value="true" ${user.confirmationPreferences?.confirmGoingLive !== false ? 'checked' : ''}> Confirm go-live or enable actions</label><label><input type="checkbox" name="confirmDisabling" value="true" ${user.confirmationPreferences?.confirmDisabling !== false ? 'checked' : ''}> Confirm disable actions</label><label><input type="checkbox" name="confirmAdding" value="true" ${user.confirmationPreferences?.confirmAdding !== false ? 'checked' : ''}> Confirm adding destinations or media sources</label><label><input type="checkbox" name="confirmRemoving" value="true" ${user.confirmationPreferences?.confirmRemoving !== false ? 'checked' : ''}> Confirm removing destinations or media sources</label><label>Go-live countdown seconds<input name="countdownSeconds" type="number" min="0" max="30" value="${escapeHtml(user.confirmationPreferences?.countdownSeconds ?? 5)}"></label><button type="submit">Save confirmation settings</button></form></section>
 <section><h2>Login recovery</h2><p class="muted">Use a recovery email and a private recovery code so you can reset your password if you forget your login details. Keep the recovery code somewhere only you can access.</p><form method="post" action="/dashboard/recovery-settings"><label><input type="checkbox" name="recoveryEnabled" value="true" ${user.recoveryEnabled ? 'checked' : ''}> Enable self-service password reset</label><label>Recovery email<input name="recoveryEmail" type="email" value="${escapeHtml(user.recoveryEmail || '')}"></label><label>Recovery hint, optional<input name="recoveryHint" value="${escapeHtml(user.recoveryHint || '')}" maxlength="240"></label><label>New recovery code<input name="recoveryCode" type="password" autocomplete="new-password" minlength="8" placeholder="${user.recoveryCodeHash ? 'Leave blank to keep existing code' : 'Set a private code, at least 8 characters'}"></label><button type="submit">Save recovery settings</button></form></section>
@@ -4680,7 +5143,7 @@ ${mediaBrowser}
   const wordpressTab = wordpressAllowed
     ? `<section><h2>Plugin connector</h2><p class="muted">Connect a site plugin to this stream so pages outside AAAStreamer can embed the player, account tools, and comments while AAAStreamer remains the streaming authority.</p><form method="post" action="/dashboard/wordpress"><label>WordPress site URL<input name="siteUrl" value="${escapeHtml(primaryWordPressSite.siteUrl || '')}" placeholder="https://example.com"></label><label>WordPress listen page URL<input name="listenPageUrl" value="${escapeHtml(primaryWordPressSite.listenPageUrl || '')}" placeholder="https://example.com/listen"></label><label>Plugin REST base URL<input name="restBaseUrl" value="${escapeHtml(primaryWordPressSite.restBaseUrl || '')}" placeholder="https://example.com/index.php?rest_route=/aaastreamer/v1"></label><label><input type="checkbox" name="enabled" value="true" ${primaryWordPressSite.enabled ? 'checked' : ''}> Enable this WordPress site connection</label><label><input type="checkbox" name="commentsEnabled" value="true" ${primaryWordPressSite.commentsEnabled ? 'checked' : ''}> Allow comments from the WordPress stream page</label><label><input type="checkbox" name="hideCommentsOnStreamPage" value="true" ${primaryWordPressSite.hideCommentsOnStreamPage ? 'checked' : ''}> Hide comments on the normal AAAStreamer watch page for this stream</label><button type="submit">Save plugin connector</button></form><section class="subsection"><h3>Embed shortcodes</h3><p><code>[aaastreamer_player]</code></p><p><code>[aaastreamer_comments]</code></p><p><code>[aaastreamer_account_panel]</code></p></section><section class="subsection"><h3>Connected plugin sites</h3><table><tr><th>Site</th><th>Stream</th><th>Plugin version</th><th>Status</th><th>Comments</th><th>Health</th><th>Last check-in</th><th>Last error</th></tr>${wordpressConnectorSiteRows(store, wordpressSites) || '<tr><td colspan="8">No plugin check-ins yet. Save the connector here, then save settings in the site plugin once.</td></tr>'}</table></section></section>`
     : `<section><h2>Plugin connector</h2><p>This account does not currently have plugin connector access. Contact an administrator if this stream should be embedded on an external site.</p></section>`;
-  const domainsTab = `<section><h2>Hosted domains</h2><p class="muted">Attach a domain you control to this stream. Add the displayed TXT record at your DNS provider, then choose Verify DNS. AAAStreamer will not route the domain until ownership is verified. TLS certificates and the hosting proxy must also be configured for the verified domain by the server operator.</p><table><tr><th>Domain</th><th>Verification</th><th>Routing</th><th>TXT record name</th><th>TXT record value</th><th>Last check</th><th>Actions</th></tr>${domainRows || '<tr><td colspan="7">No custom domains are attached to this stream.</td></tr>'}</table><form method="post" action="/dashboard/domains" data-confirm-kind="add" data-confirm-message="Add this domain and create an ownership-verification challenge?"><label>Domain name<input name="hostname" inputmode="url" placeholder="radio.example.com" required></label><button type="submit">Add domain</button></form></section>`;
+  const domainsTab = `<section><h2>Hosted domains</h2><p>Account status: <strong>${escapeHtml(entitlement.status)}</strong>. Install allowance: <strong>${escapeHtml(entitlement.unlimited ? 'unlimited' : entitlement.installationLimit)}</strong>. Owned-domain allowance: <strong>${escapeHtml(entitlement.unlimited ? 'unlimited' : entitlement.domainLimit)}</strong>. Stream hosts per owned domain: <strong>${escapeHtml(entitlement.unlimited ? 'unlimited' : entitlement.subdomainsPerDomain)}</strong>.</p><p>Domains assigned to this account: ${escapeHtml(entitlement.ownedDomains.join(', ') || 'none')}.</p><p class="muted">Attach only a hostname within a domain assigned to your account. Add the displayed TXT record, then choose Verify DNS. Verification does not silently change DNS, TLS, or an existing website. DNS automation, when enabled by the operator, remains subject to the account hold period of ${escapeHtml(entitlement.dnsChangeHoldDays)} day(s).</p><table><tr><th>Domain</th><th>Verification</th><th>Routing</th><th>TXT record name</th><th>TXT record value</th><th>Last check</th><th>Actions</th></tr>${domainRows || '<tr><td colspan="7">No custom domains are attached to this stream.</td></tr>'}</table><form method="post" action="/dashboard/domains" data-confirm-kind="add" data-confirm-message="Add this domain and create an ownership-verification challenge?"><label>Domain name<input name="hostname" inputmode="url" placeholder="radio.example.com" required></label><label><input type="checkbox" name="rootDomainEmptyConfirmed" value="true"> I confirm this is a root domain with no existing website, if applicable</label><button type="submit">Add domain</button></form></section>`;
   const downloadsTab = nativeClientDownloadsHtml(store, user);
   const advancedTab = `<section><h2>On-demand display</h2><form method="post" action="/dashboard/sources/ondemand"><label><input type="checkbox" name="enabled" value="true" ${stream.onDemand?.enabled ? 'checked' : ''}> Enable on-demand playback</label><label><input type="checkbox" name="showWhenOffline" value="true" ${stream.onDemand?.showWhenOffline ? 'checked' : ''}> Show to visitors when offline and selected media is available</label><label>On-demand title<input name="title" value="${escapeHtml(stream.onDemand?.title || '')}"></label><button type="submit">Save on-demand settings</button></form></section>`;
   const selectedBody = { overview: overviewTab, downloads: downloadsTab, media: mediaTab, encoders: encodersTab, destinations: destinationsTab, schedule: scheduleTab, wordpress: wordpressTab, domains: domainsTab, profile: profileTab, support: supportTab, account: accountTab, advanced: advancedTab }[activeTab];
@@ -4982,6 +5445,21 @@ app.post('/dashboard/sources/url', requireBroadcaster, (req, res) => {
   res.redirect('/dashboard?tab=media');
 });
 
+app.post('/dashboard/sources/:sourceId/edit', requireBroadcaster, (req, res) => {
+  const store = readStore();
+  const user = store.users.find((item) => item.id === req.user.id);
+  const stream = store.streams.find((item) => item.ownerId === req.user.id);
+  const result = editRelaySourceFromRequest(req, store, user, stream, req.params.sourceId);
+  if (!result.source) {
+    res.status(result.error === 'Stream source not found' ? 404 : 400).send(page('Relay source not updated', `<h1>Relay source not updated</h1><p>${escapeHtml(result.error)}</p><a class="button" href="/dashboard?tab=media">Back to media management</a>`, req.user));
+    return;
+  }
+  store.events.push({ id: id('evt'), type: 'url_relay_source_updated', payload: { streamId: stream.id, sourceId: result.source.id, label: result.source.label, protocol: result.source.protocol }, createdAt: nowIso() });
+  if (sourceProcesses.has(stream.id) && stream.currentSource?.id === result.source.id) startSourceProcess(stream, result.source, store);
+  writeStore(store);
+  res.redirect('/dashboard?tab=media');
+});
+
 app.post('/dashboard/domains', requireBroadcaster, (req, res) => {
   const store = readStore();
   const user = store.users.find((item) => item.id === req.user.id);
@@ -4995,6 +5473,22 @@ app.post('/dashboard/domains', requireBroadcaster, (req, res) => {
   const usedBy = store.streams.find((item) => item.id !== stream.id && (item.customDomains || []).some((domain) => domain.hostname === hostname));
   if (hostname === primaryHost || usedBy) {
     res.status(409).send(page('Domain not available', '<h1>Domain not available</h1><p>This domain is already reserved by this installation or another stream.</p><a class="button" href="/dashboard?tab=domains">Back to domains</a>', req.user));
+    return;
+  }
+  const existingHostnames = store.streams
+    .filter((item) => item.ownerId === user.id)
+    .flatMap((item) => (item.customDomains || []).map((domain) => domain.hostname));
+  const entitlement = normalizeHostingEntitlement(user.hostingEntitlement || {}, {
+    enterprise: user.hostingEntitlement?.unlimited === true
+  });
+  const claim = evaluateDomainClaim({
+    hostname,
+    entitlement,
+    existingHostnames,
+    rootDomainEmptyConfirmed: req.body.rootDomainEmptyConfirmed === 'true'
+  });
+  if (!claim.ok) {
+    res.status(403).send(page('Domain not permitted', `<h1>Domain not permitted</h1><p>${escapeHtml(claim.message)}</p><p><a class="button" href="/dashboard?tab=domains">Back to domains</a></p>`, req.user));
     return;
   }
   stream.customDomains ||= [];
@@ -5367,8 +5861,13 @@ app.post('/dashboard/recovery-settings', requireUser, (req, res) => {
   const store = readStore();
   const user = userById(store, req.user.id);
   if (user) {
+    const recoveryEmail = String(req.body.recoveryEmail || '').trim().slice(0, 180);
+    if (!isEmailAllowed(recoveryEmail, user.hostingEntitlement)) {
+      res.status(403).send(page('Recovery settings not saved', '<h1>Recovery settings not saved</h1><p>Use an email address on a domain assigned to this account.</p><p><a class="button" href="/dashboard?tab=account">Back to account</a></p>', req.user));
+      return;
+    }
     user.recoveryEnabled = req.body.recoveryEnabled === 'true';
-    user.recoveryEmail = String(req.body.recoveryEmail || '').trim().slice(0, 180);
+    user.recoveryEmail = recoveryEmail;
     user.notificationEmail = user.recoveryEmail || user.notificationEmail || '';
     user.recoveryHint = String(req.body.recoveryHint || '').trim().slice(0, 240);
     const recoveryCode = String(req.body.recoveryCode || '');
@@ -5390,7 +5889,12 @@ app.post('/dashboard/notification-settings', requireUser, (req, res) => {
   const store = readStore();
   const user = userById(store, req.user.id);
   if (user) {
-    user.notificationEmail = String(req.body.notificationEmail || '').trim().slice(0, 180);
+    const notificationEmail = String(req.body.notificationEmail || '').trim().slice(0, 180);
+    if (!isEmailAllowed(notificationEmail, user.hostingEntitlement)) {
+      res.status(403).send(page('Notification settings not saved', '<h1>Notification settings not saved</h1><p>Use an email address on a domain assigned to this account.</p><p><a class="button" href="/dashboard?tab=account">Back to account</a></p>', req.user));
+      return;
+    }
+    user.notificationEmail = notificationEmail;
     user.notificationEmailReminder = {
       enabled: req.body.reminderEnabled === 'true',
       everyLogins: clampNumber(req.body.everyLogins, 1, 30, 3),
@@ -5763,10 +6267,112 @@ app.get('/admin', requireAdmin, (req, res) => {
 
 app.get('/admin/streams', requireAdmin, (req, res) => {
   const store = readStore();
+  const rows = store.streams.map((stream) => {
+    const sourceForms = (stream.relaySources || []).map((source) => `<form method="post" action="/admin/streams/${escapeHtml(stream.id)}/sources/${escapeHtml(source.id)}/edit" class="subsection"><strong>${escapeHtml(source.label)}</strong><label>Content name<input name="relayLabel" value="${escapeHtml(source.label)}" required></label><label>Media type<select name="relayMediaType"><option value="audio" ${source.mediaType === 'audio' ? 'selected' : ''}>audio</option><option value="video" ${source.mediaType !== 'audio' ? 'selected' : ''}>video</option></select></label><label>Protocol<select name="relayProtocol"><option value="http" ${source.protocol === 'http' ? 'selected' : ''}>HTTP or HTTPS media</option><option value="hls" ${source.protocol === 'hls' ? 'selected' : ''}>HLS</option><option value="icecast" ${source.protocol === 'icecast' ? 'selected' : ''}>Icecast</option><option value="shoutcast" ${source.protocol === 'shoutcast' ? 'selected' : ''}>Shoutcast</option></select></label><label>Listening or media URL<input name="relayUrl" value="${escapeHtml(source.url)}" required></label><button type="submit">Save source</button></form>`).join('') || '<p class="muted">No URL relay sources.</p>';
+    return `<tr><td>${escapeHtml(stream.title)}</td><td>${escapeHtml(stream.status)}</td><td>${escapeHtml(store.users.find((item) => item.id === stream.ownerId)?.username || 'ad hoc')}</td><td>${1 + (stream.encoderKeys?.length || 0)}</td><td><a href="/s/${escapeHtml(stream.slug)}">View</a><details><summary>Edit public and on-demand display</summary><form method="post" action="/admin/streams/${escapeHtml(stream.id)}/display"><label>Description<textarea name="description" rows="3">${escapeHtml(stream.description || '')}</textarea></label><label><input type="checkbox" name="enabled" value="true" ${stream.onDemand?.enabled ? 'checked' : ''}> Enable on-demand playback</label><label><input type="checkbox" name="showWhenOffline" value="true" ${stream.onDemand?.showWhenOffline ? 'checked' : ''}> Show when offline</label><label>On-demand content name<input name="title" value="${escapeHtml(stream.onDemand?.title || '')}"></label><button type="submit">Save display</button></form>${sourceForms}</details></td></tr>`;
+  }).join('');
   const body = `<h1>Admin panel</h1>${adminTabs('streams')}
-<section><h2>Streams</h2><table><tr><th>Title</th><th>Status</th><th>Owner</th><th>Encoders</th><th>Actions</th></tr>${store.streams.map((stream) => `<tr><td>${escapeHtml(stream.title)}</td><td>${escapeHtml(stream.status)}</td><td>${escapeHtml(store.users.find((item) => item.id === stream.ownerId)?.username || 'ad hoc')}</td><td>${1 + (stream.encoderKeys?.length || 0)}</td><td><a href="/s/${escapeHtml(stream.slug)}">View</a></td></tr>`).join('')}</table></section>
+<section><h2>Streams</h2><table><tr><th>Title</th><th>Status</th><th>Owner</th><th>Encoders</th><th>Actions</th></tr>${rows}</table></section>
 <section><h2>Recent events</h2><table><tr><th>Time</th><th>Type</th><th>Payload</th></tr>${store.events.slice(-75).reverse().map((event) => `<tr><td>${escapeHtml(event.createdAt)}</td><td>${escapeHtml(event.type)}</td><td><code>${escapeHtml(JSON.stringify(event.payload))}</code></td></tr>`).join('')}</table></section>`;
   res.send(page('Admin streams', body, req.user));
+});
+
+app.post('/dashboard/security/password', requireUser, (req, res) => {
+  const store = readStore();
+  const user = userById(store, req.user.id);
+  const newPassword = String(req.body.newPassword || '');
+  if (!user || newPassword.length < 8 || (user.passwordHash && !verifyPassword(req.body.currentPassword || '', user.passwordHash))) {
+    res.status(403).send(page('Password not changed', '<h1>Password not changed</h1><p>The current password was not accepted or the new password was too short.</p><p><a class="button" href="/dashboard?tab=account">Back to account</a></p>', req.user));
+    return;
+  }
+  user.passwordHash = hashPassword(newPassword);
+  user.updatedAt = nowIso();
+  const currentToken = parseCookies(req)[sessionCookieName];
+  store.sessions = store.sessions.filter((session) => session.userId !== user.id || session.token === currentToken);
+  store.events.push({ id: id('evt'), type: 'local_fallback_password_saved', payload: { username: user.username }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/dashboard?tab=account');
+});
+
+app.post('/dashboard/identities/:identityId/unlink', requireUser, (req, res) => {
+  const store = readStore();
+  const user = userById(store, req.user.id);
+  const identity = user?.linkedIdentities?.find((item) => item.id === req.params.identityId);
+  const otherExternalMethods = (user?.linkedIdentities || []).filter((item) => item.id !== req.params.identityId).length;
+  const localMethods = (user?.passwordHash ? 1 : 0) + (user?.passkeys || []).length;
+  if (!user || !identity) { res.status(404).send(page('Sign-in method not found', '<h1>Sign-in method not found</h1><p><a class="button" href="/dashboard?tab=account">Back to account</a></p>', req.user)); return; }
+  if (localMethods + otherExternalMethods < 1) {
+    res.status(409).send(page('Sign-in method kept', '<h1>Sign-in method kept</h1><p>Add a local password, passkey, or another linked identity before removing your only sign-in method.</p><p><a class="button" href="/dashboard?tab=account">Back to account</a></p>', req.user));
+    return;
+  }
+  user.linkedIdentities = user.linkedIdentities.filter((item) => item.id !== identity.id);
+  user.updatedAt = nowIso();
+  store.events.push({ id: id('evt'), type: 'external_identity_unlinked', payload: { username: user.username, provider: identity.provider, issuer: identity.issuer }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/dashboard?tab=account');
+});
+
+app.post('/dashboard/mastodon-publisher', requireUser, (req, res) => {
+  const store = readStore();
+  const user = userById(store, req.user.id);
+  if (!user) { res.redirect('/login'); return; }
+  const current = normalizeMastodonPublisher(user.mastodonPublisher || {});
+  user.mastodonPublisher = normalizeMastodonPublisher({
+    ...current,
+    enabled: req.body.enabled === 'true' && Boolean(current.encryptedToken),
+    onLive: req.body.onLive === 'true', onPreLive: req.body.onPreLive === 'true', onMetadata: req.body.onMetadata === 'true',
+    leadMinutes: req.body.leadMinutes, includeMetadata: req.body.includeMetadata === 'true', includeLink: req.body.includeLink === 'true',
+    mentionAccount: req.body.mentionAccount === 'true', extraHashtags: req.body.extraHashtags, visibility: req.body.visibility
+  });
+  user.updatedAt = nowIso();
+  store.events.push({ id: id('evt'), type: 'mastodon_publisher_settings_updated', payload: { userId: user.id, enabled: user.mastodonPublisher.enabled, onLive: user.mastodonPublisher.onLive, onPreLive: user.mastodonPublisher.onPreLive, onMetadata: user.mastodonPublisher.onMetadata }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/dashboard?tab=account');
+});
+
+app.post('/dashboard/mastodon-publisher/revoke', requireUser, (req, res) => {
+  const store = readStore();
+  const user = userById(store, req.user.id);
+  if (user) {
+    user.mastodonPublisher = normalizeMastodonPublisher({});
+    user.updatedAt = nowIso();
+    store.events.push({ id: id('evt'), type: 'mastodon_publisher_revoked', payload: { userId: user.id }, createdAt: nowIso() });
+    writeStore(store);
+  }
+  res.redirect('/dashboard?tab=account');
+});
+
+app.post('/admin/streams/:streamId/display', requireAdmin, (req, res) => {
+  const store = readStore();
+  const stream = store.streams.find((item) => item.id === req.params.streamId);
+  if (!stream) {
+    res.status(404).send(page('Stream not found', '<h1>Stream not found</h1><a class="button" href="/admin/streams">Back to streams</a>', req.user));
+    return;
+  }
+  stream.description = String(req.body.description || '').trim().slice(0, 1500);
+  stream.onDemand = {
+    enabled: req.body.enabled === 'true',
+    showWhenOffline: req.body.showWhenOffline === 'true',
+    title: String(req.body.title || '').trim().slice(0, 160)
+  };
+  stream.updatedAt = nowIso();
+  store.events.push({ id: id('evt'), type: 'admin_ondemand_display_updated', payload: { streamId: stream.id, onDemand: stream.onDemand }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/admin/streams');
+});
+
+app.post('/admin/streams/:streamId/sources/:sourceId/edit', requireAdmin, (req, res) => {
+  const store = readStore();
+  const stream = store.streams.find((item) => item.id === req.params.streamId);
+  const result = editRelaySourceFromRequest(req, store, req.user, stream, req.params.sourceId);
+  if (!result.source) {
+    res.status(result.error === 'Stream source not found' ? 404 : 400).send(page('Relay source not updated', `<h1>Relay source not updated</h1><p>${escapeHtml(result.error)}</p><a class="button" href="/admin/streams">Back to streams</a>`, req.user));
+    return;
+  }
+  store.events.push({ id: id('evt'), type: 'admin_url_relay_source_updated', payload: { streamId: stream.id, sourceId: result.source.id, label: result.source.label, protocol: result.source.protocol }, createdAt: nowIso() });
+  if (sourceProcesses.has(stream.id) && stream.currentSource?.id === result.source.id) startSourceProcess(stream, result.source, store);
+  writeStore(store);
+  res.redirect('/admin/streams');
 });
 
 app.get('/admin/accounts', requireAdmin, (req, res) => {
@@ -5777,16 +6383,22 @@ app.get('/admin/accounts', requireAdmin, (req, res) => {
   const filterLinks = [['all', 'All', store.users.length], ['member', 'Real users', store.users.filter((item) => !item.isBot).length], ['visitor', 'Visitors', counts.visitor], ['moderator', 'Moderators', counts.moderator], ['admin', 'Admins', counts.admin], ['bot', 'Bots', counts.bot], ['other', 'Other', counts.other]]
     .map(([value, label, count]) => `<a class="button ${selectedType === value ? '' : 'secondary'}" href="/admin/accounts?type=${value}" ${selectedType === value ? 'aria-current="page"' : ''}>${label} (${count})</a>`).join('');
   const accountRows = visibleUsers.map((item) => `<tr><td><strong>${escapeHtml(item.username)}</strong><br><span class="muted">${item.isBot ? 'Bot · interactive login blocked' : item.realUserVerified ? 'Verified real user' : 'Real-user status unverified'}</span></td><td><form method="post" action="/admin/users/${escapeHtml(item.id)}"><label>Display name<input name="displayName" value="${escapeHtml(item.displayName || '')}"></label><label>Identity type<select name="identityType">${identityTypeOptions(item.identityType)}</select></label><label>Role<select name="role">${roleOptions(item.role, true)}</select></label></td><td><label><input type="checkbox" name="isBot" value="true" ${item.isBot ? 'checked' : ''}> Mark as bot</label><p class="muted">Bots cannot use passwords or passkeys. Saving this immediately revokes sessions and connected clients.</p><label><input type="checkbox" name="realUserVerified" value="true" ${item.realUserVerified ? 'checked' : ''} ${item.isBot ? 'disabled' : ''}> Verified real user</label><label><input type="checkbox" name="loginAllowed" value="true" ${item.loginAllowed !== false ? 'checked' : ''} ${item.isBot ? 'disabled' : ''}> Interactive login allowed</label><label><input type="checkbox" name="active" value="true" ${item.active ? 'checked' : ''}> Account active</label><label>Bot or review note<input name="botReason" value="${escapeHtml(item.botReason || '')}" placeholder="Why this account was classified"></label></td><td><label><input type="checkbox" name="wordpressConnectorAccess" value="true" ${item.wordpressConnectorAccess !== false && !item.isBot ? 'checked' : ''}> Plugin connector access</label><label>Permissions, comma separated<input name="permissions" value="${escapeHtml((item.permissions || []).join(', '))}" placeholder="stream.view, archive.download"></label><label>Notification email<input name="notificationEmail" type="email" value="${escapeHtml(item.notificationEmail || '')}"></label><label>Client ID or client email<input name="clientLookup" value="${escapeHtml(item.whmcsClientId || item.whmcsPortalEmail || '')}"></label></td><td><label>New password<input name="password" type="password" autocomplete="new-password" placeholder="Leave blank to keep current password"></label><button type="submit">Save account</button></form></td></tr>`).join('');
+  const entitlementRows = visibleUsers.map((item) => {
+    const entitlement = normalizeHostingEntitlement(item.hostingEntitlement || {}, { enterprise: item.hostingEntitlement?.unlimited === true });
+    return `<article><h3>${escapeHtml(item.username)}</h3><form method="post" action="/admin/users/${escapeHtml(item.id)}/hosting-entitlement"><label>Hosting status<select name="status"><option value="pending" ${entitlement.status === 'pending' ? 'selected' : ''}>Pending</option><option value="active" ${entitlement.status === 'active' ? 'selected' : ''}>Active</option><option value="suspended" ${entitlement.status === 'suspended' ? 'selected' : ''}>Suspended</option><option value="cancelled" ${entitlement.status === 'cancelled' ? 'selected' : ''}>Cancelled</option></select></label><label>Hosting model<select name="model"><option value="hosted" ${entitlement.model === 'hosted' ? 'selected' : ''}>Hosted</option><option value="self-hosted" ${entitlement.model === 'self-hosted' ? 'selected' : ''}>Self-hosted</option><option value="managed" ${entitlement.model === 'managed' ? 'selected' : ''}>Managed</option><option value="enterprise" ${entitlement.model === 'enterprise' ? 'selected' : ''}>Enterprise</option></select></label><label><input type="checkbox" name="unlimited" value="true" ${entitlement.unlimited ? 'checked' : ''}> Full enterprise limits</label><label>Installation limit<input name="installationLimit" type="number" min="0" max="10" value="${escapeHtml(entitlement.installationLimit ?? 1)}"></label><label>Owned-domain limit<input name="domainLimit" type="number" min="0" max="250" value="${escapeHtml(entitlement.domainLimit ?? 0)}"></label><label>Stream hosts per owned domain<input name="subdomainsPerDomain" type="number" min="0" max="250" value="${escapeHtml(entitlement.subdomainsPerDomain ?? 0)}"></label><label>Owned domains, one per line<textarea name="ownedDomains" rows="3">${escapeHtml(entitlement.ownedDomains.join('\n'))}</textarea></label><label>Allowed email domains, one per line<textarea name="allowedEmailDomains" rows="3">${escapeHtml(entitlement.allowedEmailDomains.join('\n'))}</textarea></label><label><input type="checkbox" name="allowRootDomains" value="true" ${entitlement.allowRootDomains ? 'checked' : ''}> Allow root domains after an empty-site confirmation</label><label><input type="checkbox" name="dnsAutomation" value="true" ${entitlement.dnsAutomation ? 'checked' : ''}> Permit scoped DNS automation</label><label>DNS change hold, days<input name="dnsChangeHoldDays" type="number" min="0" max="365" value="${escapeHtml(entitlement.dnsChangeHoldDays)}"></label><label>WHMCS service ID<input name="whmcsServiceId" inputmode="numeric" value="${escapeHtml(entitlement.whmcsServiceId)}"></label><p>License key: <strong>${entitlement.licenseKeySuffix ? `issued, ending ${escapeHtml(entitlement.licenseKeySuffix)}` : 'not issued'}</strong>.</p><button type="submit">Save hosting entitlement</button></form></article>`;
+  }).join('');
   const body = `<h1>Admin panel</h1>${adminTabs('accounts')}
 <section><h2>Create user</h2><form method="post" action="/admin/users"><label>Username<input name="username" required></label><label>Display name<input name="displayName"></label><label>Password<input name="password" type="password" required></label><label>Role<select name="role">${roleOptions('user', true)}</select></label><button type="submit">Create user</button></form></section>
-<section><h2>Users and identities</h2><p>Separate real people from automation accounts. Bots are quarantined from every interactive login path.</p><nav aria-label="Account filters">${filterLinks}</nav><table><tr><th>Account</th><th>Profile and role</th><th>Identity and login</th><th>Access details</th><th>Password and save</th></tr>${accountRows || '<tr><td colspan="5">No accounts match this filter.</td></tr>'}</table></section>`;
+<section><h2>Users and identities</h2><p>Separate real people from automation accounts. Bots are quarantined from every interactive login path.</p><nav aria-label="Account filters">${filterLinks}</nav><table><tr><th>Account</th><th>Profile and role</th><th>Identity and login</th><th>Access details</th><th>Password and save</th></tr>${accountRows || '<tr><td colspan="5">No accounts match this filter.</td></tr>'}</table></section><section><h2>Hosting, domains, and licenses</h2><p class="muted">WHMCS remains the billing and service-status authority. These limits are enforced by AAAStreamer even if a client bypasses the browser UI. A normal account may have a zero-domain allowance. Enterprise accounts may be unlimited, but root domains still require an explicit empty-site confirmation.</p>${entitlementRows || '<p>No accounts match this filter.</p>'}</section>`;
   res.send(page('Admin accounts', body, req.user));
 });
 
 app.get('/admin/signups', requireAdmin, (req, res) => {
   const store = readStore();
+  const external = store.settings.externalAuth || defaultExternalAuthSettings();
   const body = `<h1>Admin panel</h1>${adminTabs('signups')}
 <section><h2>Signup settings</h2><form method="post" action="/admin/signups"><label><input type="checkbox" name="registrationsEnabled" value="true" ${store.settings.registrationsEnabled ? 'checked' : ''}> Enable user signups</label><label>New account role<select name="registrationDefaultRole">${roleOptions(store.settings.registrationDefaultRole, false)}</select></label><p class="muted">Public signup cannot create administrator accounts. Administrators can assign admin access from the account tools.</p><button type="submit">Save signup settings</button></form></section>
+<section><h2>WordPress and Mastodon sign-in</h2><form method="post" action="/admin/external-auth"><label><input type="checkbox" name="wordpressEnabled" value="true" ${external.wordpressEnabled ? 'checked' : ''}> Allow sign-in through paired WordPress connector sites</label><label><input type="checkbox" name="mastodonEnabled" value="true" ${external.mastodonEnabled ? 'checked' : ''}> Allow sign-in through configured Mastodon servers</label><label><input type="checkbox" name="linkingEnabled" value="true" ${external.linkingEnabled ? 'checked' : ''}> Let signed-in users link additional identities</label><label><input type="checkbox" name="socialSignupEnabled" value="true" ${external.socialSignupEnabled ? 'checked' : ''}> Create a standard AAAStreamer account on first social sign-in when public signups are enabled</label><label><input type="checkbox" name="autoLinkByEmail" value="true" ${external.autoLinkByEmail ? 'checked' : ''}> Auto-link when exactly one existing account has the same provider-supplied email</label><label><input type="checkbox" name="recommendLocalFallback" value="true" ${external.recommendLocalFallback ? 'checked' : ''}> Recommend a separate local password or passkey fallback</label><label><input type="checkbox" name="requireLocalFallbackForManagers" value="true" ${external.requireLocalFallbackForManagers ? 'checked' : ''}> Require a local fallback before manager or administrator access is granted</label><p class="muted">Email auto-linking is off by default because matching addresses are weaker evidence than signing in locally and choosing Link. External identities never grant administrator or server-manager roles automatically. Configured Mastodon OAuth applications: <strong>${escapeHtml(mastodonAuthProviders.length)}</strong>. WordPress becomes available after a connector checks in using a client token belonging to that stream owner or an administrator.</p><button type="submit">Save external sign-in settings</button></form></section>
 <section><h2>Signup page</h2><p>When enabled, new users can create an account at <a href="/signup">/signup</a>. Each new account receives a stream page, primary stream key, and dashboard access.</p></section>`;
   res.send(page('Admin signups', body, req.user));
 });
@@ -5804,7 +6416,7 @@ app.get('/admin/branding', requireAdmin, (req, res) => {
   const store = readStore();
   const branding = store.settings.platformBranding || defaultPlatformBranding();
   const body = `<h1>Admin panel</h1>${adminTabs('branding')}
-<section><h2>Platform naming</h2><p class="muted">These fields control the default install name, front page heading, header name, sub-heading, slogan, tagline, and platform description. They can be changed at any time.</p><form method="post" action="/admin/branding"><label>Platform name<input name="platformName" value="${escapeHtml(branding.platformName)}" required></label><label>Sub-heading<input name="subheading" value="${escapeHtml(branding.subheading)}"></label><label>Slogan<input name="slogan" value="${escapeHtml(branding.slogan)}"></label><label>Tagline<input name="tagline" value="${escapeHtml(branding.tagline)}"></label><label>Description<textarea name="description" rows="5">${escapeHtml(branding.description)}</textarea></label><button type="submit">Save platform branding</button></form></section>`;
+<section><h2>Platform naming</h2><p class="muted">These fields control the install name, front page, host website link, and the streamer disclaimer shown below comments. They can be changed at any time.</p><form method="post" action="/admin/branding"><label>Platform name<input name="platformName" value="${escapeHtml(branding.platformName)}" required></label><label>Sub-heading<input name="subheading" value="${escapeHtml(branding.subheading)}"></label><label>Slogan<input name="slogan" value="${escapeHtml(branding.slogan)}"></label><label>Tagline<input name="tagline" value="${escapeHtml(branding.tagline)}"></label><label>Description<textarea name="description" rows="5">${escapeHtml(branding.description)}</textarea></label><label>Hosting website URL<input name="websiteUrl" type="url" value="${escapeHtml(branding.websiteUrl || '')}" placeholder="https://tappedin.fm"></label><label><input type="checkbox" name="showWebsiteLink" value="true" ${branding.showWebsiteLink ? 'checked' : ''}> Show the hosting website link in the stream footer</label><label><input type="checkbox" name="disclaimerEnabled" value="true" ${branding.disclaimerEnabled ? 'checked' : ''}> Show the streamer disclaimer below comments</label><label>Streamer disclaimer<textarea name="disclaimerText" rows="4">${escapeHtml(branding.disclaimerText || '')}</textarea></label><button type="submit">Save platform branding</button></form></section>`;
   res.send(page('Admin branding', body, req.user));
 });
 
@@ -5816,7 +6428,11 @@ app.post('/admin/branding', requireAdmin, (req, res) => {
     subheading: String(req.body.subheading || '').trim().slice(0, 180),
     slogan: String(req.body.slogan || '').trim().slice(0, 180),
     tagline: String(req.body.tagline || '').trim().slice(0, 180),
-    description: String(req.body.description || '').trim().slice(0, 1500)
+    description: String(req.body.description || '').trim().slice(0, 1500),
+    websiteUrl: safeUrl(req.body.websiteUrl),
+    showWebsiteLink: req.body.showWebsiteLink === 'true',
+    disclaimerEnabled: req.body.disclaimerEnabled === 'true',
+    disclaimerText: String(req.body.disclaimerText || '').trim().slice(0, 1200)
   };
   store.settings.siteName = platformName;
   store.events.push({ id: id('evt'), type: 'platform_branding_updated', payload: { platformName }, createdAt: nowIso() });
@@ -6064,7 +6680,7 @@ app.post('/admin/install/license', requireAdmin, (req, res) => {
     clientLinked: req.body.clientLinked === 'true',
     lockClientLinkedSettings: req.body.lockClientLinkedSettings === 'true',
     internalUse: req.body.internalUse === 'true',
-    licenseServerUrl: safeUrl(req.body.licenseServerUrl) || 'https://devine-creations.com',
+    licenseServerUrl: safeUrl(req.body.licenseServerUrl) || masterProductUrl,
     whmcsProductId: String(req.body.whmcsProductId || '').trim().replace(/[^0-9]/g, '').slice(0, 20),
     whmcsProductCode: String(req.body.whmcsProductCode || '').trim().replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 80),
     whmcsAdminUsername: String(req.body.whmcsAdminUsername || '').trim().replace(/[^a-zA-Z0-9_.@-]/g, '').slice(0, 80),
@@ -6482,6 +7098,68 @@ app.post('/admin/users', requireAdmin, (req, res) => {
   res.redirect('/admin/accounts');
 });
 
+app.post('/admin/users/:userId/hosting-entitlement', requireAdmin, (req, res) => {
+  const store = readStore();
+  const user = userById(store, req.params.userId);
+  if (!user) {
+    res.status(404).send(page('Account not found', '<h1>Account not found</h1><p>The selected account was not found.</p><p><a class="button" href="/admin/accounts">Back to accounts</a></p>', req.user));
+    return;
+  }
+  const entitlement = normalizeHostingEntitlement({
+    ...user.hostingEntitlement,
+    status: req.body.status,
+    model: req.body.model,
+    unlimited: req.body.unlimited === 'true',
+    installationLimit: req.body.installationLimit,
+    domainLimit: req.body.domainLimit,
+    subdomainsPerDomain: req.body.subdomainsPerDomain,
+    ownedDomains: req.body.ownedDomains,
+    allowedEmailDomains: req.body.allowedEmailDomains,
+    allowRootDomains: req.body.allowRootDomains === 'true',
+    dnsAutomation: req.body.dnsAutomation === 'true',
+    dnsChangeHoldDays: req.body.dnsChangeHoldDays,
+    whmcsServiceId: req.body.whmcsServiceId,
+    updatedAt: nowIso()
+  }, { enterprise: req.body.unlimited === 'true' });
+  if (!entitlement.unlimited && entitlement.ownedDomains.length > entitlement.domainLimit) {
+    res.status(400).send(page('Hosting entitlement not saved', '<h1>Hosting entitlement not saved</h1><p>The owned-domain list exceeds the account domain limit.</p><p><a class="button" href="/admin/accounts">Back to accounts</a></p>', req.user));
+    return;
+  }
+  user.hostingEntitlement = entitlement;
+  user.updatedAt = nowIso();
+  store.events.push({ id: id('evt'), type: 'hosting_entitlement_updated', payload: {
+    userId: user.id,
+    status: entitlement.status,
+    model: entitlement.model,
+    unlimited: entitlement.unlimited,
+    installationLimit: entitlement.installationLimit,
+    domainLimit: entitlement.domainLimit,
+    subdomainsPerDomain: entitlement.subdomainsPerDomain,
+    ownedDomains: entitlement.ownedDomains,
+    dnsAutomation: entitlement.dnsAutomation,
+    dnsChangeHoldDays: entitlement.dnsChangeHoldDays
+  }, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/admin/accounts');
+});
+
+app.post('/admin/external-auth', requireAdmin, (req, res) => {
+  const store = readStore();
+  store.settings.externalAuth = {
+    ...defaultExternalAuthSettings(),
+    wordpressEnabled: req.body.wordpressEnabled === 'true',
+    mastodonEnabled: req.body.mastodonEnabled === 'true',
+    linkingEnabled: req.body.linkingEnabled === 'true',
+    socialSignupEnabled: req.body.socialSignupEnabled === 'true',
+    autoLinkByEmail: req.body.autoLinkByEmail === 'true',
+    recommendLocalFallback: req.body.recommendLocalFallback === 'true',
+    requireLocalFallbackForManagers: req.body.requireLocalFallbackForManagers === 'true'
+  };
+  store.events.push({ id: id('evt'), type: 'external_auth_settings_updated', payload: store.settings.externalAuth, createdAt: nowIso() });
+  writeStore(store);
+  res.redirect('/admin/signups');
+});
+
 app.post('/admin/users/:userId', requireAdmin, async (req, res) => {
   const store = readStore();
   const user = userById(store, req.params.userId);
@@ -6705,6 +7383,7 @@ app.post('/admin/updater/install', requireAdmin, (req, res) => {
       ...process.env,
       AAASTREAMER_STORE: dataFile,
       AAASTREAMER_ROOT: repoRoot,
+      AAASTREAMER_UPDATE_MANIFEST_URL: store.settings.updateManifestUrl || updateManifestUrl,
       AAASTREAMER_PM2_NAME: process.env.AAASTREAMER_PM2_NAME || 'aaastreamer-api'
     }
   });
@@ -6777,6 +7456,32 @@ function addApiStreamSource(req, res) {
   res.status(201).json({ success: true, source });
 }
 
+function editApiStreamSource(req, res) {
+  const store = readStore();
+  const stream = store.streams.find((item) => item.id === req.params.streamId || item.slug === req.params.streamId);
+  if (!stream || !canEditStream(req.user, stream)) {
+    res.status(404).json({ success: false, error: 'Stream not found' });
+    return;
+  }
+  const result = editRelaySourceFromRequest({
+    ...req,
+    body: {
+      relayUrl: req.body.url,
+      relayLabel: req.body.label,
+      relayMediaType: req.body.mediaType,
+      relayProtocol: req.body.protocol
+    }
+  }, store, req.user, stream, req.params.sourceId);
+  if (!result.source) {
+    res.status(result.error === 'Stream source not found' ? 404 : 400).json({ success: false, error: result.error });
+    return;
+  }
+  store.events.push({ id: id('evt'), type: 'api_stream_source_updated', payload: { streamId: stream.id, sourceId: result.source.id, protocol: result.source.protocol }, createdAt: nowIso() });
+  if (sourceProcesses.has(stream.id) && stream.currentSource?.id === result.source.id) startSourceProcess(stream, result.source, store);
+  writeStore(store);
+  res.json({ success: true, source: result.source });
+}
+
 function startApiStreamSource(req, res) {
   const store = readStore();
   const stream = store.streams.find((item) => item.id === req.params.streamId || item.slug === req.params.streamId);
@@ -6810,9 +7515,11 @@ function getApiStreamDomains(req, res) {
 }
 
 app.post('/api/streams/:streamId/sources', requireNativeClientUser, addApiStreamSource);
+app.patch('/api/streams/:streamId/sources/:sourceId', requireNativeClientUser, editApiStreamSource);
 app.post('/api/streams/:streamId/sources/:sourceId/start', requireNativeClientUser, startApiStreamSource);
 app.get('/api/streams/:streamId/domains', requireNativeClientUser, getApiStreamDomains);
 app.post('/api/client/v1/streams/:streamId/sources', requireNativeClientUser, addApiStreamSource);
+app.patch('/api/client/v1/streams/:streamId/sources/:sourceId', requireNativeClientUser, editApiStreamSource);
 app.post('/api/client/v1/streams/:streamId/sources/:sourceId/start', requireNativeClientUser, startApiStreamSource);
 app.get('/api/client/v1/streams/:streamId/domains', requireNativeClientUser, getApiStreamDomains);
 
@@ -7027,6 +7734,7 @@ app.post('/api/voicelink/on_publish', (req, res) => {
   store.events.push({ id: id('evt'), type: 'publish', payload, createdAt: nowIso() });
   writeStore(store);
   broadcast({ type: 'publish', payload: stream });
+  queueMastodonPublisherPost(stream.id, 'live').catch(() => {});
   res.json({ success: true, stream });
 });
 
@@ -7075,11 +7783,31 @@ app.post('/api/streams/:streamId/restream/stop', requireBroadcaster, (req, res) 
 app.listen(port, bindHost, () => {
   ensureDataStore();
   ensureContinuousOnDemandRelays();
-  refreshJellyfinNowPlaying().catch(() => {});
-  setInterval(() => refreshJellyfinNowPlaying().catch(() => {}), 10000).unref();
+  refreshIcecastNowPlaying().catch(() => {});
+  setInterval(() => refreshIcecastNowPlaying().catch(() => {}), 10000).unref();
   setInterval(() => {
     runSchedulerTick();
     ensureContinuousOnDemandRelays();
   }, 30000).unref();
   console.log(`AAAStreamer listening on ${bindHost}:${port}`);
+});
+
+app.post('/api/mediamtx/auth', (req, res) => {
+  const remote = String(req.socket.remoteAddress || '');
+  if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remote)) {
+    res.status(403).end();
+    return;
+  }
+  const payload = normalizedPayload(req);
+  if (payload.action !== 'publish') {
+    res.status(403).end();
+    return;
+  }
+  const pathParts = String(payload.path || '').split('/').filter(Boolean);
+  const key = pathParts.at(-1) || '';
+  const store = readStore();
+  const stream = streamByKey(store, key);
+  const owner = stream?.ownerId ? userById(store, stream.ownerId) : null;
+  const allowed = Boolean(stream && (!owner || (owner.active && owner.loginAllowed !== false && canBroadcast(owner))));
+  res.status(allowed ? 204 : 401).end();
 });

@@ -11,6 +11,52 @@ This manual is written for three groups:
 - administrators who manage accounts, settings, plugins, payments, media folders, updates, and licensing
 - support or agent operators who help someone get activated without taking over their account
 
+## How AAAStreamer Compares With Hosted Streaming Platforms
+
+AAAStreamer provides many tools people expect from a conventional hosted
+streaming platform. Creators can publish live or on-demand audio and video,
+use a browser or an encoder such as OBS, relay Icecast or Shoutcast audio,
+embed a player on another site, and optionally send social notices when their
+server has that feature configured.
+
+The main difference is where the service can run and who controls it.
+AAAStreamer is available as a paid hosted service and can also be installed on
+a system a customer controls. An installation may serve a whole system, one
+user, or a container, depending on its license and configuration. Owners can
+use their own domains, move content and settings between supported installs,
+and connect independently operated servers and social services. This supports
+portability and federation instead of requiring every stream to remain on one
+central website.
+
+Each AAAStreamer account can keep a local password or passkey even when it is
+linked to WordPress, Mastodon, or another supported identity. This fallback
+helps the creator retain access if a provider login is revoked, unavailable,
+or intentionally unlinked.
+
+Creators retain control of their original content and account data. Using
+AAAStreamer to carry a stream does not by itself transfer ownership of that
+content to the software project or hosting platform. Creators are still
+responsible for obtaining the rights, licenses, releases, and consent needed
+for what they publish. Exact rights and obligations can also depend on the
+creator's agreements, location, service provider, and applicable law; this
+manual does not make a legal guarantee.
+
+AAAStreamer is designed to support free expression and to avoid unnecessary
+central control over lawful streams. That does not mean that every server must
+carry every kind of material or that moderation is never allowed. A server may
+act on unlawful content, security threats, abuse, spam, privacy violations,
+non-consensual material, or copyright complaints handled through an applicable
+process. Network, data-center, domain, and other providers may also impose
+terms that the server owner must follow.
+
+Official hosted AAAStreamer servers may apply their own published acceptable
+use, privacy, moderation, and complaint policies. A self-hosting operator sets
+the rules for that server, subject to applicable law and provider terms. Those
+rules should be easy to find, written in plain language, and applied as
+consistently and transparently as practical. Before publishing sensitive or
+controversial material, creators should review the rules of the exact server
+they plan to use.
+
 ## Account Activation And First Login
 
 An account can exist before it is fully activated for streaming. A standard
@@ -22,7 +68,9 @@ another RTMP encoder.
 To get started:
 
 1. Open the AAAStreamer login page.
-2. Sign in with the username and password provided by the site owner or admin.
+2. Sign in with your AAAStreamer username/password or passkey. If the owner has
+   enabled a paired WordPress site or Mastodon server, you may use that identity
+   instead.
 3. If the account is not yet a broadcaster account, choose **Get broadcast access and generate stream key**.
 4. Open the Dashboard.
 5. Review the Overview and Encoders tabs.
@@ -48,6 +96,7 @@ split into tabs:
 - **Support and payments**: support box settings, creator payment links, Stripe Connect, WHMCS invoice client lookup, Cash App, Apple Pay/payment links, and embed HTML
 - **Account**: display name, linked client ID/email, notification email, What's new preference, action confirmation preferences, recovery, 2FA, and passkeys
 - **Advanced**: on-demand display and offline visibility controls
+
 The logged-in navigation also includes **Manual**, which opens this manual
 without changing the current dashboard role or tab flow.
 
@@ -78,6 +127,43 @@ rtmp://HOSTNAME:1935/live
 
 Unknown stream keys are rejected unless the server is deliberately configured
 for open testing.
+
+### OBS and other RTMP apps
+
+In OBS, open **Settings > Stream**, choose **Custom**, put the AAAStreamer
+**Server URL** in **Server**, and put the **Primary stream key** in **Stream
+Key**. Do not add the key to the server URL unless the app specifically asks
+for one complete publish URL. Start with one destination and confirm the watch
+page before adding restream destinations.
+
+Audio-only producers can use the same RTMP server and stream key. Disable the
+video track in the encoder when the app supports a true audio-only publish. If
+it does not, a small static video canvas is acceptable.
+
+### Going live from a web browser
+
+Some installations provide a **Broadcast from this browser** panel after sign
+in. It can publish a microphone, camera, screen, or an allowed combination
+without installing OBS or the AAAStreamer desktop client. The browser asks for
+permission before sharing each device or screen.
+
+Browser broadcasting is available only when the server owner has configured a
+secure WHIP ingest endpoint. If the panel is absent or says that browser
+broadcasting is unavailable, use OBS, another RTMP encoder, or ask the server
+owner to configure WHIP. HTTPS is required for normal browser microphone,
+camera, and screen permissions.
+
+Before selecting **Go live**:
+
+1. Choose microphone, camera, screen, or the combination you intend to share.
+2. Confirm the browser's device preview and audio level.
+3. Close any other app that is already using the microphone or camera.
+4. Start the broadcast and then verify the public watch page.
+5. Use **Stop broadcast** before closing the tab or signing out.
+
+Screen sharing can expose notifications, passwords, and private windows. Select
+one window or browser tab when that is enough, and review the preview before
+publishing.
 
 ## Stream Keys And Encoder Keys
 
@@ -142,6 +228,32 @@ the A-Z and 0-9 letter navigation; choose page size; then check the visible page
 or individual media cards before starting playback or adding the selection to
 the queue.
 
+## Choosing And Configuring A Source
+
+Use the source type that matches the address or content you actually have:
+
+| Source | What to enter | When to use it |
+| --- | --- | --- |
+| Server media | A file selected from an administrator-approved folder | Music, programs, or videos already stored on the server |
+| Upload | An audio or video file from your device | Content that is not yet on the server |
+| HTTP/HTTPS media | A direct audio or video file URL | A remote MP3, AAC, FLAC, MP4, or other supported file |
+| HLS | The direct `.m3u8` playlist URL | A live or on-demand HLS feed, not its web player page |
+| Icecast | The public listener URL for the mount point | An Icecast audio stream such as `https://radio.example/stream.mp3` |
+| Shoutcast | The direct public listener URL | A Shoutcast station feed, not the station directory or admin page |
+| OBS/RTMP | The server URL and stream key from **Encoders** | A live microphone, camera, screen, or produced program |
+| Browser broadcast | Microphone, camera, or screen selected in the browser panel | Going live without an encoder, only when WHIP is configured |
+
+Give every saved source a plain **Content name** that listeners will understand.
+Choose **audio** or **video** based on the incoming content, then choose the
+matching protocol. A normal website page, embedded player page, Jellyfin page,
+Icecast status page, or Shoutcast administration page is not a playable source
+URL.
+
+After saving a source, use **Start streaming this source** and confirm the
+public watch page. If playback fails, first open the source URL in a suitable
+player such as VLC. An address that works only after a website login or depends
+on short-lived browser cookies usually cannot be relayed by the server.
+
 ## URL Relay Sources
 
 URL relays let AAAStreamer publish a remote media URL or stream through the
@@ -160,6 +272,11 @@ Use URL relays for:
 - training material
 - audio-described content
 - server-to-server stream sources
+
+Use **HTTP or HTTPS media** for a direct remote file, **HLS** for an `.m3u8`
+playlist, **Icecast** for an Icecast mount listener URL, and **Shoutcast** for a
+Shoutcast listener URL. AAAStreamer sends the relay through its local playback
+path so the public page can keep using the install's normal HLS output.
 
 ## Scheduled Shows And Calendar
 
@@ -280,6 +397,47 @@ Users can manage:
 - recovery code
 - authenticator-app two-factor authentication
 - passkeys
+- optional linked WordPress and Mastodon sign-in identities
+- a local fallback password even when the account was first created by social sign-in
+
+WordPress and Mastodon sign-in are optional and configurable by the server
+owner. A first social sign-in may create a standard AAAStreamer account only
+when both public registration and social-account creation are enabled. External
+identities do not import administrator or server-manager privileges; an
+AAAStreamer administrator must grant those roles explicitly.
+
+When first signing in through WordPress or Mastodon, AAAStreamer can create a
+provider-linked account if the server owner allows it. If you already have a
+local AAAStreamer account, sign in to that account first and link the provider
+from **Account**. This keeps streams, domains, schedules, media, and licensing
+on one account. Do not create a second account just to link a provider unless
+you intentionally want separate accounts.
+
+The normal Mastodon choice for a TappedIn installation is `md.tappedin.fm`.
+The normal choice for `aaastreamer.devinecreations.net` is
+`mastodon.devinecreations.net`. Server owners can configure other Mastodon
+instances. AAAStreamer uses the selected instance's OAuth authorization page,
+so local registration rules, approval requirements, disabled applications, and
+other instance policies still apply. Authenticating proves control of that
+Mastodon identity; it does not automatically make the person an AAAStreamer
+administrator.
+
+AAAStreamer recommends keeping a separate local password or passkey on the same
+account. That fallback lets the user revoke or lose one provider without losing
+the AAAStreamer account, its streams, media, schedule, or license linkage. A
+user may also keep an entirely separate administrator account for emergency
+recovery. The Account tab prevents removal of the final usable sign-in method.
+
+Server owners configure WordPress/Mastodon availability, account creation,
+identity linking, optional exact-email auto-linking, and fallback policy from
+Admin > Signups. Exact-email auto-linking is disabled initially. The safer
+method is to sign in locally first and choose Link from the Account tab.
+
+An owner may allow a linked Mastodon identity to manage a stream, server, or
+account by granting the matching AAAStreamer role. The role remains an
+AAAStreamer setting and can be removed without deleting the Mastodon account.
+Likewise, unlinking or revoking one provider does not delete the AAAStreamer
+account or its content when another usable sign-in method remains.
 
 Passkeys are domain-scoped by browser rules. If an install moves to a new
 domain, admins should configure the domain in install DNS/auth-domain settings,
@@ -315,10 +473,48 @@ Connector health is based on plugin status, errors, enabled state, and how
 recently the site checked in. A healthy plugin should report its version,
 stream mapping, comment behavior, and latest check-in without persistent errors.
 
-The WordPress plugin also includes account-panel and SSO-style helper behavior
-for connected sites. Treat site-specific default labels, such as
+The WordPress plugin also provides a signed, five-minute, one-time sign-in
+bridge for connected sites. The connector must check in with an authorized
+AAAStreamer client token belonging to the stream owner or an administrator;
+AAAStreamer stores only the derived token hash used to verify assertions.
+After pairing, a signed-in WordPress user can choose the plugin's AAAStreamer
+sign-in action. If that person already has an AAAStreamer account, link the
+WordPress identity while signed in locally so a duplicate account is not
+created. A server owner may disable WordPress sign-in while leaving the player
+and comments connector enabled.
+
+Treat site-specific labels, such as
 SoulFoodRadio-style examples, as defaults or examples rather than global product
 requirements.
+
+## Mastodon Publishing
+
+Mastodon sign-in and Mastodon publishing are separate controls. Linking an
+identity does not give AAAStreamer permission to post. A server owner must
+enable the publishing integration, and each user must choose the event types
+they want published.
+
+When the per-user publisher is configured, available choices include:
+
+- a notice when a stream goes live
+- a scheduled reminder a chosen number of minutes before going live
+- now-playing or metadata changes while a source is playing
+- posts from the stream owner's linked account
+- inclusion of the `#aaastreamer` tag
+
+An optional installation-wide AAAStreamer bot that mentions the stream owner is
+a separate future mode; it is not enabled by the per-user publisher. Do not
+assume scheduled, automatic, metadata, mention, or bot posting is active on an
+installation until the corresponding controls and a successful test post are
+visible. The current
+manual **Share on Mastodon** action, where present, is a separate server-side
+sharing feature and may use installation-level credentials rather than the
+user's linked sign-in identity.
+
+Users should be able to revoke posting permission without losing sign-in,
+streams, or account data. Server owners should keep provider client secrets and
+bot tokens in protected server configuration, never in a public profile or the
+AAAStreamer JSON data file.
 
 ## Admin Area
 
@@ -326,7 +522,7 @@ Admins get an Admin link after login. Admin pages include:
 
 - **Streams**: review streams and recent activity
 - **Accounts**: create users, edit roles, activate/deactivate users, link client IDs/emails, and reset passwords
-- **Signups**: enable or disable user signup and choose the default signup role
+- **Signups**: enable or disable user signup, choose the default signup role, and configure WordPress/Mastodon sign-in and linking policy
 - **Branding**: platform name, sub-heading, slogan, tagline, and description
 - **Messaging**: guest/user messages, reactions, review settings, blocked words, retention, and support-box defaults
 - **Share links**: tracked token links, direct URLs, use counts, and last-used time
@@ -336,6 +532,21 @@ Admins get an Admin link after login. Admin pages include:
 - **Media sources**: server media folders, upload folder, URL relay permissions, scan depth, user visibility, and detected files
 - **Encoder settings**: default bitrate, sample rate, latency, buffer, and HLS timing
 - **Updater**: update source, install latest update, maintenance mode, and restart playback recovery
+
+### Stream footer and disclaimer
+
+Under **Admin > Branding**, the server owner can set the hosting website URL,
+show or hide that website link, show or hide the streamer disclaimer, and edit
+the disclaimer text. The footer appears below the comments area on stream
+pages. Use the installation owner's root website, such as `https://tappedin.fm`,
+rather than an internal control-panel or stream URL.
+
+The included disclaimer is balanced for general use: it explains that streams
+and comments come from independent creators, that creators are responsible for
+their content and permissions, and that concerns should be reported to the
+stream owner or hosting provider. Owners may keep it as written, replace it
+with their own reviewed text, or disable it. Showing the website link is a
+separate switch from showing the disclaimer.
 
 ## Media Sources Admin
 
@@ -457,8 +668,32 @@ If media does not play:
 - confirm the file type is supported
 - confirm the folder is visible to users if a non-admin needs it
 - confirm URL relay is enabled if using a remote URL
+- confirm the selected protocol matches the source: direct media, HLS,
+  Icecast, or Shoutcast
+- confirm you entered a direct media, playlist, mount, or listener URL rather
+  than a website player, status page, or administration page
 - confirm the relay process is running
 - try a one-minute preview for local media
+
+If browser broadcasting is unavailable:
+
+- confirm the install has a configured WHIP ingest endpoint
+- use the AAAStreamer page over HTTPS
+- allow microphone, camera, or screen permission in the browser
+- close another app that may already control the selected device
+- use OBS or another RTMP encoder when WHIP is not configured
+
+If WordPress or Mastodon sign-in fails:
+
+- confirm the server owner has enabled that provider under Admin > Signups
+- for WordPress, confirm the site connector is paired and has checked in
+- for Mastodon, confirm you chose a configured instance and approved the OAuth
+  request on that same instance
+- sign in with the local AAAStreamer password or passkey fallback
+- link the provider from **Account** after local sign-in if you already have an
+  account and want to avoid a duplicate
+- ask an administrator to verify the linked identity and AAAStreamer role;
+  social identity alone does not grant administrator access
 
 If a support payment cannot be created:
 

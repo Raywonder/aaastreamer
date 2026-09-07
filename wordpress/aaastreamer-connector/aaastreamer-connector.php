@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AAAStreamer Connector
  * Description: Connects a WordPress site to an AAAStreamer account, provides an accessible stream player, and keeps listener comments inside WordPress moderation.
- * Version: 0.1.1
+ * Version: 0.2.0
  * Author: Devine Creations
  * License: GPL-2.0-or-later
  * Text Domain: aaastreamer-connector
@@ -16,7 +16,7 @@ final class AAAStreamer_Connector {
     private const OPTION = 'aaastreamer_connector_settings';
     private const NONCE_ACTION = 'aaastreamer_connector_save';
     private const REST_NAMESPACE = 'aaastreamer/v1';
-    private const VERSION = '0.1.1';
+    private const VERSION = '0.2.0';
 
     public static function boot(): void {
         add_action('admin_menu', [__CLASS__, 'admin_menu']);
@@ -24,6 +24,10 @@ final class AAAStreamer_Connector {
         add_action('wp_enqueue_scripts', [__CLASS__, 'enqueue_frontend']);
         add_action('admin_enqueue_scripts', [__CLASS__, 'enqueue_admin']);
         add_action('rest_api_init', [__CLASS__, 'register_rest_routes']);
+        add_action('admin_post_aaastreamer_sso', [__CLASS__, 'handle_sso']);
+        add_action('admin_post_nopriv_aaastreamer_sso', [__CLASS__, 'handle_sso']);
+        add_filter('pre_set_site_transient_update_plugins', [__CLASS__, 'check_for_update']);
+        add_filter('auto_update_plugin', [__CLASS__, 'allow_auto_update'], 10, 2);
         add_action('updated_option_' . self::OPTION, [__CLASS__, 'settings_updated'], 10, 3);
         add_filter('preprocess_comment', [__CLASS__, 'prepare_stream_comment']);
         add_filter('comments_open', [__CLASS__, 'comments_open_for_stream_page'], 9999, 2);
@@ -53,6 +57,7 @@ final class AAAStreamer_Connector {
             'api_token' => '',
             'iframe_admin' => '0',
             'auto_update' => '1',
+            'update_manifest_url' => 'https://aaastreamer.devinecreations.net/api/wordpress/releases/aaastreamer-connector',
         ];
     }
 
@@ -101,6 +106,7 @@ final class AAAStreamer_Connector {
         $next['hide_comments_on_stream_page'] = empty($input['hide_comments_on_stream_page']) ? '0' : '1';
         $next['iframe_admin'] = empty($input['iframe_admin']) ? '0' : '1';
         $next['auto_update'] = empty($input['auto_update']) ? '0' : '1';
+        $next['update_manifest_url'] = esc_url_raw(trim((string)($input['update_manifest_url'] ?? $current['update_manifest_url'])));
         $next['api_base'] = esc_url_raw(trim((string)($input['api_base'] ?? $current['api_base'])));
         $next['stream_slug'] = sanitize_title((string)($input['stream_slug'] ?? $current['stream_slug']));
         $next['stream_title'] = sanitize_text_field((string)($input['stream_title'] ?? $current['stream_title']));
@@ -197,7 +203,10 @@ final class AAAStreamer_Connector {
             'iat' => time(),
             'exp' => time() + 300,
         ];
-        $secret = wp_salt('auth');
+        if (empty($settings['api_token'])) {
+            return new WP_REST_Response(['success' => false, 'error' => 'AAAStreamer sign-in has not been paired with this WordPress site.'], 503);
+        }
+        $secret = hash('sha256', (string)$settings['api_token']);
         $body = self::base64url(wp_json_encode($payload));
         $sig = self::base64url(hash_hmac('sha256', $body, $secret, true));
         return new WP_REST_Response([
@@ -206,6 +215,114 @@ final class AAAStreamer_Connector {
             'expiresAt' => $payload['exp'],
             'dashboardUrl' => $settings['account_dashboard_url'],
         ]);
+    }
+
+    private static function update_manifest(): ?array {
+        $settings = self::settings();
+        $url = (string)($settings['update_manifest_url'] ?? '');
+        $parts = wp_parse_url($url);
+        if (!is_array($parts) || strtolower((string)($parts['scheme'] ?? '')) !== 'https') {
+            return null;
+        }
+        $cache_key = 'aaastreamer_manifest_' . substr(hash('sha256', $url . '|' . (string)$settings['api_token']), 0, 16);
+        $cached = get_site_transient($cache_key);
+        if (is_array($cached)) {
+            return $cached;
+        }
+        $headers = ['Accept' => 'application/json'];
+        if (!empty($settings['api_token'])) {
+            $headers['Authorization'] = 'Bearer ' . $settings['api_token'];
+        }
+        $response = wp_remote_get($url, ['timeout' => 8, 'headers' => $headers]);
+        if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 200) {
+            return null;
+        }
+        $manifest = json_decode((string)wp_remote_retrieve_body($response), true);
+        if (!is_array($manifest) || empty($manifest['version']) || empty($manifest['packageUrl'])) {
+            return null;
+        }
+        $package = wp_parse_url((string)$manifest['packageUrl']);
+        if (!is_array($package) || strtolower((string)($package['scheme'] ?? '')) !== 'https') {
+            return null;
+        }
+        set_site_transient($cache_key, $manifest, 5 * MINUTE_IN_SECONDS);
+        return $manifest;
+    }
+
+    public static function check_for_update($transient) {
+        if (!is_object($transient)) {
+            return $transient;
+        }
+        $manifest = self::update_manifest();
+        if (!$manifest || version_compare(self::VERSION, (string)$manifest['version'], '>=')) {
+            return $transient;
+        }
+        $plugin = plugin_basename(__FILE__);
+        $transient->response[$plugin] = (object)[
+            'slug' => 'aaastreamer-connector',
+            'plugin' => $plugin,
+            'new_version' => sanitize_text_field((string)$manifest['version']),
+            'package' => esc_url_raw((string)$manifest['packageUrl']),
+            'url' => esc_url_raw((string)($manifest['homepage'] ?? 'https://aaastreamer.devinecreations.net')),
+            'requires' => sanitize_text_field((string)($manifest['requiresWordPress'] ?? '6.2')),
+            'requires_php' => sanitize_text_field((string)($manifest['requiresPhp'] ?? '7.4')),
+        ];
+        return $transient;
+    }
+
+    public static function allow_auto_update(bool $update, $item): bool {
+        if (($item->plugin ?? '') !== plugin_basename(__FILE__)) {
+            return $update;
+        }
+        return self::settings()['auto_update'] === '1';
+    }
+
+    public static function handle_sso(): void {
+        $settings = self::settings();
+        $state = sanitize_text_field(wp_unslash($_GET['state'] ?? ''));
+        $callback = esc_url_raw(wp_unslash($_GET['callback'] ?? ''));
+        if (!is_user_logged_in()) {
+            auth_redirect();
+            return;
+        }
+        if ($settings['wordpress_sso_enabled'] !== '1' || empty($settings['api_token']) || $state === '' || strlen($state) > 160) {
+            wp_die(esc_html__('WordPress sign-in is not configured for this AAAStreamer connection.', 'aaastreamer-connector'), '', ['response' => 403]);
+        }
+        $api = wp_parse_url((string)$settings['api_base']);
+        $target = wp_parse_url($callback);
+        $same_origin = is_array($api) && is_array($target)
+            && strtolower((string)($api['scheme'] ?? '')) === 'https'
+            && strtolower((string)($target['scheme'] ?? '')) === 'https'
+            && strtolower((string)($api['host'] ?? '')) === strtolower((string)($target['host'] ?? ''))
+            && (int)($api['port'] ?? 443) === (int)($target['port'] ?? 443)
+            && (string)($target['path'] ?? '') === '/auth/wordpress/callback';
+        if (!$same_origin) {
+            wp_die(esc_html__('The AAAStreamer callback address was not accepted.', 'aaastreamer-connector'), '', ['response' => 403]);
+        }
+        $user = wp_get_current_user();
+        $now = time();
+        $payload = [
+            'iss' => home_url('/'),
+            'aud' => rtrim((string)$settings['api_base'], '/') . '/',
+            'sub' => (string)$user->ID,
+            'username' => (string)$user->user_login,
+            'name' => (string)$user->display_name,
+            'email' => (string)$user->user_email,
+            'roles' => array_values((array)$user->roles),
+            'state' => $state,
+            'iat' => $now,
+            'exp' => $now + 300,
+        ];
+        $body = self::base64url(wp_json_encode($payload));
+        $secret = hash('sha256', (string)$settings['api_token']);
+        $assertion = $body . '.' . self::base64url(hash_hmac('sha256', $body, $secret, true));
+        nocache_headers();
+        header('Referrer-Policy: no-referrer');
+        ?><!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?php esc_html_e('Continue to AAAStreamer', 'aaastreamer-connector'); ?></title></head><body>
+        <main><h1><?php esc_html_e('Continue to AAAStreamer', 'aaastreamer-connector'); ?></h1><p><?php esc_html_e('Your WordPress identity has been verified. Continuing securely.', 'aaastreamer-connector'); ?></p>
+        <form id="aaastreamer-sso" method="post" action="<?php echo esc_url($callback); ?>"><input type="hidden" name="state" value="<?php echo esc_attr($state); ?>"><input type="hidden" name="assertion" value="<?php echo esc_attr($assertion); ?>"><button type="submit"><?php esc_html_e('Continue', 'aaastreamer-connector'); ?></button></form></main>
+        <script>document.getElementById('aaastreamer-sso').submit();</script></body></html><?php
+        exit;
     }
 
     public static function render_player_shortcode($atts = []): string {
@@ -391,6 +508,7 @@ final class AAAStreamer_Connector {
         <div class="wrap aaastreamer-admin">
             <h1><?php esc_html_e('AAAStreamer', 'aaastreamer-connector'); ?></h1>
             <p><?php esc_html_e('Manage the linked AAAStreamer account, WordPress listen page player, and WordPress sign-in bridge for this site.', 'aaastreamer-connector'); ?></p>
+            <p class="notice notice-info inline"><?php esc_html_e('This connector is a convenient WordPress companion for your player and account. It does not replace the full AAAStreamer platform, where streaming, media, schedules, licensing, and complete server administration remain available.', 'aaastreamer-connector'); ?></p>
 
             <h2><?php esc_html_e('SoulFoodRadio status', 'aaastreamer-connector'); ?></h2>
             <table class="widefat striped aaastreamer-status-table">
@@ -414,7 +532,16 @@ final class AAAStreamer_Connector {
                     <?php self::checkbox_row('show_public_page_link', __('Show a link to the full AAAStreamer stream page', 'aaastreamer-connector'), $settings); ?>
                     <?php self::checkbox_row('iframe_admin', __('Show embedded AAAStreamer dashboard panel when supported by the AAAStreamer site', 'aaastreamer-connector'), $settings); ?>
                     <?php self::checkbox_row('auto_update', __('Allow this connector to auto-update when AAAStreamer publishes a compatible plugin update', 'aaastreamer-connector'), $settings); ?>
+                    <?php self::text_row('update_manifest_url', __('Trusted AAAStreamer module and update manifest URL', 'aaastreamer-connector'), $settings, 'url'); ?>
                 </table>
+
+                <h2><?php esc_html_e('Connector modules', 'aaastreamer-connector'); ?></h2>
+                <?php $module_manifest = self::update_manifest(); ?>
+                <?php if (!empty($module_manifest['modules']) && is_array($module_manifest['modules'])) : ?>
+                    <table class="widefat striped"><thead><tr><th><?php esc_html_e('Module', 'aaastreamer-connector'); ?></th><th><?php esc_html_e('Tier', 'aaastreamer-connector'); ?></th><th><?php esc_html_e('Availability', 'aaastreamer-connector'); ?></th></tr></thead><tbody>
+                    <?php foreach ($module_manifest['modules'] as $module) : ?><tr><td><?php echo esc_html((string)($module['name'] ?? $module['id'] ?? 'Module')); ?></td><td><?php echo esc_html((string)($module['tier'] ?? 'free')); ?></td><td><?php echo !empty($module['available']) ? esc_html__('Available', 'aaastreamer-connector') : esc_html__('Requires an eligible linked AAAStreamer account', 'aaastreamer-connector'); ?></td></tr><?php endforeach; ?>
+                    </tbody></table>
+                <?php else : ?><p><?php esc_html_e('Module information is temporarily unavailable. Existing connector features continue to work.', 'aaastreamer-connector'); ?></p><?php endif; ?>
 
                 <h2><?php esc_html_e('Stream settings', 'aaastreamer-connector'); ?></h2>
                 <table class="form-table" role="presentation">
@@ -589,6 +716,7 @@ final class AAAStreamer_Connector {
             'commentsEnabled' => ($settings['comments_enabled'] ?? '0') === '1',
             'hideCommentsOnStreamPage' => ($settings['hide_comments_on_stream_page'] ?? '0') === '1',
             'autoUpdate' => ($settings['auto_update'] ?? '0') === '1',
+            'ssoEnabled' => ($settings['wordpress_sso_enabled'] ?? '0') === '1',
         ];
         $headers = ['Content-Type' => 'application/json'];
         if (!empty($settings['api_token'])) {

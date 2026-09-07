@@ -20,6 +20,7 @@ BRANCH="${BRANCH:-main}"
 CREATE_NGINX="${CREATE_NGINX:-true}"
 DOMAIN="${DOMAIN:-}"
 EMAIL="${EMAIL:-}"
+HOST_WEBSITE_URL="${HOST_WEBSITE_URL:-}"
 AAASTREAMER_LICENSE_TIER="${AAASTREAMER_LICENSE_TIER:-self-hosted-starter}"
 AAASTREAMER_INSTALL_AUTH_MODE="${AAASTREAMER_INSTALL_AUTH_MODE:-license-token}"
 AAASTREAMER_WHMCS_PRODUCT_ID="${AAASTREAMER_WHMCS_PRODUCT_ID:-}"
@@ -39,6 +40,9 @@ fi
 
 if [[ -z "$PUBLIC_URL" && -n "$DOMAIN" ]]; then
   PUBLIC_URL="https://${DOMAIN}"
+fi
+if [[ -z "$HOST_WEBSITE_URL" && -n "$DOMAIN" ]]; then
+  if [[ "$DOMAIN" == *.devinecreations.net ]]; then HOST_WEBSITE_URL="https://devinecreations.net"; else HOST_WEBSITE_URL="https://${DOMAIN#*.}"; fi
 fi
 
 echo "Installing AAAStreamer server"
@@ -134,6 +138,9 @@ AAASTREAMER_PORT=${APP_PORT}
 AAASTREAMER_BIND_HOST=127.0.0.1
 AAASTREAMER_PUBLIC_URL=${PUBLIC_URL}
 AAASTREAMER_HLS_BASE_URL=${PUBLIC_URL}
+AAASTREAMER_AUTH_BASE_URL=${PUBLIC_URL}
+AAASTREAMER_WHIP_PUBLIC_URL=${PUBLIC_URL}/whip
+AAASTREAMER_HOST_WEBSITE_URL=${HOST_WEBSITE_URL}
 AAASTREAMER_RTMP_HOST=${RTMP_HOST}
 RTMP_APP_NAME=${RTMP_APP_NAME}
 AAASTREAMER_REGISTRATION_ENABLED=true
@@ -154,6 +161,9 @@ AAASTREAMER_STRIPE_WEBHOOK_SECRET=
 AAASTREAMER_MASTODON_INSTANCE_URL=https://md.tappedin.fm
 AAASTREAMER_MASTODON_ACCESS_TOKEN=
 AAASTREAMER_MASTODON_ACCOUNT_LABEL=TappedIn
+# Authentication OAuth applications are installation-specific. Keep secrets here, not in the JSON data store.
+AAASTREAMER_MASTODON_AUTH_PROVIDERS_JSON=[]
+AAASTREAMER_CREDENTIAL_ENCRYPTION_KEY=
 # Licensing remains tied to Devine Creations/WHMCS for customer-owned installs.
 AAASTREAMER_LICENSE_ENABLED=true
 AAASTREAMER_LICENSE_SERVER_URL=https://devine-creations.com
@@ -206,6 +216,9 @@ EOF_SERVICE
 
   install -o root -g root -m 0644 "$APP_DIR/ops/host/mediamtx.yml" "$MEDIAMTX_CONFIG"
   sed -i "s|/opt/aaastreamer/hooks/|${APP_DIR}/hooks/|g" "$MEDIAMTX_CONFIG"
+  if [[ -n "$DOMAIN" ]]; then
+    sed -i "s|webrtcAdditionalHosts: \[\]|webrtcAdditionalHosts: ['${DOMAIN}']|" "$MEDIAMTX_CONFIG"
+  fi
   cat >"/etc/systemd/system/${MEDIA_SERVICE_NAME}.service" <<EOF_MEDIA_SERVICE
 [Unit]
 Description=AAAStreamer MediaMTX RTMP and HLS service
@@ -243,6 +256,16 @@ server {
     server_name ${DOMAIN};
 
     client_max_body_size 100m;
+
+    location /whip/ {
+        proxy_pass http://127.0.0.1:8889/;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
 
     location / {
         proxy_pass http://127.0.0.1:${APP_PORT};

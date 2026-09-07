@@ -40,7 +40,7 @@ management.
 - stream latency, player buffer, and HLS timing controls
 - external destination records for YouTube Live, Twitch, Facebook Live, LinkedIn Live, Kick, Restream.io, Rumble, X, and custom RTMP services, with provider setup links and manual RTMP details kept secondary
 - optional stream background images, stream links, and iframe embed codes
-- direct-host updater with temporary maintenance mode
+- release-archive updater with temporary maintenance mode and rollback
 - self-hosted server installer with systemd, nginx, licensing, WHMCS, social sharing, and DNS provider configuration hooks
 - OBS-compatible RTMP ingest using per-user stream keys
 - live visitor comments with server-sent event updates
@@ -52,7 +52,31 @@ management.
 
 Admins can log in, create users, enable or disable public signups, set platform branding, configure guest and logged-in messaging, moderate messages, set retention windows for snappy chat pages, set support/payment-box defaults, configure WHMCS and Stripe payment routing, choose which server media folders are available to streamers, review tracked share links, configure install/licensing/DNS settings, review streams, set encoder defaults, tune latency and buffer defaults, and inspect recent publish, done, payment, comment, and moderation events. Users can log in, copy their RTMP server URL and stream key, copy a tracked token share link, reveal direct watch/HLS URLs when needed for desktop clients or media players, revoke and generate a new stream key in one confirmed action, add extra encoder keys, bulk upload media, select or multi-select approved server media with checkboxes, queue media for continuous playback, add URL relay sources, schedule live or media-backed shows, save external destination details, tune stream latency and playback buffer, edit the stream profile, add a background image and links, configure an optional support/payment box, add general embedded content, link PayPal/Stripe/Cash App/Apple Pay URLs, connect a Stripe account ID plus client ID or client email for invoice payments, copy embed code, and open the public watch page for their stream. Visitors receive token-style share URLs by default, can open a stream page only when the creator is live or on-demand playback is enabled, watch HLS or on-demand playback, post live comments when messaging is enabled, react to visible messages when reactions are enabled, and start configured WHMCS invoice or Stripe Checkout support payments.
 
-Users can also manage account security from their dashboard: notification email reminders, self-service recovery, built-in authenticator-app 2FA, passkeys, and confirmation preferences for add, remove, go-live, and disable actions. Admins can edit existing accounts, roles, active state, linked client details, notification emails, and password resets from the Accounts admin section.
+Users can also manage account security from their dashboard: notification email reminders, self-service recovery, built-in authenticator-app 2FA, passkeys, linked WordPress/Mastodon identities, a local fallback password, and confirmation preferences for add, remove, go-live, and disable actions. Social sign-in never imports an administrator role. Server owners configure provider availability, just-in-time standard-account creation, linking, optional exact-email auto-linking, and fallback policy under Admin > Signups. Admins can edit existing accounts, roles, active state, linked client details, notification emails, and password resets from the Accounts admin section.
+
+## Sign-in providers and account recovery
+
+Social sign-in is optional. A provider identity is linked to an AAAStreamer
+account; it does not replace the account or determine its role. A server owner
+may allow a first successful provider sign-in to create a standard account,
+but manager and administrator access must still be granted inside AAAStreamer.
+Users who need privileged access should keep a local password or passkey, or a
+separate emergency administrator account, so a provider can be revoked without
+losing the stream, settings, or account data.
+
+Mastodon uses an OAuth application registered for the exact AAAStreamer callback
+origin. For `aaastreamer.devinecreations.net`, use
+`mastodon.devinecreations.net`; for a TappedIn-hosted instance, use
+`md.tappedin.fm`. Other Mastodon servers work only when the operator adds their
+exact HTTPS issuer, client ID, and client secret to
+`AAASTREAMER_MASTODON_AUTH_PROVIDERS_JSON`. The token used for automated
+timeline sharing is separate from these login credentials.
+
+WordPress sign-in is available only through a paired AAAStreamer connector.
+The connector sends a signed, short-lived, one-time assertion after the user
+signs in to WordPress. A site URL or matching email address alone is not trusted.
+Site pairing and sign-in availability remain under the AAAStreamer server
+owner's control.
 
 ## Payments and platform share
 
@@ -74,6 +98,23 @@ Stream key: shown in the user dashboard
 ```
 
 ## Media sources and offline visibility
+
+Choose the source that matches how the creator is publishing:
+
+- **Browser:** use Go live in the dashboard only when the server owner has
+  configured a WHIP endpoint. Choose microphone-only or microphone and camera.
+- **OBS or another encoder:** copy the RTMP server and stream key from the
+  dashboard into the encoder. Keep the key private.
+- **Existing live audio server:** choose Icecast or Shoutcast and enter the
+  HTTP(S) listener URL, not its administration page.
+- **Existing web stream:** choose HLS for an `.m3u8` playlist or HTTP for a
+  direct playable audio/video URL.
+- **On-demand content:** upload media or choose an approved server file, then
+  select loop, sequential, random, or stop behavior.
+
+Test a new source while signed in before publishing its watch link. A source
+that needs credentials should use server-side configuration; do not place a
+password in a public stream URL or description.
 
 Visitor-facing stream links are shown only when a stream is live or when the
 stream owner enables on-demand playback and selects a valid source. Offline
@@ -144,6 +185,27 @@ sharing can be enabled with `AAASTREAMER_MASTODON_INSTANCE_URL` and
 URL through the configured service identity, such as a TappedIn account on
 `md.tappedin.fm`.
 
+Mastodon account authentication is separate from server-side sharing. Set the
+exact callback base with `AAASTREAMER_AUTH_BASE_URL`; provider client secrets
+remain environment-only.
+
+## Browser broadcasting and stream-page footer
+
+Browser broadcasting is feature-gated. Set `AAASTREAMER_WHIP_PUBLIC_URL` only
+after a TLS-protected MediaMTX WebRTC/WHIP publish endpoint is reachable from
+the browser. When it is blank, the browser go-live controls stay hidden and
+creators continue to use OBS-compatible RTMP, a desktop client, or configured
+HTTP/HLS/Icecast/Shoutcast relays. Browser broadcasting requires microphone or
+camera permission; audio-only and audio-with-video publishing use the same
+authenticated stream account and key controls.
+
+Stream pages can show a balanced creator-content disclaimer below the comments
+form. The server owner can edit or disable the text, enable or disable the host
+website link, and set that site to the install's root domain. Set the initial
+site with `AAASTREAMER_HOST_WEBSITE_URL`, for example `https://tappedin.fm` for
+a TappedIn-hosted server or `https://devinecreations.net` for the Devine
+Creations product site.
+
 ## Self-hosted installer, licensing, and DNS
 
 The Linux server installer is `scripts/install-aaastreamer-server.sh`. It
@@ -177,6 +239,15 @@ deployments; the native installer is the preferred system installation.
 Native installs bind the API to loopback by default and expose it through the
 configured reverse proxy. Docker deployments retain their explicitly published
 container-port behavior unless `AAASTREAMER_BIND_HOST` is set.
+
+Updates are published as release archives from the configured Gitea release
+area; installed servers do not need repository credentials. The updater reads
+`AAASTREAMER_UPDATE_MANIFEST_URL`, downloads the manifest's HTTPS archive,
+checks its SHA-256 digest, stages and validates the application, and keeps a
+rollback copy while services restart. A native installation must run the
+updater through the installer-provided privileged service path so it can swap
+the root-owned application and restart services; giving the web process broad
+write or service-control privileges is not supported.
 
 Customer-owned installs can use their own PayPal, Apple Pay, Stripe links, or
 other creator payment methods. License, invoice, install ID, product ID, domain,
