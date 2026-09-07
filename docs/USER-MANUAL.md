@@ -400,11 +400,13 @@ Users can manage:
 - optional linked WordPress and Mastodon sign-in identities
 - a local fallback password even when the account was first created by social sign-in
 
-WordPress and Mastodon sign-in are optional and configurable by the server
-owner. A first social sign-in may create a standard AAAStreamer account only
-when both public registration and social-account creation are enabled. External
-identities do not import administrator or server-manager privileges; an
-AAAStreamer administrator must grant those roles explicitly.
+On server versions that include the external-authentication feature, WordPress
+and Mastodon sign-in are optional and configurable by the server owner. A first
+social sign-in may create a standard AAAStreamer account only when both public
+registration and social-account creation are enabled. External identities do
+not import administrator or server-manager privileges; an AAAStreamer
+administrator must grant those roles explicitly. Installing connector 0.2.1
+alone does not deploy this server feature.
 
 When first signing in through WordPress or Mastodon, AAAStreamer can create a
 provider-linked account if the server owner allows it. If you already have a
@@ -466,22 +468,43 @@ The current WordPress plugin shortcodes are:
 [aaastreamer_account_panel]
 ```
 
+Connector version 0.2.1 includes its own HLS audio support for browsers that do
+not play HLS audio natively. Browsers with native HLS support continue to use
+their built-in player. The connector also retries through WordPress's query
+REST route when a site's pretty REST URL is unavailable or returns an error.
+This helps sites whose permalink or web-server rules do not expose the usual
+pretty REST path.
+
 Admins can review connected plugin sites, plugin version, enabled/disabled
 state, comments state, health level, last check-in time, and last error.
 
 Connector health is based on plugin status, errors, enabled state, and how
 recently the site checked in. A healthy plugin should report its version,
 stream mapping, comment behavior, and latest check-in without persistent errors.
+Version 0.2.1 corrects the settings-save check-in and live-status detection, so
+save the connector settings once after upgrading and then review the reported
+health and mapped stream.
 
-The WordPress plugin also provides a signed, five-minute, one-time sign-in
-bridge for connected sites. The connector must check in with an authorized
-AAAStreamer client token belonging to the stream owner or an administrator;
-AAAStreamer stores only the derived token hash used to verify assertions.
-After pairing, a signed-in WordPress user can choose the plugin's AAAStreamer
-sign-in action. If that person already has an AAAStreamer account, link the
-WordPress identity while signed in locally so a duplicate account is not
-created. A server owner may disable WordPress sign-in while leaving the player
-and comments connector enabled.
+The connector checks the official AAAStreamer master update manifest for new
+versions. Its WordPress update package is a public ZIP, so the WordPress site
+does not need Gitea credentials or access to the private source repository.
+The public ZIP may be mirrored from the corresponding private Gitea release;
+the master manifest remains the address WordPress uses for update discovery.
+Existing connector settings and stream mappings should be retained during an
+upgrade, but the administrator should verify them afterward.
+
+Version 0.2.1 contains the WordPress side of a signed, five-minute, one-time
+sign-in bridge. It requires a supporting AAAStreamer server version and an
+authorized client pairing before it can be used. The separate server-side
+authentication feature branch is not installed merely by updating the
+WordPress connector, and production SSO should not be treated as proven until
+the server feature has been deployed, configured, and tested on that install.
+When available, the connector must check in with an authorized AAAStreamer
+client token belonging to the stream owner or an administrator; AAAStreamer
+stores only the derived token hash used to verify assertions. If a person
+already has an AAAStreamer account, link the WordPress identity while signed in
+locally so a duplicate account is not created. A server owner may disable
+WordPress sign-in while leaving the player and comments connector enabled.
 
 Treat site-specific labels, such as
 SoulFoodRadio-style examples, as defaults or examples rather than global product
@@ -493,6 +516,11 @@ Mastodon sign-in and Mastodon publishing are separate controls. Linking an
 identity does not give AAAStreamer permission to post. A server owner must
 enable the publishing integration, and each user must choose the event types
 they want published.
+
+The per-user Mastodon publisher belongs to the separate server feature branch.
+Documentation of its settings is not proof that it is deployed or working on a
+production server. Treat publishing as available only after the exact server
+has exposed the controls and completed a successful authorized test post.
 
 When the per-user publisher is configured, available choices include:
 
@@ -674,6 +702,25 @@ If media does not play:
   than a website player, status page, or administration page
 - confirm the relay process is running
 - try a one-minute preview for local media
+
+If an account was restored but its stream is blank, first determine which of
+these cases applies:
+
+- **No source is configured:** the account and stream may be healthy but have
+  nothing assigned to play. Ask the stream owner which relay, upload, server
+  file, or encoder should belong to that stream, then configure only that
+  source.
+- **A source is configured but unreadable:** preserve the saved source record
+  while checking its URL or file path, file permissions, media format, network
+  access, and relay status. Repair or replace it only with the stream owner's
+  approval.
+
+Do not automatically fill a restored blank stream with media found elsewhere
+on the server. A readable file is not proof that it belongs to that account,
+and starting it could publish unrelated or private content. Preserve source
+ownership and stream mapping during recovery. For example, several restored
+accounts can correctly remain offline and await their owners' source choices
+while other mapped streams resume playback.
 
 If browser broadcasting is unavailable:
 

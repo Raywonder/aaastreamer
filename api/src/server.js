@@ -4,6 +4,8 @@ import dns from 'dns';
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
+import { registerWordPressReleaseRoutes } from './wordpress-release-routes.js';
+import { writeJsonAtomic } from './atomic-store.js';
 import { evaluateDomainClaim, isEmailAllowed, normalizeHostingEntitlement } from './account-policy.js';
 import {
   canonicalIssuer,
@@ -480,8 +482,7 @@ function readStore() {
 }
 
 function writeStore(store) {
-  fs.mkdirSync(dataDir, { recursive: true });
-  fs.writeFileSync(dataFile, JSON.stringify(store, null, 2));
+  writeJsonAtomic(dataFile, store);
 }
 
 function normalizeMessagingSettings(settings = {}) {
@@ -4319,6 +4320,7 @@ app.post('/api/wordpress/checkin', (req, res) => {
   res.json({ success: true, siteId: site.id, healthLevel: wordpressConnectorHealth(site), commentsHiddenOnStreamPage: wordpressConnectorHidesStreamComments(store, stream || { id: site.streamId, slug: site.streamSlug }), autoUpdate: site.autoUpdate !== false, ssoEnabled: site.ssoEnabled });
 });
 
+registerWordPressReleaseRoutes(app, path.resolve(process.env.AAASTREAMER_WORDPRESS_RELEASE_DIR || path.join(repoRoot, 'wordpress/releases')));
 app.get('/api/wordpress/releases/aaastreamer-connector', (req, res) => {
   const store = readStore();
   const auth = bearerClient(req, store);
