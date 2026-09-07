@@ -173,6 +173,9 @@ aliases without `/client/v1` remain available. Use `mediaType` set to
 `audio` or `video`, `protocol` set to `http`, `hls`, `icecast`, or `shoutcast`,
 and an HTTP(S) `url`. Docker Compose remains available for portable and hosted
 deployments; the native installer is the preferred system installation.
+Native installs bind the API to loopback by default and expose it through the
+configured reverse proxy. Docker deployments retain their explicitly published
+container-port behavior unless `AAASTREAMER_BIND_HOST` is set.
 
 Customer-owned installs can use their own PayPal, Apple Pay, Stripe links, or
 other creator payment methods. License, invoice, install ID, product ID, domain,

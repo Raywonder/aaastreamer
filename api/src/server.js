@@ -32,6 +32,7 @@ app.use((err, _req, res, next) => {
 });
 
 const port = Number(process.env.AAASTREAMER_PORT || 8095);
+const bindHost = process.env.AAASTREAMER_BIND_HOST || '0.0.0.0';
 const maxUploadBytes = Number(process.env.AAASTREAMER_MAX_UPLOAD_BYTES || 75 * 1024 * 1024);
 const maxBulkUploads = Math.max(1, Math.min(25, Number(process.env.AAASTREAMER_MAX_BULK_UPLOADS || 12) || 12));
 const cwd = process.cwd();
@@ -7071,7 +7072,7 @@ app.post('/api/streams/:streamId/restream/stop', requireBroadcaster, (req, res) 
   res.json({ success: true, streamId: req.params.streamId, state: 'stopping' });
 });
 
-app.listen(port, () => {
+app.listen(port, bindHost, () => {
   ensureDataStore();
   ensureContinuousOnDemandRelays();
   refreshJellyfinNowPlaying().catch(() => {});
@@ -7080,5 +7081,5 @@ app.listen(port, () => {
     runSchedulerTick();
     ensureContinuousOnDemandRelays();
   }, 30000).unref();
-  console.log(`AAAStreamer listening on ${port}`);
+  console.log(`AAAStreamer listening on ${bindHost}:${port}`);
 });
