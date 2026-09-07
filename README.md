@@ -148,7 +148,8 @@ URL through the configured service identity, such as a TappedIn account on
 
 The Linux server installer is `scripts/install-aaastreamer-server.sh`. It
 creates a service account, installs dependencies, pulls the repository, creates
-owned data/media/upload folders under `/var/lib/aaastreamer` by default, writes
+the app under `/opt/aaastreamer/app`, creates owned data/media/upload folders
+under `/var/lib/aaastreamer` by default, writes
 `/etc/aaastreamer/aaastreamer.env`, and creates native systemd services for both
 the AAAStreamer API and MediaMTX RTMP/HLS engine. MediaMTX is pinned to a known
 release and its downloaded archive is checked against the checksum published

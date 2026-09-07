@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_USER="${APP_USER:-aaastreamer}"
-APP_DIR="${APP_DIR:-/opt/aaastreamer}"
+APP_DIR="${APP_DIR:-/opt/aaastreamer/app}"
 APP_PORT="${APP_PORT:-8095}"
 DATA_DIR="${DATA_DIR:-/var/lib/aaastreamer}"
 MEDIA_DIR="${MEDIA_DIR:-${DATA_DIR}/media}"
